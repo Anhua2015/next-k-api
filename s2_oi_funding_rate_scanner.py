@@ -2,8 +2,8 @@
 """
 OI持续放大 + 费率由正转负 扫描器
 - main.py 定时：每整点后第 5 分钟 (xx:05, Asia/Shanghai)；亦可手动高频跑测
-- 检测: OI持续放大(4段递增, 总涨幅>8%) + 费率由正转负
-- 去重: 同一币种24小时内只推一次
+- 检测: OI 四段首尾抬升 + 费率由非负→足够负（见 MIN_CURR_FR_FOR_FLIP）
+- 费率快照带时间戳；旧版扁平快照 / 快照间隔过长时跳过一期对比，避免部署或久置后一批假阳性
 - 纯API零成本
 """
 
@@ -29,6 +29,11 @@ MIN_OI_CHANGE_PCT = 8       # OI总涨幅最低8%
 MIN_VOLUME_USDT = 0  # 无门槛，全扫
 MIN_FR_PERIODS_POSITIVE = 2  # 转负前至少2期为正
 DEDUP_HOURS = 24             # 去重窗口24小时
+
+# 费率「刚转负」防噪：当前费率须明显为负（过滤 -0.00001 级微负）
+MIN_CURR_FR_FOR_FLIP = -0.0001
+# 距上次写入快照超过此时长则只做刷新、不做跨期对比（避免停机/旧文件后一次扫出几十上百条）
+SNAPSHOT_MAX_GAP_HOURS = 8
 
 # ============ 加载TG配置 ============
 def load_env():
@@ -97,15 +102,39 @@ def mark_alerted(symbol, history):
 
 # ============ 费率快照 ============
 def load_fr_snapshot():
-    if FR_SNAPSHOT_FILE.exists():
-        try:
-            return json.loads(FR_SNAPSHOT_FILE.read_text())
-        except:
-            pass
-    return {}
+    """
+    返回 (rates_dict, _saved_at_iso_or_None, kind)
+    kind: "v2" | "legacy" | "empty"
+    legacy = 旧版纯 {SYMBOL: rate}，无时间戳，易在部署后与当前费率差一档导致满屏「转负」。
+    """
+    if not FR_SNAPSHOT_FILE.exists():
+        return {}, None, "empty"
+    try:
+        raw = json.loads(FR_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}, None, "empty"
+    if not isinstance(raw, dict):
+        return {}, None, "empty"
+    if "rates" in raw and isinstance(raw["rates"], dict):
+        return raw["rates"], raw.get("_saved_at"), "v2"
+    # 扁平：视为 legacy（全是合约名键）
+    if raw:
+        return raw, None, "legacy"
+    return {}, None, "empty"
 
-def save_fr_snapshot(snapshot):
-    FR_SNAPSHOT_FILE.write_text(json.dumps(snapshot))
+
+def save_fr_snapshot(rates: dict):
+    """写入带 _saved_at 的快照，供下一轮对比与间隔判断。"""
+    payload = {
+        "_saved_at": datetime.now(CST).isoformat(),
+        "rates": rates,
+    }
+    tmp = FR_SNAPSHOT_FILE.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    tmp.replace(FR_SNAPSHOT_FILE)
 
 # ============ 核心扫描 ============
 def scan():
@@ -137,24 +166,44 @@ def scan():
     except:
         fr_current = {}
     
-    # 4. 加载上次快照，对比找"刚转负"的
-    prev_snapshot = load_fr_snapshot()
-    
-    # 保存本次快照(供下次对比)
+    # 4. 加载上次快照，对比找"刚转负"的（先写本轮快照，再与内存中的 prev 对比）
+    prev_snapshot, prev_saved_at, snap_kind = load_fr_snapshot()
     save_fr_snapshot(fr_current)
-    
+
     if not prev_snapshot:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 首次运行，保存快照，下次开始对比")
         return []
-    
-    # 找出: 上次>=0, 这次<0 的币
+
+    if snap_kind == "legacy" or prev_saved_at is None:
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] 费率快照为旧版或无时间戳，"
+            f"跳过本期转负检测（避免部署/仓库旧快照导致一批假阳性），已写入新版快照"
+        )
+        return []
+
+    try:
+        prev_dt = datetime.fromisoformat(prev_saved_at.replace("Z", "+00:00"))
+        if prev_dt.tzinfo is None:
+            prev_dt = prev_dt.replace(tzinfo=CST)
+        gap_sec = (datetime.now(CST) - prev_dt.astimezone(CST)).total_seconds()
+    except Exception:
+        gap_sec = SNAPSHOT_MAX_GAP_HOURS * 3600 + 1
+
+    if gap_sec > SNAPSHOT_MAX_GAP_HOURS * 3600:
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] 距上次快照 {gap_sec / 3600:.1f}h "
+            f"> {SNAPSHOT_MAX_GAP_HOURS}h，跳过本期转负检测，已刷新"
+        )
+        return []
+
+    # 找出: 上次>=0, 本次明显为负（过滤结算后微负噪声）
     just_turned_negative = []
     for sym in active:
         prev_fr = prev_snapshot.get(sym)
         curr_fr = fr_current.get(sym)
         if prev_fr is None or curr_fr is None:
             continue
-        if prev_fr >= 0 and curr_fr < 0:
+        if prev_fr >= 0 and curr_fr <= MIN_CURR_FR_FOR_FLIP:
             just_turned_negative.append(sym)
     
     if not just_turned_negative:
