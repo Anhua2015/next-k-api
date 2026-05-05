@@ -42,6 +42,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 临时关闭：s6 期货模拟盘定时任务（恢复时改为 True，并取消前端对应区块 hidden）
+S6_FUTURES_ALPHA_SCHEDULER_ENABLED = False
+
 
 # ============== Asset Types & Symbols ==============
 
@@ -497,18 +500,24 @@ async def lifespan(app: FastAPI):
         minute=5,
         id="s2_oi_funding_rate_scanner",
     )
-    accumulation_scheduler.add_job(
-        run_s6_futures_alpha_task,
-        "cron",
-        minute=25,
-        id="s6_futures_alpha_autonomous_trading",
-    )
+    if S6_FUTURES_ALPHA_SCHEDULER_ENABLED:
+        accumulation_scheduler.add_job(
+            run_s6_futures_alpha_task,
+            "cron",
+            minute=25,
+            id="s6_futures_alpha_autonomous_trading",
+        )
     accumulation_scheduler.start()
     app.state.accumulation_scheduler = accumulation_scheduler
+    s6_cron_log = (
+        "s6_futures_alpha 每整点后 25 分 (xx:25)"
+        if S6_FUTURES_ALPHA_SCHEDULER_ENABLED
+        else "s6_futures_alpha 定时已暂停"
+    )
     logger.info(
         "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, oi 每小时 :30; "
         "s2_oi_funding_rate_scanner 每整点后 5 分 (xx:05); "
-        "s6_futures_alpha 每整点后 25 分 (xx:25)"
+        + s6_cron_log
     )
 
     yield
