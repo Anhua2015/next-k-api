@@ -20,7 +20,7 @@ import sys
 import time
 import requests
 import sqlite3
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -56,7 +56,7 @@ OI_RADAR_SNAPSHOT_PATH = Path(db_dir) / "oi_radar_snapshot.json"
 
 
 def _persist_oi_radar_snapshot(payload: Dict[str, Any]) -> None:
-    """供 HTTP 快速读取；定时子进程与后台 refresh 写入同一路径。"""
+    """供 GET /api/accumulation/oi-radar 读盘；定时任务与后台 refresh 写入同一路径。"""
     if not payload.get("ok"):
         return
     tmp = OI_RADAR_SNAPSHOT_PATH.with_suffix(".json.tmp")
@@ -70,6 +70,7 @@ def _persist_oi_radar_snapshot(payload: Dict[str, Any]) -> None:
     except Exception as e:
         print(f"⚠️ OI 快照写入失败: {e}")
 
+
 # 收筹标的池参数
 MIN_SIDEWAYS_DAYS = 45        # 至少横盘45天
 MAX_RANGE_PCT = 80            # 横盘期价格波动<80%（宽松点，庄家盘波动可以大）
@@ -82,6 +83,156 @@ MIN_OI_USD = 2_000_000        # 最低OI门槛 $2M
 
 # 放量突破参数
 VOL_BREAKOUT_MULT = 3.0       # 当日Vol > 3x均值 = 放量
+
+# 热度+收筹「方案C」：SMC 近似优先，失败则用箱体下半区 + ATR 加宽止损
+BOX_STOP_ATR_MULT = 1.5       # 止损距箱底：max(2%, min(8%, 1.5*ATR%))
+
+
+def calculate_smc_zone(
+    data_list: List[Dict[str, float]],
+    p_low: float,
+    *,
+    current_px: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    SMC 启发式：Discount(50%) + 看涨 FVG + 突破前阴线 OB → 参考入场带与止损。
+    current_px 若给出（如 ticker 最新价），用于失效判定；否则用最后一根日线收盘。
+    """
+    if len(data_list) < 5 or p_low <= 0:
+        return None
+
+    recent_k = data_list[-7:]
+    p_high = max(k["high"] for k in recent_k)
+    if p_high <= p_low:
+        return None
+
+    p_eq = p_low + (p_high - p_low) * 0.5
+
+    fvg_top: Optional[float] = None
+    fvg_bottom: Optional[float] = None
+    breakout_idx = -1
+
+    for i in range(len(data_list) - 2, max(0, len(data_list) - 15), -1):
+        k1, k2, k3 = data_list[i - 1], data_list[i], data_list[i + 1]
+        if k2["open"] > 0 and (k2["close"] - k2["open"]) / k2["open"] > 0.04:
+            if k3["low"] > k1["high"]:
+                fvg_bottom = k1["high"]
+                fvg_top = k3["low"]
+                breakout_idx = i
+                break
+
+    ob_bottom: Optional[float] = None
+    if breakout_idx != -1:
+        for j in range(breakout_idx - 1, max(-1, breakout_idx - 5), -1):
+            k = data_list[j]
+            if k["close"] < k["open"]:
+                ob_bottom = k["low"]
+                break
+
+    if fvg_top and ob_bottom is not None:
+        entry_top = min(p_eq, fvg_top)
+        entry_bottom = ob_bottom
+        curr_price = float(current_px) if current_px is not None else data_list[-1]["close"]
+        if curr_price < entry_bottom:
+            return None
+        if entry_top > entry_bottom:
+            return {
+                "entry_top": entry_top,
+                "entry_bottom": entry_bottom,
+                "stop_loss": entry_bottom * 0.98,
+                "source": "SMC",
+            }
+    return None
+
+
+def _daily_atr_pct(data_list: List[Dict[str, float]], period: int = 14) -> float:
+    """基于日线 OHLC 的 TR/收盘 均值，作百分比止损加宽用。"""
+    if len(data_list) < 2:
+        return 0.02
+    trs: List[float] = []
+    for i in range(1, len(data_list)):
+        h, l = data_list[i]["high"], data_list[i]["low"]
+        pc = data_list[i - 1]["close"]
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        cl = data_list[i]["close"]
+        if cl and cl > 0:
+            trs.append(tr / cl)
+    if not trs:
+        return 0.02
+    window = trs[-period:] if len(trs) >= period else trs
+    avg = sum(window) / len(window)
+    return max(avg, 1e-6)
+
+
+def accumulation_box_fallback(
+    low_p: float,
+    high_p: float,
+    atr_pct: float,
+) -> Optional[Dict[str, Any]]:
+    """箱体下半（折扣）为参考接筹带，止损在箱底下沿外加 ATR。"""
+    if low_p <= 0 or high_p <= 0 or high_p < low_p:
+        return None
+    mid = low_p + (high_p - low_p) * 0.5
+    eps = max(0.02, min(0.08, BOX_STOP_ATR_MULT * atr_pct))
+    return {
+        "entry_bottom": low_p,
+        "entry_top": mid,
+        "stop_loss": low_p * (1 - eps),
+        "source": "箱体",
+    }
+
+
+def resolve_hot_pool_zone_scheme_c(
+    symbol: str,
+    low_price: float,
+    high_price: float,
+    last_price: float,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    方案 C：先 SMC（日线）；若无或非失效则用箱体 fallback。
+    返回 (zone_dict 或 None, reason: smc|box|none)。
+    """
+    kl = api_get("/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": 60})
+    if not kl or len(kl) < 5:
+        return None, "none"
+
+    data_list: List[Dict[str, float]] = []
+    for k in kl:
+        data_list.append({
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4]),
+        })
+
+    atr_pct = _daily_atr_pct(data_list)
+
+    cur = last_price if last_price and last_price > 0 else None
+
+    if low_price > 0:
+        smc = calculate_smc_zone(data_list, low_price, current_px=cur)
+        if smc:
+            return smc, "smc"
+
+    if low_price > 0 and high_price > 0:
+        box = accumulation_box_fallback(low_price, high_price, atr_pct)
+        if box:
+            return box, "box"
+
+    return None, "none"
+
+
+def format_scheme_c_zone_line(zone: Dict[str, Any]) -> str:
+    """单行展示参考区间与止损（Telegram）。"""
+    bt = zone["entry_bottom"]
+    tp = zone["entry_top"]
+    sl = zone["stop_loss"]
+    src = zone.get("source", "")
+    dec = 4 if tp > 0.01 else 6
+    label = "SMC近似" if src == "SMC" else "箱体下半"
+    return (
+        f"📍 {label}: ${bt:.{dec}f} ~ ${tp:.{dec}f} · 止损 ${sl:.{dec}f}"
+    )
 
 
 def api_get(endpoint, params=None):
@@ -645,14 +796,11 @@ def build_fuel_report(fuel_targets, squeeze_targets):
     
     return "\n".join(lines)
 
-
 def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dict[str, Any]:
-    """综合扫描：OI + 费率 + 收筹（与定时任务 accumulation_radar.py oi 一致）。
-    notify=False 时不调用 Telegram，供 HTTP 接口只读展示。
-    """
+    """综合扫描：OI + 费率 + 收筹。notify=False 时不推 Telegram，供 HTTP 刷新写快照。"""
     # === 综合扫描：OI + 费率 + 收筹 三维合一 ===
     watchlist = load_watchlist_symbols(conn)
-    
+
     if not watchlist:
         print("⚠️ 标的池为空，先运行 pool 模式")
         return {"ok": False, "error": "watchlist_empty", "message": "标的池为空，先运行 pool 模式"}
@@ -736,12 +884,22 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             heat_map[coin] = heat_map.get(coin, 0) + 20  # 双重信号bonus
         print(f"🔥🔥 双重热度: {dual_heat}")
     
-    # 3. 从DB读收筹数据
+    # 3. 从DB读收筹数据（含横盘高低点，供热度+收筹方案C区间）
     c2 = conn.cursor()
-    c2.execute("SELECT symbol, score, sideways_days, range_pct, avg_vol, status FROM watchlist")
+    c2.execute(
+        "SELECT symbol, score, sideways_days, range_pct, avg_vol, status, low_price, high_price FROM watchlist"
+    )
     pool_map = {}
     for row in c2.fetchall():
-        pool_map[row[0]] = {"pool_score": row[1], "sideways_days": row[2], "range_pct": row[3], "avg_vol": row[4], "status": row[5]}
+        pool_map[row[0]] = {
+            "pool_score": row[1],
+            "sideways_days": row[2],
+            "range_pct": row[3],
+            "avg_vol": row[4],
+            "status": row[5],
+            "low_price": row[6],
+            "high_price": row[7],
+        }
     
     # 3. 扫OI（标的池中放量的 + Top100）
     scan_syms = set()
@@ -800,12 +958,15 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         coin_data[sym] = {
             "coin": coin, "sym": sym,
             "px_chg": tk["px_chg"], "vol": tk["vol"],
+            "price": tk["price"],
             "fr_pct": fr_pct, "d6h": d6h,
             "oi_usd": oi_usd, "est_mcap": est_mcap,
             "sw_days": sw_days, "pool_sc": pool_sc,
             "in_pool": bool(pool), "heat": heat,
             "in_cg": coin in cg_trending,
             "vol_surge": coin in vol_surge_coins,
+            "low_price": float(pool.get("low_price") or 0) if pool else 0.0,
+            "high_price": float(pool.get("high_price") or 0) if pool else 0.0,
         }
     
     # ═══════════════════════════════════════
@@ -947,7 +1108,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     
     now = datetime.now(timezone(timedelta(hours=8)))
     lines = [
-        f"📊 **收筹池 · OI 监控** 三策略+热度",
+        f"🏦 **庄家雷达** 三策略+热度",
         f"⏰ {now.strftime('%Y-%m-%d %H:%M')} CST",
     ]
     
@@ -1008,14 +1169,40 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     
     # ═══ 值得关注提醒 ═══
     highlights = []
+    hot_pool_signals: List[Dict[str, Any]] = []
     
-    # 热度+收筹池重叠 = 最强信号（放最前面！热度领先OI）
+    # 热度+收筹池重叠 = 最强信号（放最前面！热度领先OI）— 取前3名；方案C：SMC 优先，否则箱体+ATR 止损
     hot_pool = [d for d in coin_data.values() if d["heat"] > 0 and d["in_pool"]]
-    for s in sorted(hot_pool, key=lambda x: x["heat"], reverse=True)[:2]:
+    for s in sorted(hot_pool, key=lambda x: x["heat"], reverse=True)[:3]:
         tags = []
         if s["in_cg"]: tags.append("CG热搜")
         if s["vol_surge"]: tags.append("放量")
-        highlights.append(f"🔥💤 {s['coin']} 热度({'+'.join(tags)})+收筹{s['sw_days']}天=OI将涨")
+        base = f"🔥💤 {s['coin']} 热度({'+'.join(tags)})+收筹{s['sw_days']}天=OI将涨"
+        zone: Optional[Dict[str, Any]] = None
+        zone_reason = "none"
+        if s.get("low_price", 0) > 0:
+            zone, zone_reason = resolve_hot_pool_zone_scheme_c(
+                s["sym"],
+                s["low_price"],
+                s["high_price"],
+                float(s.get("price") or 0),
+            )
+        hot_pool_signals.append({
+            "coin": s["coin"],
+            "symbol": s["sym"],
+            "heat": s["heat"],
+            "tags": list(tags),
+            "sideways_days": s["sw_days"],
+            "low_price": s["low_price"],
+            "high_price": s["high_price"],
+            "price": s["price"],
+            "zone": zone,
+            "zone_reason": zone_reason,
+        })
+        if zone:
+            highlights.append(base + "\n      " + format_scheme_c_zone_line(zone))
+        else:
+            highlights.append(base)
     
     # 热度+OI已经在涨 = 正在发生
     hot_oi = [d for d in coin_data.values() if d["heat"] > 0 and d["d6h"] > 5]
@@ -1050,10 +1237,10 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         if s["coin"] not in [h.split(" ")[1] for h in highlights]:
             highlights.append(f"💎 {s['coin']} 低市值{mcap_str(s['est_mcap'])}+OI{s['d6h']:+.0f}%，埋伏首选")
     
-    if highlights:
-        lines.append(f"\n💡 **值得关注**")
-        for h in highlights[:7]:
-            lines.append(f"  {h}")
+        if highlights:
+            lines.append(f"\n💡 **值得关注**")
+            for h in highlights[:15]:
+                lines.append(f"  {h}")
     
     # 图例说明
     lines.append(f"\n📖 **图例**")
@@ -1065,18 +1252,20 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     payload = {
         "ok": True,
         "generated_at_cst": now.strftime("%Y-%m-%d %H:%M") + " CST",
-        "highlights": highlights[:7],
+        "highlights": highlights[:15],
+        "hot_pool_signals": hot_pool_signals,
+        "report_markdown": report,
         "hot_coins": hot_coins[:16],
         "chase": chase[:16],
         "combined": combined[:16],
         "ambush": ambush[:16],
         "coin_data": list(coin_data.values()),
-        "report_markdown": report,
     }
     _persist_oi_radar_snapshot(payload)
     if notify:
         send_telegram(report)
     return payload
+
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "full"
