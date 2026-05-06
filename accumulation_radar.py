@@ -589,404 +589,256 @@ MIN_OI_USD = 2_000_000        # 最低OI门槛 $2M
 # 放量突破参数
 VOL_BREAKOUT_MULT = 3.0       # 当日Vol > 3x均值 = 放量
 
-# 热度+收筹「方案C」：仅 30m 谐波形态；止损按区间内下沿 + ATR 加宽
-BOX_STOP_ATR_MULT = 1.5       # max(2%, min(8%, 1.5×30m ATR%)) 用于止损距下沿
-SCHEME_C_FVG_INTERVAL = "30m"
-SCHEME_C_FVG_KLINE_LIMIT = 60
-SCHEME_C_FVG_LOOKBACK = 12
-SCHEME_C_FVG_VWAP_MAX_DEV_PCT = 0.01   # FVG 中轴与 VWAP 偏离 ≤ 此比例视为共振
-SCHEME_C_FVG_MIN_WIDTH_PCT = 0.05      # 与 V8 一致：宽度 ≥ 该百分数（÷100 后与 mid 比）
-SCHEME_C_FVG_ABOVE_VWAP_PCT = 0.01     # 进场带上沿：不超过 VWAP×(1+此值)
-SCHEME_C_HARMONIC_PIVOT_W = 2          # 局部拐点窗口（左右各 N 根）
-SCHEME_C_HARMONIC_MAX_AGE = 40         # D 点距离当前最多 N 根 K
-SCHEME_C_HARMONIC_TOL = 0.10           # 关键比例容差
+# 热度+收筹「方案C」：30m 多因子共振区间（价值/VWAP + 成交密集区 + 回撤结构）
+BOX_STOP_ATR_MULT = 1.5
+SCHEME_C_INTERVAL = "30m"
+SCHEME_C_KLINE_LIMIT = 80
+SCHEME_C_MIN_KLINES = 40
+SCHEME_C_MIN_SCORE = 65.0
 
 
-def _fvg_near_vwap_scheme_c(fvg: Dict[str, float], vwap: float, max_dev_pct: float) -> bool:
-    """FVG 中轴与 VWAP 偏离 ≤ max_dev_pct 视为共振（同 btc_perp_signal._fvg_near_vwap）。"""
-    if not fvg or not vwap or vwap <= 0:
-        return False
-    mid = fvg.get("mid")
-    if mid is None:
-        return False
-    return abs(mid - vwap) / vwap <= max_dev_pct
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
 
 
-def _find_latest_fvgs_ohlc(
-    rows: List[Dict[str, float]],
-    current_price: float,
-    lookback: int,
-) -> Dict[str, Optional[Dict[str, float]]]:
-    """最近 lookback 组三 K 扫描看涨/看跌 FVG（未回补）；逻辑对齐 btc_perp_signal.find_latest_fvgs。"""
-    n = len(rows)
-    if n < 3:
-        return {"bull": None, "bear": None}
-    end = n - 3
-    start = max(0, end - lookback + 1)
-    if end < start:
-        return {"bull": None, "bear": None}
-    fvg_bull: Optional[Dict[str, float]] = None
-    fvg_bear: Optional[Dict[str, float]] = None
-    for i in range(end, start - 1, -1):
-        k1, k3 = rows[i], rows[i + 2]
-        h1, l1 = float(k1["high"]), float(k1["low"])
-        h3, l3 = float(k3["high"]), float(k3["low"])
-        if fvg_bull is None and h1 < l3 and current_price >= h1:
-            fvg_bull = {"top": l3, "mid": (l3 + h1) / 2, "bottom": h1}
-        if fvg_bear is None and l1 > h3 and current_price <= l1:
-            fvg_bear = {"top": l1, "mid": (l1 + h3) / 2, "bottom": h3}
-        if fvg_bull is not None and fvg_bear is not None:
-            break
-    return {"bull": fvg_bull, "bear": fvg_bear}
+def _intraday_atr(rows: List[Dict[str, float]], period: int = 14) -> float:
+    if len(rows) < 2:
+        return 0.0
+    trs: List[float] = []
+    for i in range(1, len(rows)):
+        h = float(rows[i]["high"])
+        l = float(rows[i]["low"])
+        pc = float(rows[i - 1]["close"])
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+    if not trs:
+        return 0.0
+    window = trs[-period:] if len(trs) >= period else trs
+    return sum(window) / len(window)
 
 
-def _volume_profile_val_vah(rows: List[Dict[str, float]]) -> Tuple[Optional[float], Optional[float]]:
-    """按收盘价分桶的成交量分布，取 70% 价值区上下沿（近似 btc_perp_signal VP）。"""
+def _volume_profile_val_poc_vah(rows: List[Dict[str, float]]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """按收盘价分桶估计 VAL/POC/VAH。"""
     if len(rows) < 3:
-        return None, None
-    lo = min(r["low"] for r in rows)
-    hi = max(r["high"] for r in rows)
+        return None, None, None
+    lo = min(float(r["low"]) for r in rows)
+    hi = max(float(r["high"]) for r in rows)
     if hi <= lo:
-        return None, None
+        return None, None, None
     n_bins = 50
-    bin_w = (hi - lo) / n_bins
+    span = hi - lo
+    mids = [lo + (i + 0.5) * span / n_bins for i in range(n_bins)]
     vol_by_bin = [0.0] * n_bins
-    mids = [lo + (i + 0.5) * bin_w for i in range(n_bins)]
     for r in rows:
         c = float(r["close"])
-        idx = int((c - lo) / (hi - lo) * n_bins)
+        idx = int((c - lo) / span * n_bins)
         idx = max(0, min(n_bins - 1, idx))
         vol_by_bin[idx] += float(r["volume"])
     poc_idx = max(range(n_bins), key=lambda i: vol_by_bin[i])
-    target_vol = sum(vol_by_bin) * 0.7
-    current_vol = vol_by_bin[poc_idx]
+    target = sum(vol_by_bin) * 0.7
+    acc = vol_by_bin[poc_idx]
     up_idx, down_idx = poc_idx + 1, poc_idx - 1
-    while current_vol < target_vol and (up_idx < n_bins or down_idx >= 0):
+    while acc < target and (up_idx < n_bins or down_idx >= 0):
         vu = vol_by_bin[up_idx] if up_idx < n_bins else -1.0
         vd = vol_by_bin[down_idx] if down_idx >= 0 else -1.0
         if vu > vd:
             if vu > 0:
-                current_vol += vu
+                acc += vu
             up_idx += 1
         else:
             if vd > 0:
-                current_vol += vd
+                acc += vd
             down_idx -= 1
         if up_idx >= n_bins and down_idx < 0:
             break
-    vah_idx = min(up_idx, n_bins - 1)
     val_idx = max(down_idx, 0)
-    return mids[val_idx], mids[vah_idx]
+    vah_idx = min(up_idx, n_bins - 1)
+    return mids[val_idx], mids[poc_idx], mids[vah_idx]
 
 
-def _atr_pct_from_intraday(rows: List[Dict[str, float]], period: int = 14) -> float:
-    """日内 K 序列的 TR/收盘 百分比均值，用于止损加宽。"""
-    if len(rows) < 2:
-        return 0.02
-    trs: List[float] = []
-    for i in range(1, len(rows)):
-        h, l = float(rows[i]["high"]), float(rows[i]["low"])
-        pc = float(rows[i - 1]["close"])
-        tr = max(h - l, abs(h - pc), abs(l - pc))
-        cl = float(rows[i]["close"])
-        if cl > 0:
-            trs.append(tr / cl)
-    if not trs:
-        return 0.02
-    window = trs[-period:] if len(trs) >= period else trs
-    avg = sum(window) / len(window)
-    return max(avg, 1e-6)
+def _ema(values: List[float], period: int) -> List[float]:
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    out = [float(values[0])]
+    for v in values[1:]:
+        out.append(alpha * float(v) + (1.0 - alpha) * out[-1])
+    return out
 
 
-def _extract_pivots(rows: List[Dict[str, float]], w: int = 2) -> List[Dict[str, Any]]:
-    """提取简化分形拐点（high/low）。"""
-    pivots: List[Dict[str, Any]] = []
-    n = len(rows)
-    if n < (2 * w + 1):
-        return pivots
-    for i in range(w, n - w):
-        hi = float(rows[i]["high"])
-        lo = float(rows[i]["low"])
-        is_h = True
-        is_l = True
-        for j in range(i - w, i + w + 1):
-            if j == i:
-                continue
-            if hi <= float(rows[j]["high"]):
-                is_h = False
-            if lo >= float(rows[j]["low"]):
-                is_l = False
-            if not is_h and not is_l:
-                break
-        if is_h:
-            pivots.append({"idx": i, "price": hi, "type": "H"})
-        if is_l:
-            pivots.append({"idx": i, "price": lo, "type": "L"})
-    pivots.sort(key=lambda x: (int(x["idx"]), 0 if x["type"] == "L" else 1))
-    # 连续同类型只保留更极端者，减少噪声
-    merged: List[Dict[str, Any]] = []
-    for p in pivots:
-        if not merged:
-            merged.append(p)
-            continue
-        last = merged[-1]
-        if p["type"] != last["type"]:
-            merged.append(p)
-            continue
-        if p["type"] == "L":
-            if float(p["price"]) < float(last["price"]):
-                merged[-1] = p
-        else:
-            if float(p["price"]) > float(last["price"]):
-                merged[-1] = p
-    return merged
-
-
-def _in_range(v: float, lo: float, hi: float) -> bool:
-    return lo <= v <= hi
-
-
-def _try_match_bullish_harmonic(points: List[Dict[str, Any]], tol: float) -> Optional[Dict[str, Any]]:
-    """
-    输入最近 5 个交替拐点，按 L-H-L-H-L 识别多头谐波。
-    points: X,A,B,C,D
-    """
-    if len(points) != 5:
-        return None
-    x, a, b, c, d = points
-    if [x["type"], a["type"], b["type"], c["type"], d["type"]] != ["L", "H", "L", "H", "L"]:
-        return None
-    px = float(x["price"])
-    pa = float(a["price"])
-    pb = float(b["price"])
-    pc = float(c["price"])
-    pd = float(d["price"])
-    xa = pa - px
-    ab = pa - pb
-    bc = pc - pb
-    cd = pc - pd
-    if xa <= 0 or ab <= 0 or bc <= 0 or cd <= 0:
-        return None
-    r_ab = ab / xa
-    r_bc = bc / ab
-    r_cd = cd / bc
-    r_ad = (pa - pd) / xa
-    r_abcd = cd / ab
-
-    patterns: List[Tuple[str, bool, float]] = []
-    patterns.append((
-        "Gartley",
-        abs(r_ab - 0.618) <= tol and _in_range(r_bc, 0.382, 0.886) and _in_range(r_cd, 1.13, 1.618) and abs(r_ad - 0.786) <= tol,
-        abs(r_ab - 0.618) + abs(r_ad - 0.786),
-    ))
-    patterns.append((
-        "Bat",
-        _in_range(r_ab, 0.382, 0.50) and _in_range(r_bc, 0.382, 0.886) and _in_range(r_cd, 1.618, 2.618) and abs(r_ad - 0.886) <= tol,
-        abs(r_ad - 0.886),
-    ))
-    patterns.append((
-        "Butterfly",
-        abs(r_ab - 0.786) <= tol and _in_range(r_bc, 0.382, 0.886) and _in_range(r_cd, 1.618, 2.24) and _in_range(r_ad, 1.27, 1.618),
-        abs(r_ab - 0.786),
-    ))
-    patterns.append((
-        "Crab",
-        _in_range(r_ab, 0.382, 0.618) and _in_range(r_bc, 0.382, 0.886) and _in_range(r_cd, 2.24, 3.618) and _in_range(r_ad, 1.45, 1.85),
-        abs(r_ad - 1.618),
-    ))
-    patterns.append((
-        "AB=CD",
-        _in_range(r_bc, 0.382, 0.886) and _in_range(r_abcd, 0.90, 1.10),
-        abs(r_abcd - 1.0),
-    ))
-
-    hits = [p for p in patterns if p[1]]
-    if not hits:
-        return None
-    best = sorted(hits, key=lambda x: x[2])[0]
-    return {
-        "pattern": best[0],
-        "score": round(max(0.0, 1.0 - best[2]), 3),
-        "X": x,
-        "A": a,
-        "B": b,
-        "C": c,
-        "D": d,
-    }
-
-
-def try_resolve_harmonic_30m_zone(
-    symbol: str,
+def _score_zone_candidate(
+    *,
+    entry_bottom: float,
+    entry_top: float,
+    cur_px: float,
+    atr_abs: float,
+    val: Optional[float],
     low_price: float,
-    last_price: float,
-) -> Optional[Dict[str, Any]]:
-    """30m 谐波（多头）参考区间：识别到 XABCD 后，以 D 点附近做接筹带。"""
-    kl = api_get(
-        "/fapi/v1/klines",
-        {"symbol": symbol, "interval": SCHEME_C_FVG_INTERVAL, "limit": SCHEME_C_FVG_KLINE_LIMIT},
-    )
-    if not kl or len(kl) < 30:
-        return None
-    rows: List[Dict[str, float]] = []
-    for k in kl:
-        rows.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-        })
-    cur_px = float(last_price) if last_price and last_price > 0 else float(rows[-1]["close"])
-    pivots = _extract_pivots(rows, SCHEME_C_HARMONIC_PIVOT_W)
-    if len(pivots) < 5:
-        return None
+    ema20: float,
+    ema20_prev: float,
+) -> float:
+    if entry_bottom <= 0 or entry_top <= entry_bottom or cur_px <= 0:
+        return 0.0
+    mid = (entry_bottom + entry_top) * 0.5
+    dist_pct = (cur_px - mid) / cur_px * 100.0
+    width_pct = (entry_top - entry_bottom) / mid * 100.0 if mid > 0 else 0.0
 
-    # 从最近往前找，优先最新完成的 D 点（low）
-    for i in range(len(pivots) - 1, 3, -1):
-        seq = pivots[i - 4:i + 1]
-        hit = _try_match_bullish_harmonic(seq, SCHEME_C_HARMONIC_TOL)
-        if not hit:
-            continue
-        d_idx = int(hit["D"]["idx"])
-        if (len(rows) - 1 - d_idx) > SCHEME_C_HARMONIC_MAX_AGE:
-            continue
-        d_price = float(hit["D"]["price"])
-        c_price = float(hit["C"]["price"])
-        if d_price <= 0 or c_price <= d_price:
-            continue
-        # 若现价已明显跌破 D，视为结构失效
-        if cur_px < d_price * 0.995:
-            continue
-        atr_pct = _atr_pct_from_intraday(rows)
-        eps = max(0.015, min(0.06, 1.2 * atr_pct))
-        entry_bottom = max(d_price, float(low_price) if low_price > 0 else d_price)
-        entry_top = d_price + (c_price - d_price) * 0.382
-        if entry_top <= entry_bottom:
-            entry_top = d_price + (c_price - d_price) * 0.236
-        if entry_top <= entry_bottom:
-            continue
-        return {
-            "entry_top": entry_top,
-            "entry_bottom": entry_bottom,
-            "stop_loss": d_price * (1 - eps),
-            "source": "HARM30m",
-            "harmonic_pattern": hit["pattern"],
-            "harmonic_score": hit["score"],
-        }
-    return None
+    # 距离分：希望区间在现价下方且不过远（目标约 1.2% 回踩）
+    if dist_pct < -0.2:
+        dist_score = 0.0
+    elif dist_pct <= 3.0:
+        dist_score = _clamp(20.0 - abs(dist_pct - 1.2) * 6.0, 0.0, 20.0)
+    else:
+        dist_score = _clamp(20.0 - (dist_pct - 3.0) * 3.0, 0.0, 20.0)
 
+    # 宽度分：太窄难挂单，太宽执行性差（目标 0.4%~3.0%）
+    if 0.4 <= width_pct <= 3.0:
+        width_score = 20.0
+    elif width_pct < 0.4:
+        width_score = _clamp(width_pct / 0.4 * 20.0, 0.0, 20.0)
+    else:
+        width_score = _clamp(20.0 - (width_pct - 3.0) * 4.0, 0.0, 20.0)
 
-def try_resolve_fvg_vwap_30m_zone(
-    symbol: str,
-    low_price: float,
-    last_price: float,
-) -> Optional[Dict[str, Any]]:
-    """
-    30m K 线：优先看涨 FVG + VWAP 共振；无 FVG 时回退 VWAP 参考区间。
-    连 VWAP 都无法构造时返回 None。
-    """
-    kl = api_get(
-        "/fapi/v1/klines",
-        {"symbol": symbol, "interval": SCHEME_C_FVG_INTERVAL, "limit": SCHEME_C_FVG_KLINE_LIMIT},
-    )
-    if not kl or len(kl) < 15:
-        return None
-    rows: List[Dict[str, float]] = []
-    for k in kl:
-        rows.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-        })
-    vol_sum = sum(r["volume"] for r in rows)
-    if vol_sum <= 0:
-        return None
-    vwap = sum(r["close"] * r["volume"] for r in rows) / vol_sum
-    cur_px = float(last_price) if last_price and last_price > 0 else float(rows[-1]["close"])
+    # 趋势分：30m EMA20 方向 + 现价相对 EMA20
+    trend_score = 0.0
+    trend_score += 10.0 if ema20 >= ema20_prev else 2.0
+    trend_score += 10.0 if cur_px >= ema20 else 4.0
 
-    fvgs = _find_latest_fvgs_ohlc(rows, cur_px, SCHEME_C_FVG_LOOKBACK)
-    bull = fvgs.get("bull") if fvgs else None
-    val, _ = _volume_profile_val_vah(rows)
-    atr_pct = _atr_pct_from_intraday(rows)
-    eps = max(0.02, min(0.08, BOX_STOP_ATR_MULT * atr_pct))
-    above_pct = SCHEME_C_FVG_ABOVE_VWAP_PCT
+    # 共振分：底部靠近收筹低点/价值区下沿
+    confluence = 0.0
+    if low_price > 0:
+        d = abs(entry_bottom - low_price) / low_price * 100.0
+        confluence += _clamp(10.0 - d * 2.0, 0.0, 10.0)
+    if val and val > 0:
+        d = abs(entry_bottom - val) / val * 100.0
+        confluence += _clamp(10.0 - d * 2.0, 0.0, 10.0)
 
-    if bull and _fvg_near_vwap_scheme_c(bull, vwap, SCHEME_C_FVG_VWAP_MAX_DEV_PCT):
-        mid = bull.get("mid") or 0.0
-        if mid > 0:
-            width_r = (bull["top"] - bull["bottom"]) / mid
-            if width_r >= SCHEME_C_FVG_MIN_WIDTH_PCT / 100.0:
-                if val is None:
-                    val = float(low_price) if low_price > 0 else bull["bottom"]
-                entry_low = max(val, bull["bottom"])
-                entry_high = min(bull["top"], vwap * (1 + above_pct))
-                if cur_px > vwap:
-                    entry_high = min(entry_high, cur_px)
-                if entry_low < entry_high:
-                    stop_loss = entry_low * (1 - eps)
-                    return {
-                        "entry_top": entry_high,
-                        "entry_bottom": entry_low,
-                        "stop_loss": stop_loss,
-                        "source": "FVG30m",
-                        "vwap": vwap,
-                    }
-
-    # 无有效 FVG 时回退 VWAP 参考区间
-    below_vwap = 0.005
-    entry_low = val if val is not None else (float(low_price) if low_price > 0 else vwap * (1 - below_vwap))
-    entry_low = min(entry_low, vwap * (1 - below_vwap))
-    entry_high = min(vwap * (1 + above_pct), cur_px if cur_px > 0 else vwap * (1 + above_pct))
-    if entry_low >= entry_high:
-        entry_low = vwap * (1 - below_vwap)
-        entry_high = vwap * (1 + below_vwap)
-    if entry_low >= entry_high:
-        return None
-    stop_loss = entry_low * (1 - eps)
-    return {
-        "entry_top": entry_high,
-        "entry_bottom": entry_low,
-        "stop_loss": stop_loss,
-        "source": "VWAP30m",
-        "vwap": vwap,
-    }
+    # 风险分：ATR 风险不要离谱
+    risk_score = 20.0
+    if atr_abs > 0:
+        risk_r = atr_abs / mid * 100.0 if mid > 0 else 0.0
+        if risk_r > 3.0:
+            risk_score = _clamp(20.0 - (risk_r - 3.0) * 5.0, 0.0, 20.0)
+    return dist_score + width_score + trend_score + confluence + risk_score
 
 
 def resolve_hot_pool_zone_scheme_c(
     symbol: str,
     low_price: float,
-    _high_price: float,
+    high_price: float,
     last_price: float,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    方案 C：仅 30m 谐波；未命中则不展示。
-    返回 (zone_dict 或 None, reason: harm30m|none)。
+    方案 C：30m 多因子共振区间。
+    候选 = VWAP+ATR / VAL~POC / 0.382~0.618 回撤，择优输出最高分。
     """
-    if low_price > 0:
-        lp = float(last_price) if last_price and last_price > 0 else 0.0
-        z_harm = try_resolve_harmonic_30m_zone(symbol, low_price, lp)
-        if z_harm:
-            return z_harm, "harm30m"
-    return None, "none"
+    kl = api_get(
+        "/fapi/v1/klines",
+        {"symbol": symbol, "interval": SCHEME_C_INTERVAL, "limit": SCHEME_C_KLINE_LIMIT},
+    )
+    if not kl or len(kl) < SCHEME_C_MIN_KLINES:
+        return None, "none"
+    rows: List[Dict[str, float]] = []
+    for k in kl:
+        rows.append({
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4]),
+            "volume": float(k[5]),
+        })
+    vol_sum = sum(float(r["volume"]) for r in rows)
+    if vol_sum <= 0:
+        return None, "none"
+    closes = [float(r["close"]) for r in rows]
+    cur_px = float(last_price) if last_price and last_price > 0 else closes[-1]
+    vwap = sum(float(r["close"]) * float(r["volume"]) for r in rows) / vol_sum
+    atr_abs = _intraday_atr(rows, 14)
+    atr_pct = (atr_abs / cur_px) if cur_px > 0 else 0.02
+    val, poc, _vah = _volume_profile_val_poc_vah(rows)
+    ema20_series = _ema(closes, 20)
+    ema20 = ema20_series[-1]
+    ema20_prev = ema20_series[-2] if len(ema20_series) >= 2 else ema20
+
+    # 候选 1: VWAP 回踩带
+    cands: List[Dict[str, Any]] = []
+    vw_bot = vwap - 0.35 * atr_abs
+    vw_top = vwap + 0.15 * atr_abs
+    cands.append({"name": "vwap_atr", "bottom": vw_bot, "top": vw_top})
+
+    # 候选 2: 成交密集承接（VAL~POC）
+    if val is not None and poc is not None and poc > val:
+        cands.append({"name": "val_poc", "bottom": val, "top": poc})
+
+    # 候选 3: 近端回撤带（0.382~0.618）
+    tail = rows[-40:] if len(rows) >= 40 else rows
+    sw_low = min(float(r["low"]) for r in tail)
+    sw_high = max(float(r["high"]) for r in tail)
+    if high_price > 0 and low_price > 0 and high_price > low_price:
+        sw_low = min(sw_low, float(low_price))
+        sw_high = max(sw_high, float(high_price))
+    if sw_high > sw_low:
+        rg = sw_high - sw_low
+        rb_bot = sw_low + 0.382 * rg
+        rb_top = sw_low + 0.618 * rg
+        cands.append({"name": "retrace_382_618", "bottom": rb_bot, "top": rb_top})
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = -1.0
+    for c in cands:
+        b = float(c["bottom"])
+        t = float(c["top"])
+        if b <= 0 or t <= b:
+            continue
+        # 区间上沿不高于现价太多（避免给到追价带）
+        if t > cur_px * 1.01:
+            t = cur_px * 1.01
+        if b >= t:
+            continue
+        s = _score_zone_candidate(
+            entry_bottom=b,
+            entry_top=t,
+            cur_px=cur_px,
+            atr_abs=atr_abs,
+            val=val,
+            low_price=float(low_price) if low_price > 0 else 0.0,
+            ema20=ema20,
+            ema20_prev=ema20_prev,
+        )
+        if s > best_score:
+            best_score = s
+            best = {"bottom": b, "top": t, "name": c["name"], "score": s}
+
+    if not best or best_score < SCHEME_C_MIN_SCORE:
+        return None, "none"
+
+    eps = max(0.02, min(0.08, BOX_STOP_ATR_MULT * max(atr_pct, 1e-6)))
+    zone = {
+        "entry_bottom": float(best["bottom"]),
+        "entry_top": float(best["top"]),
+        "stop_loss": float(best["bottom"]) * (1 - eps),
+        "source": "MIX30m",
+        "method": str(best["name"]),
+        "score": round(float(best["score"]), 1),
+    }
+    return zone, "mix30m"
 
 
 def format_scheme_c_zone_line(zone: Dict[str, Any]) -> str:
     """单行展示参考区间与止损（Telegram）。"""
-    bt = zone["entry_bottom"]
-    tp = zone["entry_top"]
-    sl = zone["stop_loss"]
-    src = zone.get("source", "")
+    bt = float(zone["entry_bottom"])
+    tp = float(zone["entry_top"])
+    sl = float(zone["stop_loss"])
     dec = 4 if tp > 0.01 else 6
-    if src == "HARM30m":
-        p = str(zone.get("harmonic_pattern") or "Harmonic")
-        label = f"谐波·30m({p})"
-    else:
-        label = "参考区间"
-    return (
-        f"📍 {label}: ${bt:.{dec}f} ~ ${tp:.{dec}f} · 止损 ${sl:.{dec}f}"
-    )
+    label = "30m共振"
+    method = zone.get("method")
+    score = zone.get("score")
+    extra = ""
+    if method:
+        extra += f" [{method}]"
+    if isinstance(score, (int, float)):
+        extra += f" {float(score):.0f}分"
+    return f"📍 {label}{extra}: ${bt:.{dec}f} ~ ${tp:.{dec}f} · 止损 ${sl:.{dec}f}"
 
 
 def api_get(endpoint, params=None):
@@ -1692,7 +1544,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             heat_map[coin] = heat_map.get(coin, 0) + 20  # 双重信号bonus
         print(f"🔥🔥 双重热度: {dual_heat}")
     
-    # 3. 从DB读收筹数据（含横盘高低点，供热度+收筹方案C谐波区间）
+    # 3. 从DB读收筹数据（含横盘高低点，供热度+收筹方案C多因子区间）
     c2 = conn.cursor()
     c2.execute(
         "SELECT symbol, score, sideways_days, range_pct, avg_vol, status, low_price, high_price FROM watchlist"
@@ -1980,7 +1832,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     hot_pool_signals: List[Dict[str, Any]] = []
     
     # 热度+收筹池重叠 = 最强信号（放最前面！热度领先OI）— 取前3名。
-    # 方案 C（30m 谐波区间）仍写入 hot_pool_signals → DB/热度看盘；「值得关注」正文不含区间细节，避免与看盘重复。
+    # 方案 C（30m 多因子区间）仍写入 hot_pool_signals → DB/热度看盘；「值得关注」正文不含区间细节，避免与看盘重复。
     hot_pool = [d for d in coin_data.values() if d["heat"] > 0 and d["in_pool"]]
     for s in sorted(hot_pool, key=lambda x: x["heat"], reverse=True)[:3]:
         tags = []
