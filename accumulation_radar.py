@@ -55,7 +55,7 @@ DB_PATH = Path(db_dir) / "accumulation.db"
 OI_RADAR_SNAPSHOT_PATH = Path(db_dir) / "oi_radar_snapshot.json"
 HEAT_ACCUM_RETENTION_DAYS = 7  # 含今天在内共 7 个日历日
 AMBUSH_WATCH_RETENTION_DAYS = 7  # 暗流 / 低市值埋伏看盘，与热度收筹一致
-AMBUSH_WATCH_TOP_N = 2  # 埋伏前 10 内命中后，每类只保留评分最高的前 N 名写入看盘
+AMBUSH_WATCH_TOP_N = 2  # 暗流 / 低市值：全埋伏榜（已按 total 降序）命中条件后取分数最高的前 N 条入库
 _LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
 
 
@@ -1733,19 +1733,19 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         for c in list(overlap_2)[:2]:
             highlights.append(f"⭐ {c} 追多+综合双榜上榜")
     
-    # 埋伏里OI暗流涌动 — 看盘与 SQLite 每类仅保留前 AMBUSH_WATCH_TOP_N 名（埋伏榜顺序即评分序）
+    # 埋伏里OI暗流 — 全埋伏榜（total 从高到低）中命中条件的取分数最高的前 N 名
     ambush_dark = [
         s
-        for s in ambush[:10]
+        for s in ambush
         if s["d6h"] > 2 and abs(s["px_chg"]) < 5
     ][:AMBUSH_WATCH_TOP_N]
     for s in ambush_dark:
         highlights.append(f"🎯 {s['coin']} 暗流！OI{s['d6h']:+.0f}%但价格没动，市值仅{mcap_str(s['est_mcap'])}")
     
-    # 埋伏里市值极低+OI异动
+    # 埋伏里市值极低+OI异动 — 同上，全榜按 total 序取前 N 名
     ambush_gem = [
         s
-        for s in ambush[:10]
+        for s in ambush
         if s["est_mcap"] < 100e6 and abs(s["d6h"]) >= 3
     ][:AMBUSH_WATCH_TOP_N]
     for s in ambush_gem:
