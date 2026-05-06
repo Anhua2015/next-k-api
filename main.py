@@ -108,9 +108,15 @@ class AppState:
     yfinance_available = False  # For stocks/forex
     is_ready = False
     startup_time = None
+    # True when SKIP_KRONOS_MODEL is set — saves GB of RAM if only cron/snapshot APIs are used
+    kronos_skipped = False
 
 
 state = AppState()
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 # HuggingFace model paths
 TOKENIZER_PATH = "NeoQuasar/Kronos-Tokenizer-base"
@@ -486,8 +492,16 @@ async def lifespan(app: FastAPI):
         logger.warning("yfinance not available - stocks/forex will be limited")
         state.yfinance_available = False
 
-    # Initialize Kronos model (background)
-    asyncio.create_task(initialize_model())
+    # Kronos + PyTorch are optional: cron/snapshot-only deployments should set SKIP_KRONOS_MODEL=1
+    # to avoid loading multi‑GB weights when the frontend never calls /api/weather etc.
+    if _env_truthy("SKIP_KRONOS_MODEL"):
+        state.kronos_skipped = True
+        logger.info(
+            "SKIP_KRONOS_MODEL is set — Kronos/PyTorch will not load "
+            "(weather/chart/simulate/backtest disabled; radar & accumulation APIs unchanged)"
+        )
+    else:
+        asyncio.create_task(initialize_model())
 
     # Daily pool scan 10:00 CST; OI :30; s2 funding flip :05 each hour (Asia/Shanghai)
     tz = pytz.timezone("Asia/Shanghai")
@@ -691,6 +705,7 @@ class RadarItem(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     model_ready: bool
+    kronos_skipped: bool = False  # True when SKIP_KRONOS_MODEL — prediction routes unavailable by design
     crypto_connected: bool
     stocks_available: bool
     forex_available: bool
@@ -1260,9 +1275,11 @@ async def root():
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
     uptime = (datetime.now(timezone.utc) - state.startup_time).total_seconds() if state.startup_time else 0
+    up = state.is_ready or state.kronos_skipped
     return HealthResponse(
-        status="healthy" if state.is_ready else "initializing",
+        status="healthy" if up else "initializing",
         model_ready=state.is_ready,
+        kronos_skipped=state.kronos_skipped,
         crypto_connected=state.ccxt_exchange is not None,
         stocks_available=state.yfinance_available,
         forex_available=state.yfinance_available,
