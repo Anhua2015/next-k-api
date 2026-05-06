@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument("--ambush", action="store_true", help="清空 ambush_watch")
     parser.add_argument("--heat-accum", action="store_true", help="清空 heat_accum_watch")
     parser.add_argument("--patrick-core", action="store_true", help="清空 patrick_core_watch")
-    parser.add_argument("--worth", action="store_true", help="清空 worth_highlight_watch")
+    parser.add_argument("--worth", action="store_true", help="清空全部 worth_watch_* 七张表")
     parser.add_argument(
         "--all",
         action="store_true",
@@ -59,7 +59,7 @@ def main() -> None:
         clear_ambush_watch_table,
         clear_heat_accum_watch_table,
         clear_patrick_core_watch_table,
-        clear_worth_highlight_watch_table,
+        clear_all_worth_watch_category_tables,
         init_db,
     )
 
@@ -74,7 +74,7 @@ def main() -> None:
         if do_patrick:
             report["patrick_core_watch"] = clear_patrick_core_watch_table(conn)
         if do_worth:
-            report["worth_highlight_watch"] = clear_worth_highlight_watch_table(conn)
+            report.update(clear_all_worth_watch_category_tables(conn))
         if not report:
             parser.error("请指定 --ambush、--heat-accum、--patrick-core、--worth 或 --all")
         print(f"数据库: {db_path}")

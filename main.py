@@ -1812,7 +1812,7 @@ async def get_patrick_core_watch():
 
 @app.get("/api/accumulation/worth-watch")
 async def get_worth_watch(category: Optional[str] = Query(None, description="可选：heat_accum / patrick_core / …")):
-    """值得关注七类归档：表 worth_highlight_watch；每类每轮至多 2 条入库；保留 7 日。可选 ?category=heat_accum。"""
+    """值得关注七类归档：七张独立表 worth_watch_*；每类每轮至多 2 条入库；保留 7 日。响应含 tables / categories[].table。可选 ?category=heat_accum。"""
     try:
         from accumulation_radar import (
             WORTH_HIGHLIGHT_CATEGORY_ORDER,
@@ -1850,7 +1850,7 @@ class ClearWatchTablesBody(BaseModel):
 
     tables: List[str] = Field(
         default_factory=lambda: ["ambush_watch"],
-        description="允许: ambush_watch, heat_accum_watch, patrick_core_watch, worth_highlight_watch",
+        description="ambush/heat/patrick；worth 侧可用 worth_watch_all 或单表 worth_watch_heat_accum 等",
     )
 
 
@@ -1861,7 +1861,17 @@ async def post_clear_watch_tables(body: ClearWatchTablesBody):
 
     清库后请再调一次「OI 刷新」或等整点扫描，以按新规则写回数据。
     """
-    allowed = {"ambush_watch", "heat_accum_watch", "patrick_core_watch", "worth_highlight_watch"}
+    from accumulation_radar import WORTH_WATCH_TABLE_BY_CATEGORY
+
+    _worth_tables = set(WORTH_WATCH_TABLE_BY_CATEGORY.values())
+    allowed = {
+        "ambush_watch",
+        "heat_accum_watch",
+        "patrick_core_watch",
+        "worth_highlight_watch",
+        "worth_watch_all",
+        *_worth_tables,
+    }
     tables = [t.strip() for t in body.tables if t and str(t).strip()]
     if not tables:
         tables = ["ambush_watch"]
@@ -1871,25 +1881,34 @@ async def post_clear_watch_tables(body: ClearWatchTablesBody):
 
     try:
         from accumulation_radar import (
+            clear_all_worth_watch_category_tables,
             clear_ambush_watch_table,
             clear_heat_accum_watch_table,
+            clear_one_worth_watch_category_table,
             clear_patrick_core_watch_table,
-            clear_worth_highlight_watch_table,
             init_db,
             patch_oi_radar_snapshot_watchlists_from_db,
         )
 
         conn = init_db()
         try:
-            cleared: Dict[str, int] = {}
+            cleared: Dict[str, Any] = {}
             if "ambush_watch" in tables:
                 cleared["ambush_watch"] = clear_ambush_watch_table(conn)
             if "heat_accum_watch" in tables:
                 cleared["heat_accum_watch"] = clear_heat_accum_watch_table(conn)
             if "patrick_core_watch" in tables:
                 cleared["patrick_core_watch"] = clear_patrick_core_watch_table(conn)
-            if "worth_highlight_watch" in tables:
-                cleared["worth_highlight_watch"] = clear_worth_highlight_watch_table(conn)
+            worth_tbls = {t for t in tables if t in set(WORTH_WATCH_TABLE_BY_CATEGORY.values())}
+            worth_all = (
+                "worth_watch_all" in tables
+                or "worth_highlight_watch" in tables
+            )
+            if worth_all:
+                cleared.update(clear_all_worth_watch_category_tables(conn))
+            else:
+                for t in sorted(worth_tbls):
+                    cleared[t] = clear_one_worth_watch_category_table(conn, t)
             try:
                 patch_oi_radar_snapshot_watchlists_from_db(conn)
             except Exception:

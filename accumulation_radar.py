@@ -60,9 +60,18 @@ AMBUSH_WATCH_TOP_N = 2
 # 「📍 Patrick核心」：收筹池内 + |6h OI| 达标；与热度无关，按 |OI| 强度排序
 PATRICK_CORE_OI_MIN_ABS_PCT = 3.0
 PATRICK_CORE_RETENTION_DAYS = 7  # patrick_core_watch 表；含今天在内共 7 个日历日
-# 「值得关注」七类 · 每类仅展示前 N 名（入库 worth_highlight_watch + 各类沿用数据源）
+# 「值得关注」七类 · 每类仅展示前 N 名；入库见 WORTH_WATCH_TABLE_BY_CATEGORY（七张物理表）
 WORTH_CATEGORY_TOP_N = 2
 WORTH_HIGHLIGHT_RETENTION_DAYS = 7
+WORTH_WATCH_TABLE_BY_CATEGORY: Dict[str, str] = {
+    "heat_accum": "worth_watch_heat_accum",
+    "patrick_core": "worth_watch_patrick_core",
+    "hot_oi": "worth_watch_hot_oi",
+    "chase_fire": "worth_watch_chase_fire",
+    "dual_list": "worth_watch_dual_list",
+    "ambush_dark": "worth_watch_ambush_dark",
+    "ambush_gem": "worth_watch_ambush_gem",
+}
 WORTH_HIGHLIGHT_CATEGORY_ORDER: Tuple[str, ...] = (
     "heat_accum",
     "patrick_core",
@@ -893,7 +902,7 @@ def clear_patrick_core_watch_table(conn: sqlite3.Connection) -> int:
     return n
 
 
-def _worth_highlight_cutoff_iso(now: datetime) -> str:
+def _worth_watch_cutoff_iso(now: datetime) -> str:
     """早于该生成日（不含）的行删除；含今天在内共 WORTH_HIGHLIGHT_RETENTION_DAYS 个日历日。"""
     now_cst = _heat_accum_now_cst(now)
     today = now_cst.date()
@@ -901,13 +910,14 @@ def _worth_highlight_cutoff_iso(now: datetime) -> str:
     return cutoff.isoformat()
 
 
-def _worth_highlight_prune(conn: sqlite3.Connection, now: datetime) -> None:
-    cutoff_s = _worth_highlight_cutoff_iso(now)
-    conn.execute("DELETE FROM worth_highlight_watch WHERE generated_date < ?", (cutoff_s,))
+def _worth_watch_prune_all(conn: sqlite3.Connection, now: datetime) -> None:
+    cutoff_s = _worth_watch_cutoff_iso(now)
+    for tbl in sorted(set(WORTH_WATCH_TABLE_BY_CATEGORY.values())):
+        conn.execute(f"DELETE FROM {tbl} WHERE generated_date < ?", (cutoff_s,))
 
 
-def _sqlite_row_to_worth_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
-    cat, sym, coin, gd, ls, rk, summ, det = row
+def _sqlite_row_to_worth_item(row: Tuple[Any, ...], category: str) -> Dict[str, Any]:
+    sym, coin, gd, ls, rk, summ, det = row
     detail: Optional[Dict[str, Any]] = None
     if det:
         try:
@@ -916,7 +926,7 @@ def _sqlite_row_to_worth_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
         except Exception:
             detail = None
     return {
-        "category": cat,
+        "category": category,
         "symbol": sym,
         "coin": coin,
         "generated_date": gd,
@@ -927,7 +937,7 @@ def _sqlite_row_to_worth_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
     }
 
 
-def _worth_highlight_fetch_payload(
+def _worth_watch_fetch_payload(
     conn: sqlite3.Connection,
     now: datetime,
     *,
@@ -936,28 +946,38 @@ def _worth_highlight_fetch_payload(
     now_cst = _heat_accum_now_cst(now)
     now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
     cur = conn.cursor()
+    items: List[Dict[str, Any]] = []
+    order_sql = """
+        ORDER BY generated_date DESC, last_seen_cst DESC,
+                 COALESCE(rank_in_category, 999) ASC, symbol ASC
+    """
     if category:
+        cat = str(category).strip()
+        tbl = WORTH_WATCH_TABLE_BY_CATEGORY.get(cat)
+        if not tbl:
+            raise ValueError(f"unknown worth category: {cat}")
         cur.execute(
-            """
-            SELECT category, symbol, coin, generated_date, last_seen_cst,
+            f"""
+            SELECT symbol, coin, generated_date, last_seen_cst,
                    rank_in_category, summary_line, detail_json
-            FROM worth_highlight_watch
-            WHERE category = ?
-            ORDER BY generated_date DESC, last_seen_cst DESC, symbol ASC
-            """,
-            (str(category),),
+            FROM {tbl}
+            {order_sql}
+            """
         )
+        items = [_sqlite_row_to_worth_item(tuple(r), cat) for r in cur.fetchall()]
     else:
-        cur.execute(
-            """
-            SELECT category, symbol, coin, generated_date, last_seen_cst,
-                   rank_in_category, summary_line, detail_json
-            FROM worth_highlight_watch
-            ORDER BY category ASC, generated_date DESC, last_seen_cst DESC, symbol ASC
-            """
-        )
-    rows = cur.fetchall()
-    items = [_sqlite_row_to_worth_item(tuple(r)) for r in rows]
+        for cat in WORTH_HIGHLIGHT_CATEGORY_ORDER:
+            tbl = WORTH_WATCH_TABLE_BY_CATEGORY[cat]
+            cur.execute(
+                f"""
+                SELECT symbol, coin, generated_date, last_seen_cst,
+                       rank_in_category, summary_line, detail_json
+                FROM {tbl}
+                {order_sql}
+                """
+            )
+            for r in cur.fetchall():
+                items.append(_sqlite_row_to_worth_item(tuple(r), cat))
     seen_times = [it.get("last_seen_cst") for it in items if isinstance(it.get("last_seen_cst"), str)]
     updated_at = max(seen_times) if seen_times else now_label
     categories: Dict[str, Any] = {}
@@ -966,11 +986,13 @@ def _worth_highlight_fetch_payload(
         categories[key] = {
             "label_zh": WORTH_HIGHLIGHT_CATEGORY_LABEL_ZH.get(key, key),
             "items": sub,
+            "table": WORTH_WATCH_TABLE_BY_CATEGORY.get(key),
         }
     return {
         "ok": True,
         "items": items,
         "categories": categories,
+        "tables": dict(WORTH_WATCH_TABLE_BY_CATEGORY),
         "updated_at_cst": updated_at,
         "retention_days": WORTH_HIGHLIGHT_RETENTION_DAYS,
         "storage": "sqlite",
@@ -985,26 +1007,27 @@ def load_worth_highlight_watchlist_from_db(
 ) -> Dict[str, Any]:
     if now is None:
         now = datetime.now(timezone(timedelta(hours=8)))
-    _worth_highlight_prune(conn, now)
+    _worth_watch_prune_all(conn, now)
     conn.commit()
-    return _worth_highlight_fetch_payload(conn, now, category=category)
+    return _worth_watch_fetch_payload(conn, now, category=category)
 
 
-def merge_and_persist_worth_highlight_watchlist(
+def merge_and_persist_worth_watch_category_tables(
     conn: sqlite3.Connection,
     buckets: Dict[str, List[Dict[str, Any]]],
     now: datetime,
 ) -> Dict[str, Any]:
     """
-    七类「值得关注」每类至多 WORTH_CATEGORY_TOP_N 条，upsert 到 worth_highlight_watch。
+    七类「值得关注」每类至多 WORTH_CATEGORY_TOP_N 条，分别 upsert 到对应物理表。
     每条需含: symbol, coin, summary_line, rank_in_category, detail(可选 dict，会写入 detail_json)。
     """
     now_cst = _heat_accum_now_cst(now)
     generated_at_s = now_cst.strftime("%Y-%m-%d %H:%M")
     now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
-    _worth_highlight_prune(conn, now)
+    _worth_watch_prune_all(conn, now)
     cur = conn.cursor()
     for cat in WORTH_HIGHLIGHT_CATEGORY_ORDER:
+        tbl = WORTH_WATCH_TABLE_BY_CATEGORY[cat]
         for ent in buckets.get(cat) or []:
             if not isinstance(ent, dict):
                 continue
@@ -1013,7 +1036,7 @@ def merge_and_persist_worth_highlight_watchlist(
                 continue
             det = ent.get("detail")
             det_s = json.dumps(det, ensure_ascii=False) if isinstance(det, dict) else None
-            cur.execute("SELECT generated_date FROM worth_highlight_watch WHERE category = ? AND symbol = ?", (cat, sym))
+            cur.execute(f"SELECT generated_date FROM {tbl} WHERE symbol = ?", (sym,))
             ex = cur.fetchone()
             row_core = (
                 str(ent.get("coin") or ""),
@@ -1024,23 +1047,22 @@ def merge_and_persist_worth_highlight_watchlist(
             )
             if ex:
                 cur.execute(
-                    """
-                    UPDATE worth_highlight_watch SET
+                    f"""
+                    UPDATE {tbl} SET
                         coin = ?, last_seen_cst = ?, rank_in_category = ?, summary_line = ?, detail_json = ?
-                    WHERE category = ? AND symbol = ?
+                    WHERE symbol = ?
                     """,
-                    row_core + (cat, sym),
+                    row_core + (sym,),
                 )
             else:
                 cur.execute(
-                    """
-                    INSERT INTO worth_highlight_watch (
-                        category, symbol, coin, generated_date, last_seen_cst,
+                    f"""
+                    INSERT INTO {tbl} (
+                        symbol, coin, generated_date, last_seen_cst,
                         rank_in_category, summary_line, detail_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        cat,
                         sym,
                         str(ent.get("coin") or ""),
                         generated_at_s,
@@ -1051,17 +1073,38 @@ def merge_and_persist_worth_highlight_watchlist(
                     ),
                 )
     conn.commit()
-    print(f"  💾 值得关注七类看盘已写入 SQLite ({DB_PATH})")
-    return _worth_highlight_fetch_payload(conn, now)
+    print(f"  💾 值得关注七类看盘已写入 SQLite（{len(WORTH_WATCH_TABLE_BY_CATEGORY)} 张表） ({DB_PATH})")
+    return _worth_watch_fetch_payload(conn, now)
+
+
+# 兼容旧调用名
+merge_and_persist_worth_highlight_watchlist = merge_and_persist_worth_watch_category_tables
+
+
+def clear_one_worth_watch_category_table(conn: sqlite3.Connection, table_name: str) -> int:
+    """清空单张 worth_watch_* 表。table_name 须为白名单内的物理表名。"""
+    if table_name not in set(WORTH_WATCH_TABLE_BY_CATEGORY.values()):
+        raise ValueError(f"unknown worth watch table: {table_name}")
+    cur = conn.cursor()
+    cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+    n = int(cur.fetchone()[0] or 0)
+    cur.execute(f"DELETE FROM {table_name}")
+    conn.commit()
+    return n
+
+
+def clear_all_worth_watch_category_tables(conn: sqlite3.Connection) -> Dict[str, int]:
+    """清空全部七张 worth_watch_* 表。返回各表删除前行数。"""
+    out: Dict[str, int] = {}
+    for tbl in sorted(set(WORTH_WATCH_TABLE_BY_CATEGORY.values())):
+        out[tbl] = clear_one_worth_watch_category_table(conn, tbl)
+    return out
 
 
 def clear_worth_highlight_watch_table(conn: sqlite3.Connection) -> int:
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM worth_highlight_watch")
-    n = int(cur.fetchone()[0] or 0)
-    cur.execute("DELETE FROM worth_highlight_watch")
-    conn.commit()
-    return n
+    """兼容旧维护接口：清空全部 worth 分类表，返回删除总行数。"""
+    parts = clear_all_worth_watch_category_tables(conn)
+    return int(sum(parts.values()))
 
 
 def merge_and_persist_ambush_watchlist(
@@ -1271,17 +1314,22 @@ def init_db():
         high_price REAL,
         summary_line TEXT
     )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS worth_highlight_watch (
-        category TEXT NOT NULL,
-        symbol TEXT NOT NULL,
+    # 值得关注七类 · 各一张表（schema 初版一致；后续可按类 ALTER）
+    _worth_watch_shared_sql = """
+        symbol TEXT PRIMARY KEY,
         coin TEXT,
         generated_date TEXT NOT NULL,
         last_seen_cst TEXT NOT NULL,
         rank_in_category INTEGER,
         summary_line TEXT,
-        detail_json TEXT,
-        PRIMARY KEY (category, symbol)
-    )""")
+        detail_json TEXT
+    """
+    for _tbl in sorted(set(WORTH_WATCH_TABLE_BY_CATEGORY.values())):
+        c.execute(f"CREATE TABLE IF NOT EXISTS {_tbl} ({_worth_watch_shared_sql})")
+    try:
+        c.execute("DROP TABLE IF EXISTS worth_highlight_watch")
+    except sqlite3.OperationalError:
+        pass
     c.execute("""CREATE TABLE IF NOT EXISTS s2_funding_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         recorded_at TEXT NOT NULL,
@@ -2190,7 +2238,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             f"  {s['coin']:<7} {s['total']}分 | {' '.join(tags)}"
         )
     
-    # ═══ 值得关注提醒（七类 × 每类至多 WORTH_CATEGORY_TOP_N 条；入库 worth_highlight_watch）═══
+    # ═══ 值得关注提醒（七类 × 每类至多 WORTH_CATEGORY_TOP_N 条；入库 worth_watch_* 七表）═══
     worth_buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k in WORTH_HIGHLIGHT_CATEGORY_ORDER}
     hot_pool_signals: List[Dict[str, Any]] = []
     coin_row_by_coin = {str(d["coin"]): d for d in coin_data.values() if d.get("coin")}
