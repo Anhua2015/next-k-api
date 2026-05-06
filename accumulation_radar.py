@@ -60,11 +60,12 @@ _LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
 # 热度收筹表：突破—回踩—延续状态机（1h K 线，不含 OI）
 HEAT_ACCUM_BPC_INTERVAL = "1h"
 HEAT_ACCUM_BPC_KLINE_LIMIT = 120
+# API / 看盘展示：与 breakout_pullback_fsm 相位对应（避免「待突破」暗示必做多）
 BPC_PHASE_ZH: Dict[str, str] = {
-    "idle": "待突破",
-    "post_breakout": "突破后",
+    "idle": "观望",
+    "post_breakout": "突破跟进",
     "pullback": "回踩中",
-    "continuation": "回踩结束",
+    "continuation": "延续确认",
 }
 
 

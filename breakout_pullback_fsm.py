@@ -4,6 +4,12 @@
 
 不含 OI；仅用价格行为 + 成交量（优先 Binance K 线 quote asset volume）。
 
+实盘注意（已实现默认优化）：
+  · 回踩触及：低价探入支撑带上沿即可（允许插针跌破下沿），无效破位以收盘价 invalidation 为准。
+  · 阻力：滚动最高价与更长窗口内分型高点取强，减轻横盘「矮窗伪阻力」。
+  · 单根 V 反：micro_hi 锚到突破位；同根 Pin/吞没可放宽缩量门禁。
+  · 延续触发后：默认下一根 K 自动回到 idle，避免相位卡住（末根仍可停在 continuation）。
+
 三状态（工程上拆成四段便于调试）：
   idle          — 等待突破
   post_breakout — 已确认突破，跟踪突破后高点
@@ -31,8 +37,10 @@ class BPCPhase(str, Enum):
 
 @dataclass
 class BPCParams:
-    # 阻力窗口：收盘突破此前窗口最高价
+    # 阻力窗口：收盘突破此前窗口最高价（可与 swing 强化叠加）
     resistance_lookback: int = 30
+    # True：阻力 = max(滚动窗口最高, 近更长窗口内分型高点)；减轻横盘过长时滚动窗「变矮」导致的伪突破
+    resistance_use_swing_reinforce: bool = True
     # 突破：收盘价高于阻力 * (1 + eps)
     breakout_eps: float = 0.0001
     # 突破放量：当前 quote vol >= 过去 vol_ma_period 均值 * mult
@@ -42,7 +50,7 @@ class BPCParams:
     invalidation_pct: float = 0.012
     # 进入回踩：相对峰值最小回撤比例（0.0015 = 0.15%）
     min_retrace_from_peak_pct: float = 0.0015
-    # 回踩触及支撑带：low 落在 [level*(1-band), level*(1+band)]
+    # 回踩触及支撑带上沿：最低价探到 band_hi 以下即算「探到支撑区」（允许插针跌破下沿，由收盘价 invalidation 兜底）
     retest_band_pct: float = 0.004
     # 回踩段相对突破 burst 量能：均额比例上限视为「缩量回踩」
     pullback_vol_ratio_max: float = 0.92
@@ -52,6 +60,10 @@ class BPCParams:
     pin_body_mult: float = 2.0
     # 延续：收复回踩段内前序高点（简化 CHoCH）
     continuation_close_above_micro_high: bool = True
+    # 同一根 K 线完成「触及支撑 + Pin/吞没」时，回踩均额无法拆分：跳过缩量门禁
+    single_bar_pullback_pin_relaxes_volume: bool = True
+    # 延续确认出现在 continuation_idx 的下一根 K 起自动 reset_idle，避免流式/多次调用卡在 continuation
+    continuation_reset_next_bar: bool = True
 
 
 @dataclass
@@ -94,6 +106,31 @@ def _max_high(highs: List[float], start: int, end_exclusive: int) -> float:
     if start >= end_exclusive:
         return 0.0
     return max(highs[start:end_exclusive])
+
+
+def _swing_high_max(highs: List[float], start: int, end_exclusive: int) -> float:
+    """区间内分型高点（不低于左右邻居），用于锚定「真实前高」，减轻固定滚动窗盲区。"""
+    if end_exclusive - start < 3:
+        return 0.0
+    hi_len = len(highs)
+    best = 0.0
+    for j in range(max(start + 1, 1), min(end_exclusive - 1, hi_len - 1)):
+        if highs[j] >= highs[j - 1] and highs[j] >= highs[j + 1]:
+            best = max(best, highs[j])
+    return best
+
+
+def _resistance_level(highs: List[float], i: int, lookback: int, use_swing: bool) -> float:
+    lo = max(0, i - lookback)
+    rolling = _max_high(highs, lo, i)
+    if not use_swing or i < 3:
+        return rolling
+    span = max(lookback * 2, lookback + 20)
+    slo = max(0, i - span)
+    swing_m = _swing_high_max(highs, slo, i)
+    if swing_m > 0:
+        return max(rolling, swing_m)
+    return rolling
 
 
 def _is_bullish_engulfing(
@@ -181,8 +218,17 @@ def evaluate_breakout_pullback_continuation(
 
     i = min_warmup - 1
     while i < n:
-        lo = max(0, i - p.resistance_lookback)
-        resistance = _max_high(highs, lo, i)
+        if (
+            p.continuation_reset_next_bar
+            and st.phase == BPCPhase.CONTINUATION
+            and st.continuation_idx is not None
+            and i > st.continuation_idx
+        ):
+            reset_idle("")
+
+        resistance = _resistance_level(
+            highs, i, p.resistance_lookback, p.resistance_use_swing_reinforce
+        )
         vol_ma = _sma(qvols, i, p.vol_ma_period)
         qv = qvols[i]
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
@@ -209,10 +255,10 @@ def evaluate_breakout_pullback_continuation(
                 st.peak_after_breakout = h
                 st.peak_idx = i
             peak = st.peak_after_breakout
-            band_lo = lvl * (1.0 - p.retest_band_pct)
             band_hi = lvl * (1.0 + p.retest_band_pct)
             retraced = peak > 0 and (peak - l) / peak >= p.min_retrace_from_peak_pct
-            touched = l <= band_hi and l >= band_lo
+            # 流动性插针可短暂跌破 band_lo；无效破位只看收盘价 invalidation_pct
+            touched = l <= band_hi
             if retraced and touched:
                 st.phase = BPCPhase.PULLBACK
                 st.pullback_enter_idx = i
@@ -242,8 +288,6 @@ def evaluate_breakout_pullback_continuation(
                 pullback_avg_pre = qvols[seg_start]
             vol_ok = burst_avg > 0 and pullback_avg_pre <= burst_avg * p.pullback_vol_ratio_max
 
-            micro_hi = _max_high(highs, seg_start, i)
-
             pin = _is_pin_bar_bullish(o, h, l, c, p.pin_body_mult)
             engulf = False
             if i > 0:
@@ -257,7 +301,13 @@ def evaluate_breakout_pullback_continuation(
                     l,
                     c,
                 )
+            # 单根 K 线 V 反：尚无「回踩段内前序高点」时用突破位作微观阻力锚点，避免 micro_hi=0
+            prior_hi = _max_high(highs, seg_start, i) if i > seg_start else 0.0
+            micro_hi = max(prior_hi, lvl)
             reclaim = p.continuation_close_above_micro_high and c > micro_hi and c > lvl
+
+            if p.single_bar_pullback_pin_relaxes_volume and i == seg_start and (pin or engulf):
+                vol_ok = True
 
             reason = ""
             if pin:
@@ -272,10 +322,6 @@ def evaluate_breakout_pullback_continuation(
                 st.phase = BPCPhase.CONTINUATION
                 st.continuation_idx = i
                 st.continuation_reason = reason
-
-        elif st.phase == BPCPhase.CONTINUATION:
-            # 延续出现后保持该相位直至新的 idle（可由上层选择是否在下一根重置）
-            pass
 
         i += 1
 
