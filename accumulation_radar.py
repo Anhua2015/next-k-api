@@ -589,78 +589,104 @@ MIN_OI_USD = 2_000_000        # 最低OI门槛 $2M
 # 放量突破参数
 VOL_BREAKOUT_MULT = 3.0       # 当日Vol > 3x均值 = 放量
 
-# 热度+收筹「方案C」：SMC 近似优先，失败则用箱体下半区 + ATR 加宽止损
-BOX_STOP_ATR_MULT = 1.5       # 止损距箱底：max(2%, min(8%, 1.5*ATR%))
+# 热度+收筹「方案C」：仅 30m FVG+VWAP（与 btc_perp_signal V8 同源启发式）；止损按区间内下沿 + ATR 加宽
+BOX_STOP_ATR_MULT = 1.5       # max(2%, min(8%, 1.5×30m ATR%)) 用于止损距下沿
+SCHEME_C_FVG_INTERVAL = "30m"
+SCHEME_C_FVG_KLINE_LIMIT = 60
+SCHEME_C_FVG_LOOKBACK = 12
+SCHEME_C_FVG_VWAP_MAX_DEV_PCT = 0.01   # FVG 中轴与 VWAP 偏离 ≤ 此比例视为共振
+SCHEME_C_FVG_MIN_WIDTH_PCT = 0.05      # 与 V8 一致：宽度 ≥ 该百分数（÷100 后与 mid 比）
+SCHEME_C_FVG_ABOVE_VWAP_PCT = 0.01     # 进场带上沿：不超过 VWAP×(1+此值)
 
 
-def calculate_smc_zone(
-    data_list: List[Dict[str, float]],
-    p_low: float,
-    *,
-    current_px: Optional[float] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    SMC 启发式：Discount(50%) + 看涨 FVG + 突破前阴线 OB → 参考入场带与止损。
-    current_px 若给出（如 ticker 最新价），用于失效判定；否则用最后一根日线收盘。
-    """
-    if len(data_list) < 5 or p_low <= 0:
-        return None
-
-    recent_k = data_list[-7:]
-    p_high = max(k["high"] for k in recent_k)
-    if p_high <= p_low:
-        return None
-
-    p_eq = p_low + (p_high - p_low) * 0.5
-
-    fvg_top: Optional[float] = None
-    fvg_bottom: Optional[float] = None
-    breakout_idx = -1
-
-    for i in range(len(data_list) - 2, max(0, len(data_list) - 15), -1):
-        k1, k2, k3 = data_list[i - 1], data_list[i], data_list[i + 1]
-        if k2["open"] > 0 and (k2["close"] - k2["open"]) / k2["open"] > 0.04:
-            if k3["low"] > k1["high"]:
-                fvg_bottom = k1["high"]
-                fvg_top = k3["low"]
-                breakout_idx = i
-                break
-
-    ob_bottom: Optional[float] = None
-    if breakout_idx != -1:
-        for j in range(breakout_idx - 1, max(-1, breakout_idx - 5), -1):
-            k = data_list[j]
-            if k["close"] < k["open"]:
-                ob_bottom = k["low"]
-                break
-
-    if fvg_top and ob_bottom is not None:
-        entry_top = min(p_eq, fvg_top)
-        entry_bottom = ob_bottom
-        curr_price = float(current_px) if current_px is not None else data_list[-1]["close"]
-        if curr_price < entry_bottom:
-            return None
-        if entry_top > entry_bottom:
-            return {
-                "entry_top": entry_top,
-                "entry_bottom": entry_bottom,
-                "stop_loss": entry_bottom * 0.98,
-                "source": "SMC",
-            }
-    return None
+def _fvg_near_vwap_scheme_c(fvg: Dict[str, float], vwap: float, max_dev_pct: float) -> bool:
+    """FVG 中轴与 VWAP 偏离 ≤ max_dev_pct 视为共振（同 btc_perp_signal._fvg_near_vwap）。"""
+    if not fvg or not vwap or vwap <= 0:
+        return False
+    mid = fvg.get("mid")
+    if mid is None:
+        return False
+    return abs(mid - vwap) / vwap <= max_dev_pct
 
 
-def _daily_atr_pct(data_list: List[Dict[str, float]], period: int = 14) -> float:
-    """基于日线 OHLC 的 TR/收盘 均值，作百分比止损加宽用。"""
-    if len(data_list) < 2:
+def _find_latest_fvgs_ohlc(
+    rows: List[Dict[str, float]],
+    current_price: float,
+    lookback: int,
+) -> Dict[str, Optional[Dict[str, float]]]:
+    """最近 lookback 组三 K 扫描看涨/看跌 FVG（未回补）；逻辑对齐 btc_perp_signal.find_latest_fvgs。"""
+    n = len(rows)
+    if n < 3:
+        return {"bull": None, "bear": None}
+    end = n - 3
+    start = max(0, end - lookback + 1)
+    if end < start:
+        return {"bull": None, "bear": None}
+    fvg_bull: Optional[Dict[str, float]] = None
+    fvg_bear: Optional[Dict[str, float]] = None
+    for i in range(end, start - 1, -1):
+        k1, k3 = rows[i], rows[i + 2]
+        h1, l1 = float(k1["high"]), float(k1["low"])
+        h3, l3 = float(k3["high"]), float(k3["low"])
+        if fvg_bull is None and h1 < l3 and current_price >= h1:
+            fvg_bull = {"top": l3, "mid": (l3 + h1) / 2, "bottom": h1}
+        if fvg_bear is None and l1 > h3 and current_price <= l1:
+            fvg_bear = {"top": l1, "mid": (l1 + h3) / 2, "bottom": h3}
+        if fvg_bull is not None and fvg_bear is not None:
+            break
+    return {"bull": fvg_bull, "bear": fvg_bear}
+
+
+def _volume_profile_val_vah(rows: List[Dict[str, float]]) -> Tuple[Optional[float], Optional[float]]:
+    """按收盘价分桶的成交量分布，取 70% 价值区上下沿（近似 btc_perp_signal VP）。"""
+    if len(rows) < 3:
+        return None, None
+    lo = min(r["low"] for r in rows)
+    hi = max(r["high"] for r in rows)
+    if hi <= lo:
+        return None, None
+    n_bins = 50
+    bin_w = (hi - lo) / n_bins
+    vol_by_bin = [0.0] * n_bins
+    mids = [lo + (i + 0.5) * bin_w for i in range(n_bins)]
+    for r in rows:
+        c = float(r["close"])
+        idx = int((c - lo) / (hi - lo) * n_bins)
+        idx = max(0, min(n_bins - 1, idx))
+        vol_by_bin[idx] += float(r["volume"])
+    poc_idx = max(range(n_bins), key=lambda i: vol_by_bin[i])
+    target_vol = sum(vol_by_bin) * 0.7
+    current_vol = vol_by_bin[poc_idx]
+    up_idx, down_idx = poc_idx + 1, poc_idx - 1
+    while current_vol < target_vol and (up_idx < n_bins or down_idx >= 0):
+        vu = vol_by_bin[up_idx] if up_idx < n_bins else -1.0
+        vd = vol_by_bin[down_idx] if down_idx >= 0 else -1.0
+        if vu > vd:
+            if vu > 0:
+                current_vol += vu
+            up_idx += 1
+        else:
+            if vd > 0:
+                current_vol += vd
+            down_idx -= 1
+        if up_idx >= n_bins and down_idx < 0:
+            break
+    vah_idx = min(up_idx, n_bins - 1)
+    val_idx = max(down_idx, 0)
+    return mids[val_idx], mids[vah_idx]
+
+
+def _atr_pct_from_intraday(rows: List[Dict[str, float]], period: int = 14) -> float:
+    """日内 K 序列的 TR/收盘 百分比均值，用于止损加宽。"""
+    if len(rows) < 2:
         return 0.02
     trs: List[float] = []
-    for i in range(1, len(data_list)):
-        h, l = data_list[i]["high"], data_list[i]["low"]
-        pc = data_list[i - 1]["close"]
+    for i in range(1, len(rows)):
+        h, l = float(rows[i]["high"]), float(rows[i]["low"])
+        pc = float(rows[i - 1]["close"])
         tr = max(h - l, abs(h - pc), abs(l - pc))
-        cl = data_list[i]["close"]
-        if cl and cl > 0:
+        cl = float(rows[i]["close"])
+        if cl > 0:
             trs.append(tr / cl)
     if not trs:
         return 0.02
@@ -669,61 +695,87 @@ def _daily_atr_pct(data_list: List[Dict[str, float]], period: int = 14) -> float
     return max(avg, 1e-6)
 
 
-def accumulation_box_fallback(
-    low_p: float,
-    high_p: float,
-    atr_pct: float,
+def try_resolve_fvg_vwap_30m_zone(
+    symbol: str,
+    low_price: float,
+    last_price: float,
 ) -> Optional[Dict[str, Any]]:
-    """箱体下半（折扣）为参考接筹带，止损在箱底下沿外加 ATR。"""
-    if low_p <= 0 or high_p <= 0 or high_p < low_p:
+    """
+    30m K 线：VWAP + 看涨 FVG 与 VWAP 共振时给出参考接筹带（仅做多语境，与 heat+收筹一致）。
+    不满足条件时返回 None。
+    """
+    kl = api_get(
+        "/fapi/v1/klines",
+        {"symbol": symbol, "interval": SCHEME_C_FVG_INTERVAL, "limit": SCHEME_C_FVG_KLINE_LIMIT},
+    )
+    if not kl or len(kl) < 15:
         return None
-    mid = low_p + (high_p - low_p) * 0.5
+    rows: List[Dict[str, float]] = []
+    for k in kl:
+        rows.append({
+            "open": float(k[1]),
+            "high": float(k[2]),
+            "low": float(k[3]),
+            "close": float(k[4]),
+            "volume": float(k[5]),
+        })
+    vol_sum = sum(r["volume"] for r in rows)
+    if vol_sum <= 0:
+        return None
+    vwap = sum(r["close"] * r["volume"] for r in rows) / vol_sum
+    cur_px = float(last_price) if last_price and last_price > 0 else float(rows[-1]["close"])
+
+    fvgs = _find_latest_fvgs_ohlc(rows, cur_px, SCHEME_C_FVG_LOOKBACK)
+    bull = fvgs.get("bull") if fvgs else None
+    if not bull:
+        return None
+    if not _fvg_near_vwap_scheme_c(bull, vwap, SCHEME_C_FVG_VWAP_MAX_DEV_PCT):
+        return None
+    mid = bull.get("mid") or 0.0
+    if mid <= 0:
+        return None
+    width_r = (bull["top"] - bull["bottom"]) / mid
+    if width_r < SCHEME_C_FVG_MIN_WIDTH_PCT / 100.0:
+        return None
+
+    val, _ = _volume_profile_val_vah(rows)
+    if val is None:
+        val = float(low_price) if low_price > 0 else bull["bottom"]
+    above_pct = SCHEME_C_FVG_ABOVE_VWAP_PCT
+    entry_low = max(val, bull["bottom"])
+    entry_high = min(bull["top"], vwap * (1 + above_pct))
+    if cur_px > vwap:
+        entry_high = min(entry_high, cur_px)
+    if entry_low >= entry_high:
+        return None
+
+    atr_pct = _atr_pct_from_intraday(rows)
     eps = max(0.02, min(0.08, BOX_STOP_ATR_MULT * atr_pct))
+    stop_loss = entry_low * (1 - eps)
+
     return {
-        "entry_bottom": low_p,
-        "entry_top": mid,
-        "stop_loss": low_p * (1 - eps),
-        "source": "箱体",
+        "entry_top": entry_high,
+        "entry_bottom": entry_low,
+        "stop_loss": stop_loss,
+        "source": "FVG30m",
     }
 
 
 def resolve_hot_pool_zone_scheme_c(
     symbol: str,
     low_price: float,
-    high_price: float,
+    _high_price: float,
     last_price: float,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    方案 C：先 SMC（日线）；若无或非失效则用箱体 fallback。
-    返回 (zone_dict 或 None, reason: smc|box|none)。
+    方案 C：仅 30m FVG+VWAP 共振。
+    返回 (zone_dict 或 None, reason: fvg30m|none)。
     """
-    kl = api_get("/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": 60})
-    if not kl or len(kl) < 5:
-        return None, "none"
-
-    data_list: List[Dict[str, float]] = []
-    for k in kl:
-        data_list.append({
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-        })
-
-    atr_pct = _daily_atr_pct(data_list)
-
-    cur = last_price if last_price and last_price > 0 else None
-
     if low_price > 0:
-        smc = calculate_smc_zone(data_list, low_price, current_px=cur)
-        if smc:
-            return smc, "smc"
-
-    if low_price > 0 and high_price > 0:
-        box = accumulation_box_fallback(low_price, high_price, atr_pct)
-        if box:
-            return box, "box"
-
+        lp = float(last_price) if last_price and last_price > 0 else 0.0
+        z30 = try_resolve_fvg_vwap_30m_zone(symbol, low_price, lp)
+        if z30:
+            return z30, "fvg30m"
     return None, "none"
 
 
@@ -734,7 +786,7 @@ def format_scheme_c_zone_line(zone: Dict[str, Any]) -> str:
     sl = zone["stop_loss"]
     src = zone.get("source", "")
     dec = 4 if tp > 0.01 else 6
-    label = "SMC近似" if src == "SMC" else "箱体下半"
+    label = "FVG·30m" if src == "FVG30m" else "参考区间"
     return (
         f"📍 {label}: ${bt:.{dec}f} ~ ${tp:.{dec}f} · 止损 ${sl:.{dec}f}"
     )
@@ -1443,7 +1495,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             heat_map[coin] = heat_map.get(coin, 0) + 20  # 双重信号bonus
         print(f"🔥🔥 双重热度: {dual_heat}")
     
-    # 3. 从DB读收筹数据（含横盘高低点，供热度+收筹方案C区间）
+    # 3. 从DB读收筹数据（含横盘高低点，供热度+收筹方案C FVG 区间）
     c2 = conn.cursor()
     c2.execute(
         "SELECT symbol, score, sideways_days, range_pct, avg_vol, status, low_price, high_price FROM watchlist"
@@ -1731,7 +1783,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     hot_pool_signals: List[Dict[str, Any]] = []
     
     # 热度+收筹池重叠 = 最强信号（放最前面！热度领先OI）— 取前3名。
-    # 方案 C（SMC/箱体区间）仍写入 hot_pool_signals → DB/热度看盘；「值得关注」正文不含 SMC，避免与看盘重复。
+    # 方案 C（30m FVG 区间）仍写入 hot_pool_signals → DB/热度看盘；「值得关注」正文不含区间细节，避免与看盘重复。
     hot_pool = [d for d in coin_data.values() if d["heat"] > 0 and d["in_pool"]]
     for s in sorted(hot_pool, key=lambda x: x["heat"], reverse=True)[:3]:
         tags = []
