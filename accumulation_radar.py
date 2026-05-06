@@ -192,6 +192,120 @@ def load_heat_accum_watchlist_from_db(
     return _heat_accum_fetch_payload(conn, now)
 
 
+def refresh_all_heat_accum_watch_zones(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    对 heat_accum_watch 全表重算进场区间（方案 C）并刷新摘要/last_seen。
+    用于每日 12:00 CST 定时与维护面板手动刷新。
+    """
+    if now is None:
+        now = datetime.now(timezone(timedelta(hours=8)))
+    now_cst = _heat_accum_now_cst(now)
+    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
+
+    _heat_accum_prune(conn, now)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT symbol, coin, heat, sideways_days, tags_json, low_price, high_price, price
+        FROM heat_accum_watch
+        """
+    )
+    rows = cur.fetchall()
+    if not rows:
+        conn.commit()
+        return _heat_accum_fetch_payload(conn, now)
+
+    # 一次拉全量 ticker，避免逐 symbol 额外请求
+    ticker_map: Dict[str, float] = {}
+    t24 = api_get("/fapi/v1/ticker/24hr")
+    if isinstance(t24, list):
+        for r in t24:
+            try:
+                sym = str(r.get("symbol") or "")
+                px = float(r.get("lastPrice") or 0.0)
+                if sym and px > 0:
+                    ticker_map[sym] = px
+            except Exception:
+                continue
+
+    recalculated = 0
+    with_zone = 0
+    for row in rows:
+        symbol = str(row[0] or "")
+        if not symbol:
+            continue
+        coin = row[1]
+        heat = row[2]
+        sideways_days = row[3]
+        tags_raw = row[4]
+        low_price = float(row[5] or 0.0)
+        high_price = float(row[6] or 0.0)
+        old_price = float(row[7] or 0.0)
+        price = float(ticker_map.get(symbol) or old_price or 0.0)
+
+        tags: List[Any] = []
+        if isinstance(tags_raw, str) and tags_raw:
+            try:
+                parsed = json.loads(tags_raw)
+                if isinstance(parsed, list):
+                    tags = parsed
+            except Exception:
+                tags = []
+
+        zone: Optional[Dict[str, Any]] = None
+        zone_reason = "none"
+        if low_price > 0:
+            zone, zone_reason = resolve_hot_pool_zone_scheme_c(symbol, low_price, high_price, price)
+            if zone:
+                with_zone += 1
+
+        sig = {
+            "coin": coin,
+            "symbol": symbol,
+            "heat": heat,
+            "tags": tags,
+            "sideways_days": sideways_days,
+            "low_price": low_price,
+            "high_price": high_price,
+            "price": price,
+            "zone": zone,
+            "zone_reason": zone_reason,
+        }
+        summary = _heat_accum_summary_line(sig)
+        zone_json = json.dumps(zone, ensure_ascii=False) if zone else None
+        cur.execute(
+            """
+            UPDATE heat_accum_watch SET
+                price = ?, last_seen_cst = ?, zone_json = ?, zone_reason = ?, summary_line = ?
+            WHERE symbol = ?
+            """,
+            (
+                price,
+                now_label,
+                zone_json,
+                str(zone_reason),
+                summary,
+                symbol,
+            ),
+        )
+        recalculated += 1
+
+    conn.commit()
+    try:
+        patch_oi_radar_snapshot_watchlists_from_db(conn)
+    except Exception as e:
+        print(f"⚠️ patch oi_radar snapshot after heat zone refresh failed: {e}")
+
+    payload = _heat_accum_fetch_payload(conn, now)
+    payload["recalculated"] = recalculated
+    payload["with_zone"] = with_zone
+    return payload
+
+
 def merge_and_persist_heat_accum_watchlist(
     conn: sqlite3.Connection,
     hot_pool_signals: List[Dict[str, Any]],

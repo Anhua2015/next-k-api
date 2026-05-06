@@ -414,6 +414,38 @@ def run_oi_task() -> None:
     _run_accumulation_radar_subprocess("oi")
 
 
+_heat_zone_refresh_lock = threading.Lock()
+
+
+def _refresh_heat_zone_watchlist_once() -> Dict[str, Any]:
+    from accumulation_radar import init_db, refresh_all_heat_accum_watch_zones
+
+    conn = init_db()
+    try:
+        return refresh_all_heat_accum_watch_zones(conn)
+    finally:
+        conn.close()
+
+
+def run_heat_zone_refresh_task() -> None:
+    """每日 12:00（Asia/Shanghai）重算 heat_accum_watch 全表进场区间。"""
+    if not _heat_zone_refresh_lock.acquire(blocking=False):
+        logger.info("热度+收筹区间重算跳过：已有任务在执行")
+        return
+    try:
+        logger.info("开始执行热度+收筹看盘全量区间重算...")
+        data = _refresh_heat_zone_watchlist_once()
+        logger.info(
+            "热度+收筹区间重算完成: recalculated=%s with_zone=%s",
+            data.get("recalculated"),
+            data.get("with_zone"),
+        )
+    except Exception as e:
+        logger.exception("heat zone refresh failed: %s", e)
+    finally:
+        _heat_zone_refresh_lock.release()
+
+
 # ============== s2 OI + funding flip scanner (APScheduler) ==============
 
 _S2_FUNDING_SCRIPT = Path(__file__).resolve().parent / "s2_oi_funding_rate_scanner.py"
@@ -503,10 +535,17 @@ async def lifespan(app: FastAPI):
     else:
         asyncio.create_task(initialize_model())
 
-    # Daily pool scan 10:00 CST; OI :30; s2 funding flip :05 each hour (Asia/Shanghai)
+    # Daily pool scan 10:00 CST; heat zone refresh 12:00; OI :30; s2 funding flip :05 each hour (Asia/Shanghai)
     tz = pytz.timezone("Asia/Shanghai")
     accumulation_scheduler = BackgroundScheduler(timezone=tz)
     accumulation_scheduler.add_job(run_pool_task, "cron", hour=10, minute=0)
+    accumulation_scheduler.add_job(
+        run_heat_zone_refresh_task,
+        "cron",
+        hour=12,
+        minute=0,
+        id="heat_zone_refresh",
+    )
     accumulation_scheduler.add_job(run_oi_task, "cron", minute=30)
     accumulation_scheduler.add_job(
         run_s2_oi_funding_task,
@@ -529,7 +568,7 @@ async def lifespan(app: FastAPI):
         else "s6_futures_alpha 定时已暂停"
     )
     logger.info(
-        "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, oi 每小时 :30; "
+        "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, heat zones 每日 12:00 CST, oi 每小时 :30; "
         "s2_oi_funding_rate_scanner 每整点后 5 分 (xx:05); "
         + s6_cron_log
     )
@@ -1811,12 +1850,13 @@ class TriggerCronBody(BaseModel):
 
     task: str = Field(
         ...,
-        description="pool | oi | s2_funding | s6_alpha",
+        description="pool | heat_zones | oi | s2_funding | s6_alpha",
     )
 
 
 _CRON_TASK_FUNCS: Dict[str, Any] = {
     "pool": run_pool_task,
+    "heat_zones": run_heat_zone_refresh_task,
     "oi": run_oi_task,
     "s2_funding": run_s2_oi_funding_task,
     "s6_alpha": run_s6_futures_alpha_task,
@@ -1829,6 +1869,7 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
     在后台线程执行与定时任务相同的逻辑（子进程跑脚本），HTTP 立即返回。
 
     - pool: accumulation_radar pool（定时每日 10:00 CST）
+    - heat_zones: 热度+收筹看盘全表重算区间（定时每日 12:00 CST）
     - oi: accumulation_radar oi（定时每小时 :30）
     - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
@@ -1873,6 +1914,33 @@ async def post_accumulation_oi_radar_refresh():
             logger.exception("OI radar background refresh failed")
         finally:
             _oi_radar_refresh_lock.release()
+
+    threading.Thread(target=_work, daemon=True).start()
+    return {"accepted": True, "busy": False}
+
+
+@app.post("/api/accumulation/maintenance/refresh-heat-zones")
+async def post_refresh_heat_zones():
+    """
+    手动触发 heat_accum_watch 全量进场区间重算（后台线程）。
+    与定时任务 heat_zone_refresh（每日 12:00 CST）共用同一锁，避免并发。
+    """
+    if not _heat_zone_refresh_lock.acquire(blocking=False):
+        return {"accepted": False, "busy": True, "message": "已有热度区间重算任务在执行中"}
+
+    def _work():
+        try:
+            logger.info("manual refresh heat zones accepted")
+            data = _refresh_heat_zone_watchlist_once()
+            logger.info(
+                "manual refresh heat zones done: recalculated=%s with_zone=%s",
+                data.get("recalculated"),
+                data.get("with_zone"),
+            )
+        except Exception:
+            logger.exception("manual refresh heat zones failed")
+        finally:
+            _heat_zone_refresh_lock.release()
 
     threading.Thread(target=_work, daemon=True).start()
     return {"accepted": True, "busy": False}
