@@ -457,12 +457,12 @@ def _refresh_heat_bpc_once() -> Dict[str, Any]:
 
 
 def run_heat_bpc_refresh_task() -> None:
-    """每 4 小时：heat_accum_watch 全表 4h K 线「突破—回踩—延续」状态。"""
+    """每小时：heat_accum_watch 全表 1h K 线「突破—回踩—延续」状态。"""
     if not _heat_bpc_lock.acquire(blocking=False):
         logger.info("热度收筹 BPC 状态重算跳过：已有任务在执行")
         return
     try:
-        logger.info("开始执行热度收筹看盘 4H 突破回踩状态重算...")
+        logger.info("开始执行热度收筹看盘 1H 突破回踩状态重算...")
         data = _refresh_heat_bpc_once()
         logger.info(
             "热度收筹 BPC 重算完成: recalculated=%s failed_klines=%s",
@@ -578,7 +578,6 @@ async def lifespan(app: FastAPI):
     accumulation_scheduler.add_job(
         run_heat_bpc_refresh_task,
         "cron",
-        hour=[0, 4, 8, 12, 16, 20],
         minute=7,
         id="heat_bpc_refresh",
     )
@@ -605,7 +604,7 @@ async def lifespan(app: FastAPI):
     )
     logger.info(
         "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, heat watch 每日 12:00 CST 同步现价/摘要, "
-        "heat BPC 每 4 小时 (0/4/8/12/16/20 点 07 分) 4h K 线状态; oi 每小时 :30; "
+        "heat BPC 每小时 xx:07 (1h K 线突破回踩状态); oi 每小时 :30; "
         "s2_oi_funding_rate_scanner 每整点后 5 分 (xx:05); "
         + s6_cron_log
     )
@@ -1908,7 +1907,7 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
 
     - pool: accumulation_radar pool（定时每日 10:00 CST）
     - heat_zones: 热度+收筹看盘全表同步现价/摘要，并清空旧进场区间（定时每日 12:00 CST）
-    - heat_bpc: 热度+收筹看盘全表 4h 突破—回踩—延续状态（定时每 4 小时）
+    - heat_bpc: 热度+收筹看盘全表 1h K 线突破—回踩—延续状态（定时每小时 xx:07）
     - oi: accumulation_radar oi（定时每小时 :30）
     - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
@@ -1987,7 +1986,7 @@ async def post_refresh_heat_zones():
 @app.post("/api/accumulation/maintenance/refresh-heat-bpc")
 async def post_refresh_heat_bpc():
     """
-    手动触发 heat_accum_watch 全表 4h 突破回踩状态重算（后台线程）。
+    手动触发 heat_accum_watch 全表 1h K 线突破回踩状态重算（后台线程）。
     与定时任务 heat_bpc_refresh 共用同一锁，避免并发。
     """
     if not _heat_bpc_lock.acquire(blocking=False):

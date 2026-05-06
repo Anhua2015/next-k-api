@@ -57,8 +57,8 @@ HEAT_ACCUM_RETENTION_DAYS = 7  # 含今天在内共 7 个日历日
 AMBUSH_WATCH_RETENTION_DAYS = 7  # 暗流 / 低市值埋伏看盘，与热度收筹一致
 AMBUSH_WATCH_TOP_N = 2  # 暗流 / 低市值：全埋伏榜（已按 total 降序）命中条件后取分数最高的前 N 条入库
 _LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
-# 热度收筹表：突破—回踩—延续状态机（默认 4h K 线，不含 OI）
-HEAT_ACCUM_BPC_INTERVAL = "4h"
+# 热度收筹表：突破—回踩—延续状态机（1h K 线，不含 OI）
+HEAT_ACCUM_BPC_INTERVAL = "1h"
 HEAT_ACCUM_BPC_KLINE_LIMIT = 120
 BPC_PHASE_ZH: Dict[str, str] = {
     "idle": "待突破",
@@ -337,7 +337,7 @@ def refresh_all_heat_accum_bpc_states(
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
-    对 heat_accum_watch 全表按 4h K 线重算「突破—回踩—延续」状态（不含 OI），写入 bpc_json / bpc_updated_cst。
+    对 heat_accum_watch 全表按 1h K 线重算「突破—回踩—延续」状态（不含 OI），写入 bpc_json / bpc_updated_cst。
     供每 4 小时定时任务与维护面板手动刷新。
     """
     from breakout_pullback_fsm import BPCParams, evaluate_breakout_pullback_continuation
