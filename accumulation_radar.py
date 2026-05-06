@@ -21,7 +21,7 @@ import time
 import requests
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone, timedelta
+from datetime import date as date_cls, datetime, timezone, timedelta
 from pathlib import Path
 
 # 兼容 Windows 控制台编码，避免 emoji 打印导致崩溃，并启用行缓冲便于看进度
@@ -53,6 +53,8 @@ FAPI = "https://fapi.binance.com"
 db_dir = os.getenv("DATA_DIR", Path(__file__).parent)
 DB_PATH = Path(db_dir) / "accumulation.db"
 OI_RADAR_SNAPSHOT_PATH = Path(db_dir) / "oi_radar_snapshot.json"
+HEAT_ACCUM_RETENTION_DAYS = 7  # 含今天在内共 7 个日历日
+_LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
 
 
 def _persist_oi_radar_snapshot(payload: Dict[str, Any]) -> None:
@@ -69,6 +71,269 @@ def _persist_oi_radar_snapshot(payload: Dict[str, Any]) -> None:
         print(f"  💾 OI 快照已写入 {OI_RADAR_SNAPSHOT_PATH}")
     except Exception as e:
         print(f"⚠️ OI 快照写入失败: {e}")
+
+
+def _heat_accum_summary_line(sig: Dict[str, Any]) -> str:
+    """与「值得关注」热力+收筹条一致的单行摘要（CST 语境）。"""
+    tags = list(sig.get("tags") or [])
+    coin = sig.get("coin") or ""
+    sw = sig.get("sideways_days") or 0
+    base = f"🔥💤 {coin} 热度({'+'.join(tags)})+收筹{sw}天=OI将涨"
+    zone = sig.get("zone")
+    if zone:
+        return base + " " + format_scheme_c_zone_line(zone)
+    return base
+
+
+def _heat_accum_now_cst(now: datetime) -> datetime:
+    cst = timezone(timedelta(hours=8))
+    if now.tzinfo is None:
+        return now.replace(tzinfo=cst)
+    return now.astimezone(cst)
+
+
+def _heat_accum_cutoff_iso(now: datetime) -> str:
+    """早于该生成日（不含）的行删除；含今天在内共 RETENTION_DAYS 个日历日。"""
+    now_cst = _heat_accum_now_cst(now)
+    today = now_cst.date()
+    cutoff = today - timedelta(days=HEAT_ACCUM_RETENTION_DAYS - 1)
+    return cutoff.isoformat()
+
+
+def _heat_accum_prune(conn: sqlite3.Connection, now: datetime) -> None:
+    cutoff_s = _heat_accum_cutoff_iso(now)
+    conn.execute("DELETE FROM heat_accum_watch WHERE generated_date < ?", (cutoff_s,))
+
+
+def _sqlite_row_to_watch_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
+    (
+        symbol,
+        coin,
+        generated_date,
+        last_seen_cst,
+        heat,
+        sideways_days,
+        tags_json,
+        low_price,
+        high_price,
+        price,
+        zone_json,
+        zone_reason,
+        summary_line,
+    ) = row
+    tags: List[Any] = []
+    if tags_json:
+        try:
+            t = json.loads(tags_json)
+            if isinstance(t, list):
+                tags = t
+        except Exception:
+            pass
+    zone: Optional[Any] = None
+    if zone_json:
+        try:
+            zone = json.loads(zone_json)
+        except Exception:
+            zone = None
+    return {
+        "symbol": symbol,
+        "coin": coin,
+        "generated_date": generated_date,
+        "last_seen_cst": last_seen_cst,
+        "heat": heat,
+        "tags": tags,
+        "sideways_days": sideways_days,
+        "low_price": low_price,
+        "high_price": high_price,
+        "price": price,
+        "zone": zone,
+        "zone_reason": zone_reason,
+        "summary_line": summary_line,
+    }
+
+
+def _heat_accum_fetch_payload(conn: sqlite3.Connection, now: datetime) -> Dict[str, Any]:
+    now_cst = _heat_accum_now_cst(now)
+    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT symbol, coin, generated_date, last_seen_cst, heat, sideways_days, tags_json,
+               low_price, high_price, price, zone_json, zone_reason, summary_line
+        FROM heat_accum_watch
+        ORDER BY generated_date DESC, symbol DESC
+        """
+    )
+    rows = cur.fetchall()
+    items = [_sqlite_row_to_watch_item(tuple(r)) for r in rows]
+    seen_times = [it.get("last_seen_cst") for it in items if isinstance(it.get("last_seen_cst"), str)]
+    updated_at = max(seen_times) if seen_times else now_label
+    return {
+        "ok": True,
+        "items": items,
+        "updated_at_cst": updated_at,
+        "retention_days": HEAT_ACCUM_RETENTION_DAYS,
+        "storage": "sqlite",
+    }
+
+
+def load_heat_accum_watchlist_from_db(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """供 HTTP GET：按保留策略清理过期行后返回当前列表。"""
+    if now is None:
+        now = datetime.now(timezone(timedelta(hours=8)))
+    _heat_accum_prune(conn, now)
+    conn.commit()
+    return _heat_accum_fetch_payload(conn, now)
+
+
+def merge_and_persist_heat_accum_watchlist(
+    conn: sqlite3.Connection,
+    hot_pool_signals: List[Dict[str, Any]],
+    now: datetime,
+) -> Dict[str, Any]:
+    """
+    增量写入 accumulation.db：当前轮 hot_pool（热度+收筹）；按 symbol 主键去重；
+    首次出现记 generated_date（CST 日历日），再次命中刷新区间等字段但保留生成日；
+    仅保留生成日在最近 HEAT_ACCUM_RETENTION_DAYS 个日历日内的条目。
+    """
+    now_cst = _heat_accum_now_cst(now)
+    today_s = now_cst.date().isoformat()
+    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
+
+    _heat_accum_prune(conn, now)
+    cur = conn.cursor()
+
+    for sig in hot_pool_signals:
+        if not isinstance(sig, dict):
+            continue
+        sym = sig.get("symbol")
+        if not sym:
+            continue
+        sym = str(sym)
+        summary = _heat_accum_summary_line(sig)
+        tags_json = json.dumps(sig.get("tags") or [], ensure_ascii=False)
+        zone = sig.get("zone")
+        zone_json = json.dumps(zone, ensure_ascii=False) if zone else None
+        z_reason = sig.get("zone_reason")
+        z_reason_s = str(z_reason) if z_reason is not None else None
+
+        cur.execute("SELECT generated_date FROM heat_accum_watch WHERE symbol = ?", (sym,))
+        ex = cur.fetchone()
+        if ex:
+            cur.execute(
+                """
+                UPDATE heat_accum_watch SET
+                    coin = ?, last_seen_cst = ?, heat = ?, sideways_days = ?, tags_json = ?,
+                    low_price = ?, high_price = ?, price = ?, zone_json = ?, zone_reason = ?, summary_line = ?
+                WHERE symbol = ?
+                """,
+                (
+                    sig.get("coin"),
+                    now_label,
+                    sig.get("heat"),
+                    sig.get("sideways_days"),
+                    tags_json,
+                    sig.get("low_price"),
+                    sig.get("high_price"),
+                    sig.get("price"),
+                    zone_json,
+                    z_reason_s,
+                    summary,
+                    sym,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO heat_accum_watch (
+                    symbol, coin, generated_date, last_seen_cst, heat, sideways_days, tags_json,
+                    low_price, high_price, price, zone_json, zone_reason, summary_line
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sym,
+                    sig.get("coin"),
+                    today_s,
+                    now_label,
+                    sig.get("heat"),
+                    sig.get("sideways_days"),
+                    tags_json,
+                    sig.get("low_price"),
+                    sig.get("high_price"),
+                    sig.get("price"),
+                    zone_json,
+                    z_reason_s,
+                    summary,
+                ),
+            )
+
+    conn.commit()
+    print(f"  💾 热度+收筹看盘已写入 SQLite ({DB_PATH})")
+    return _heat_accum_fetch_payload(conn, now)
+
+
+def _migrate_legacy_heat_accum_json(conn: sqlite3.Connection) -> None:
+    """一次性：旧 heat_accum_watchlist.json → DB，成功后改名为 .bak。"""
+    path = _LEGACY_HEAT_ACCUM_JSON
+    if not path.is_file():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        items = raw.get("items") if isinstance(raw, dict) else None
+        if not isinstance(items, list):
+            return
+        cur = conn.cursor()
+        migrated = 0
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sym = it.get("symbol")
+            if not sym:
+                continue
+            gd = it.get("generated_date")
+            if not gd or not isinstance(gd, str):
+                continue
+            cur.execute("SELECT 1 FROM heat_accum_watch WHERE symbol = ?", (str(sym),))
+            if cur.fetchone():
+                continue
+            tags_json = json.dumps(it.get("tags") or [], ensure_ascii=False)
+            zone = it.get("zone")
+            zone_json = json.dumps(zone, ensure_ascii=False) if zone else None
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO heat_accum_watch (
+                    symbol, coin, generated_date, last_seen_cst, heat, sideways_days, tags_json,
+                    low_price, high_price, price, zone_json, zone_reason, summary_line
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(sym),
+                    it.get("coin"),
+                    gd[:10],
+                    str(it.get("last_seen_cst") or "") or "(迁移)",
+                    it.get("heat"),
+                    it.get("sideways_days"),
+                    tags_json,
+                    it.get("low_price"),
+                    it.get("high_price"),
+                    it.get("price"),
+                    zone_json,
+                    str(it.get("zone_reason")) if it.get("zone_reason") is not None else None,
+                    str(it.get("summary_line") or ""),
+                ),
+            )
+            if cur.rowcount == 1:
+                migrated += 1
+        conn.commit()
+        bak = path.with_suffix(".json.bak")
+        path.rename(bak)
+        print(f"  📦 已迁移热度+收筹看盘 JSON → DB（新增 {migrated} 条），原文件改为 {bak.name}")
+    except Exception as e:
+        print(f"⚠️ 迁移 heat_accum_watchlist.json 跳过: {e}")
 
 
 # 收筹标的池参数
@@ -281,7 +546,23 @@ def init_db():
         vol_ratio REAL,
         details TEXT
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS heat_accum_watch (
+        symbol TEXT PRIMARY KEY,
+        coin TEXT,
+        generated_date TEXT NOT NULL,
+        last_seen_cst TEXT NOT NULL,
+        heat REAL,
+        sideways_days INTEGER,
+        tags_json TEXT,
+        low_price REAL,
+        high_price REAL,
+        price REAL,
+        zone_json TEXT,
+        zone_reason TEXT,
+        summary_line TEXT
+    )""")
     conn.commit()
+    _migrate_legacy_heat_accum_json(conn)
     return conn
 
 
@@ -1236,11 +1517,11 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     for s in ambush_gem[:2]:
         if s["coin"] not in [h.split(" ")[1] for h in highlights]:
             highlights.append(f"💎 {s['coin']} 低市值{mcap_str(s['est_mcap'])}+OI{s['d6h']:+.0f}%，埋伏首选")
-    
-        if highlights:
-            lines.append(f"\n💡 **值得关注**")
-            for h in highlights[:15]:
-                lines.append(f"  {h}")
+
+    if highlights:
+        lines.append(f"\n💡 **值得关注**")
+        for h in highlights[:15]:
+            lines.append(f"  {h}")
     
     # 图例说明
     lines.append(f"\n📖 **图例**")
@@ -1249,11 +1530,13 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     lines.append("  🔥💤热度+收筹=最强预判 | 🔥⚡热度+OI=正在发生")
     
     report = "\n".join(lines)
+    heat_accum_watchlist = merge_and_persist_heat_accum_watchlist(conn, hot_pool_signals, now)
     payload = {
         "ok": True,
         "generated_at_cst": now.strftime("%Y-%m-%d %H:%M") + " CST",
         "highlights": highlights[:15],
         "hot_pool_signals": hot_pool_signals,
+        "heat_accum_watchlist": heat_accum_watchlist,
         "report_markdown": report,
         "hot_coins": hot_coins[:16],
         "chase": chase[:16],

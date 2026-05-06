@@ -1704,6 +1704,28 @@ async def get_accumulation_oi_radar():
         raise HTTPException(status_code=500, detail="snapshot_corrupt")
 
 
+@app.get("/api/accumulation/heat-accum-watch")
+async def get_heat_accum_watch():
+    """热度+收筹独立看盘：读写 accumulation.db 表 heat_accum_watch；含生成日与 7 日保留。"""
+    try:
+        from accumulation_radar import init_db, load_heat_accum_watchlist_from_db
+
+        conn = init_db()
+        try:
+            data = load_heat_accum_watchlist_from_db(conn)
+        finally:
+            conn.close()
+        if not data.get("items"):
+            data.setdefault(
+                "message",
+                "尚无归档，请等待整点 :30 扫描或点击「刷新」后重试。",
+            )
+        return data
+    except Exception as e:
+        logger.warning("heat_accum watchlist read failed: %s", e)
+        raise HTTPException(status_code=500, detail="watchlist_db_error")
+
+
 @app.post("/api/accumulation/oi-radar/refresh")
 async def post_accumulation_oi_radar_refresh():
     """
