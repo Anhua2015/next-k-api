@@ -1806,6 +1806,51 @@ async def post_clear_watch_tables(body: ClearWatchTablesBody):
         raise HTTPException(status_code=500, detail="clear_failed")
 
 
+class TriggerCronBody(BaseModel):
+    """手动触发与 APScheduler 注册项相同的子进程任务。"""
+
+    task: str = Field(
+        ...,
+        description="pool | oi | s2_funding | s6_alpha",
+    )
+
+
+_CRON_TASK_FUNCS: Dict[str, Any] = {
+    "pool": run_pool_task,
+    "oi": run_oi_task,
+    "s2_funding": run_s2_oi_funding_task,
+    "s6_alpha": run_s6_futures_alpha_task,
+}
+
+
+@app.post("/api/accumulation/maintenance/trigger-cron")
+async def post_trigger_accumulation_cron(body: TriggerCronBody):
+    """
+    在后台线程执行与定时任务相同的逻辑（子进程跑脚本），HTTP 立即返回。
+
+    - pool: accumulation_radar pool（定时每日 10:00 CST）
+    - oi: accumulation_radar oi（定时每小时 :30）
+    - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
+    - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
+    """
+    key = (body.task or "").strip()
+    fn = _CRON_TASK_FUNCS.get(key)
+    if fn is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown task {key!r}; allowed: {sorted(_CRON_TASK_FUNCS.keys())}",
+        )
+
+    def _work() -> None:
+        try:
+            fn()
+        except Exception:
+            logger.exception("manual trigger-cron task=%s failed", key)
+
+    threading.Thread(target=_work, daemon=True).start()
+    return {"accepted": True, "task": key}
+
+
 @app.post("/api/accumulation/oi-radar/refresh")
 async def post_accumulation_oi_radar_refresh():
     """
