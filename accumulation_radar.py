@@ -1452,7 +1452,8 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     highlights = []
     hot_pool_signals: List[Dict[str, Any]] = []
     
-    # 热度+收筹池重叠 = 最强信号（放最前面！热度领先OI）— 取前3名；方案C：SMC 优先，否则箱体+ATR 止损
+    # 热度+收筹池重叠 = 最强信号（放最前面！热度领先OI）— 取前3名。
+    # 方案 C（SMC/箱体区间）仍写入 hot_pool_signals → DB/热度看盘；「值得关注」正文不含 SMC，避免与看盘重复。
     hot_pool = [d for d in coin_data.values() if d["heat"] > 0 and d["in_pool"]]
     for s in sorted(hot_pool, key=lambda x: x["heat"], reverse=True)[:3]:
         tags = []
@@ -1480,10 +1481,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             "zone": zone,
             "zone_reason": zone_reason,
         })
-        if zone:
-            highlights.append(base + "\n      " + format_scheme_c_zone_line(zone))
-        else:
-            highlights.append(base)
+        highlights.append(base)
     
     # 热度+OI已经在涨 = 正在发生
     hot_oi = [d for d in coin_data.values() if d["heat"] > 0 and d["d6h"] > 5]
