@@ -413,6 +413,26 @@ def load_ambush_watchlist_from_db(
     return _ambush_watch_fetch_payload(conn, now)
 
 
+def clear_ambush_watch_table(conn: sqlite3.Connection) -> int:
+    """清空表 ambush_watch。返回清空前行数。"""
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM ambush_watch")
+    n = int(cur.fetchone()[0] or 0)
+    cur.execute("DELETE FROM ambush_watch")
+    conn.commit()
+    return n
+
+
+def clear_heat_accum_watch_table(conn: sqlite3.Connection) -> int:
+    """清空表 heat_accum_watch。返回清空前行数。"""
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM heat_accum_watch")
+    n = int(cur.fetchone()[0] or 0)
+    cur.execute("DELETE FROM heat_accum_watch")
+    conn.commit()
+    return n
+
+
 def _sync_ambush_watch_kept_symbols(
     conn: sqlite3.Connection,
     signal_type: str,

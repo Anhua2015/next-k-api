@@ -1748,6 +1748,59 @@ async def get_ambush_watch():
         raise HTTPException(status_code=500, detail="ambush_watch_db_error")
 
 
+class ClearWatchTablesBody(BaseModel):
+    """清理看盘表 ambush_watch / heat_accum_watch（无鉴权：请勿将 API 长期暴露在公网）。"""
+
+    tables: List[str] = Field(
+        default_factory=lambda: ["ambush_watch"],
+        description="允许: ambush_watch, heat_accum_watch",
+    )
+
+
+@app.post("/api/accumulation/maintenance/clear-watch-tables")
+async def post_clear_watch_tables(body: ClearWatchTablesBody):
+    """
+    清空 `ambush_watch` / `heat_accum_watch`。
+
+    清库后请再调一次「OI 刷新」或等整点扫描，以按新规则写回数据。
+    """
+    allowed = {"ambush_watch", "heat_accum_watch"}
+    tables = [t.strip() for t in body.tables if t and str(t).strip()]
+    if not tables:
+        tables = ["ambush_watch"]
+    unknown = [t for t in tables if t not in allowed]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown tables: {unknown}")
+
+    try:
+        from accumulation_radar import (
+            clear_ambush_watch_table,
+            clear_heat_accum_watch_table,
+            init_db,
+        )
+
+        conn = init_db()
+        try:
+            cleared: Dict[str, int] = {}
+            if "ambush_watch" in tables:
+                cleared["ambush_watch"] = clear_ambush_watch_table(conn)
+            if "heat_accum_watch" in tables:
+                cleared["heat_accum_watch"] = clear_heat_accum_watch_table(conn)
+            logger.warning(
+                "maintenance clear-watch-tables tables=%s cleared=%s",
+                tables,
+                cleared,
+            )
+            return {"ok": True, "cleared_rows": cleared}
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("clear watch tables failed: %s", e)
+        raise HTTPException(status_code=500, detail="clear_failed")
+
+
 @app.post("/api/accumulation/oi-radar/refresh")
 async def post_accumulation_oi_radar_refresh():
     """
