@@ -1726,6 +1726,28 @@ async def get_heat_accum_watch():
         raise HTTPException(status_code=500, detail="watchlist_db_error")
 
 
+@app.get("/api/accumulation/ambush-watch")
+async def get_ambush_watch():
+    """埋伏榜内 🎯 暗流 / 💎 低市值+OI：表 ambush_watch；含生成日与 7 日保留。"""
+    try:
+        from accumulation_radar import init_db, load_ambush_watchlist_from_db
+
+        conn = init_db()
+        try:
+            data = load_ambush_watchlist_from_db(conn)
+        finally:
+            conn.close()
+        if not data.get("items"):
+            data.setdefault(
+                "message",
+                "尚无归档，请等待整点 :30 扫描或点击「刷新」后重试。",
+            )
+        return data
+    except Exception as e:
+        logger.warning("ambush watchlist read failed: %s", e)
+        raise HTTPException(status_code=500, detail="ambush_watch_db_error")
+
+
 @app.post("/api/accumulation/oi-radar/refresh")
 async def post_accumulation_oi_radar_refresh():
     """
