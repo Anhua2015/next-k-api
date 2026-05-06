@@ -589,10 +589,10 @@ MIN_OI_USD = 2_000_000        # 最低OI门槛 $2M
 # 放量突破参数
 VOL_BREAKOUT_MULT = 3.0       # 当日Vol > 3x均值 = 放量
 
-# 热度+收筹「方案C」：30m 多因子共振区间（价值/VWAP + 成交密集区 + 回撤结构）
+# 热度+收筹「方案C」：1h 多因子共振区间（价值/VWAP + 成交密集区 + 回撤结构）
 BOX_STOP_ATR_MULT = 1.5
-SCHEME_C_INTERVAL = "30m"
-SCHEME_C_KLINE_LIMIT = 80
+SCHEME_C_INTERVAL = "1h"
+SCHEME_C_KLINE_LIMIT = 120
 SCHEME_C_MIN_KLINES = 40
 SCHEME_C_MIN_SCORE = 65.0
 
@@ -699,7 +699,7 @@ def _score_zone_candidate(
     else:
         width_score = _clamp(20.0 - (width_pct - 3.0) * 4.0, 0.0, 20.0)
 
-    # 趋势分：30m EMA20 方向 + 现价相对 EMA20
+    # 趋势分：1h EMA20 方向 + 现价相对 EMA20
     trend_score = 0.0
     trend_score += 10.0 if ema20 >= ema20_prev else 2.0
     trend_score += 10.0 if cur_px >= ema20 else 4.0
@@ -729,7 +729,7 @@ def resolve_hot_pool_zone_scheme_c(
     last_price: float,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    方案 C：30m 多因子共振区间。
+    方案 C：1h 多因子共振区间。
     候选 = VWAP+ATR / VAL~POC / 0.382~0.618 回撤，择优输出最高分。
     """
     kl = api_get(
@@ -817,11 +817,11 @@ def resolve_hot_pool_zone_scheme_c(
         "entry_bottom": float(best["bottom"]),
         "entry_top": float(best["top"]),
         "stop_loss": float(best["bottom"]) * (1 - eps),
-        "source": "MIX30m",
+        "source": "MIX1h",
         "method": str(best["name"]),
         "score": round(float(best["score"]), 1),
     }
-    return zone, "mix30m"
+    return zone, "mix1h"
 
 
 def format_scheme_c_zone_line(zone: Dict[str, Any]) -> str:
@@ -830,7 +830,7 @@ def format_scheme_c_zone_line(zone: Dict[str, Any]) -> str:
     tp = float(zone["entry_top"])
     sl = float(zone["stop_loss"])
     dec = 4 if tp > 0.01 else 6
-    label = "30m共振"
+    label = "1h共振"
     method = zone.get("method")
     score = zone.get("score")
     extra = ""
@@ -1832,7 +1832,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     hot_pool_signals: List[Dict[str, Any]] = []
     
     # 热度+收筹池重叠 = 最强信号（放最前面！热度领先OI）— 取前3名。
-    # 方案 C（30m 多因子区间）仍写入 hot_pool_signals → DB/热度看盘；「值得关注」正文不含区间细节，避免与看盘重复。
+    # 方案 C（1h 多因子区间）仍写入 hot_pool_signals → DB/热度看盘；「值得关注」正文不含区间细节，避免与看盘重复。
     hot_pool = [d for d in coin_data.values() if d["heat"] > 0 and d["in_pool"]]
     for s in sorted(hot_pool, key=lambda x: x["heat"], reverse=True)[:3]:
         tags = []
