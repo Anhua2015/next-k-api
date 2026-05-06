@@ -57,8 +57,14 @@ HEAT_ACCUM_RETENTION_DAYS = 7  # 含今天在内共 7 个日历日
 AMBUSH_WATCH_RETENTION_DAYS = 7  # 暗流 / 低市值埋伏看盘，与热度收筹一致
 # 每轮 OI 雷达：暗流 / 低市值+OI 每类仅取埋伏榜（total 降序）中命中条件的前 N 名
 AMBUSH_WATCH_TOP_N = 2
+# 「📍 Patrick核心」：收筹池内 + |6h OI| 达标；与热度无关，取强度前 N（已在 highlights 中出现的币种跳过）
+PATRICK_CORE_OI_MIN_ABS_PCT = 3.0
+PATRICK_CORE_HIGHLIGHT_TOP_N = 2
+# 每轮 OI 雷达写入 SQLite 的 Patrick 核心条数上限（按 |OI| 强度）
+PATRICK_CORE_DB_TOP_N = 20
+PATRICK_CORE_RETENTION_DAYS = 7  # 含今天在内共 7 个日历日；与热度/埋伏看盘一致
 # 值得关注合并后的 API / 电报展示条数上限
-WORTH_HIGHLIGHTS_MAX = 13
+WORTH_HIGHLIGHTS_MAX = 15
 _LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
 # 热度收筹表：突破—回踩—延续状态机（1h K 线，不含 OI）
 HEAT_ACCUM_BPC_INTERVAL = "1h"
@@ -94,6 +100,14 @@ def _heat_accum_summary_line(sig: Dict[str, Any]) -> str:
     coin = sig.get("coin") or ""
     sw = sig.get("sideways_days") or 0
     return f"🔥💤 {coin} 热度({'+'.join(tags)})+收筹{sw}天=OI将涨"
+
+
+def _patrick_core_summary_line(sig: Dict[str, Any]) -> str:
+    """Patrick 核心看盘摘要（与「值得关注」📍 条一致）。"""
+    coin = sig.get("coin") or ""
+    sw = int(sig.get("sideways_days") or 0)
+    d6 = float(sig.get("d6h") or 0)
+    return f"📍 {coin} 收筹{sw}天+OI{d6:+.0f}%（Patrick核心）"
 
 
 def _heat_accum_now_cst(now: datetime) -> datetime:
@@ -664,6 +678,7 @@ def patch_oi_radar_snapshot_watchlists_from_db(conn: sqlite3.Connection) -> bool
     now = datetime.now(timezone(timedelta(hours=8)))
     raw["ambush_watchlist"] = load_ambush_watchlist_from_db(conn, now=now)
     raw["heat_accum_watchlist"] = load_heat_accum_watchlist_from_db(conn, now=now)
+    raw["patrick_core_watchlist"] = load_patrick_core_watchlist_from_db(conn, now=now)
     _persist_oi_radar_snapshot(raw)
     return True
 
@@ -684,6 +699,177 @@ def clear_heat_accum_watch_table(conn: sqlite3.Connection) -> int:
     cur.execute("SELECT COUNT(*) FROM heat_accum_watch")
     n = int(cur.fetchone()[0] or 0)
     cur.execute("DELETE FROM heat_accum_watch")
+    conn.commit()
+    return n
+
+
+def _patrick_core_cutoff_iso(now: datetime) -> str:
+    """早于该生成日（不含）的行删除；含今天在内共 PATRICK_CORE_RETENTION_DAYS 个日历日。"""
+    now_cst = _heat_accum_now_cst(now)
+    today = now_cst.date()
+    cutoff = today - timedelta(days=PATRICK_CORE_RETENTION_DAYS - 1)
+    return cutoff.isoformat()
+
+
+def _patrick_core_prune(conn: sqlite3.Connection, now: datetime) -> None:
+    cutoff_s = _patrick_core_cutoff_iso(now)
+    conn.execute("DELETE FROM patrick_core_watch WHERE generated_date < ?", (cutoff_s,))
+
+
+def _sqlite_row_to_patrick_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
+    (
+        symbol,
+        coin,
+        generated_date,
+        last_seen_cst,
+        sideways_days,
+        d6h,
+        px_chg,
+        est_mcap,
+        price,
+        low_price,
+        high_price,
+        summary_line,
+    ) = row
+    return {
+        "symbol": symbol,
+        "coin": coin,
+        "generated_date": generated_date,
+        "last_seen_cst": last_seen_cst,
+        "sideways_days": sideways_days,
+        "d6h": d6h,
+        "px_chg": px_chg,
+        "est_mcap": est_mcap,
+        "price": price,
+        "low_price": low_price,
+        "high_price": high_price,
+        "summary_line": summary_line,
+    }
+
+
+def _patrick_core_fetch_payload(conn: sqlite3.Connection, now: datetime) -> Dict[str, Any]:
+    now_cst = _heat_accum_now_cst(now)
+    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT symbol, coin, generated_date, last_seen_cst,
+               sideways_days, d6h, px_chg, est_mcap, price, low_price, high_price, summary_line
+        FROM patrick_core_watch
+        ORDER BY generated_date DESC, last_seen_cst DESC, symbol ASC
+        """
+    )
+    rows = cur.fetchall()
+    items = [_sqlite_row_to_patrick_item(tuple(r)) for r in rows]
+    seen_times = [it.get("last_seen_cst") for it in items if isinstance(it.get("last_seen_cst"), str)]
+    updated_at = max(seen_times) if seen_times else now_label
+    return {
+        "ok": True,
+        "items": items,
+        "updated_at_cst": updated_at,
+        "retention_days": PATRICK_CORE_RETENTION_DAYS,
+        "storage": "sqlite",
+    }
+
+
+def load_patrick_core_watchlist_from_db(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """供 HTTP GET：按保留策略清理过期行后返回当前列表。"""
+    if now is None:
+        now = datetime.now(timezone(timedelta(hours=8)))
+    _patrick_core_prune(conn, now)
+    conn.commit()
+    return _patrick_core_fetch_payload(conn, now)
+
+
+def merge_and_persist_patrick_core_watchlist(
+    conn: sqlite3.Connection,
+    patrick_signals: List[Dict[str, Any]],
+    now: datetime,
+) -> Dict[str, Any]:
+    """
+    增量写入 patrick_core_watch：收筹池 + |OI| 达标；按 symbol 主键 upsert；
+    首次出现记 generated_date（CST，精确到分），再次命中刷新指标与 last_seen；
+    仅保留生成日在最近 PATRICK_CORE_RETENTION_DAYS 个日历日内的条目。
+    """
+    now_cst = _heat_accum_now_cst(now)
+    generated_at_s = now_cst.strftime("%Y-%m-%d %H:%M")
+    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
+
+    _patrick_core_prune(conn, now)
+    cur = conn.cursor()
+
+    for sig in patrick_signals:
+        if not isinstance(sig, dict):
+            continue
+        sym = sig.get("symbol")
+        if not sym:
+            continue
+        sym = str(sym)
+        summary = _patrick_core_summary_line(sig)
+
+        cur.execute("SELECT generated_date FROM patrick_core_watch WHERE symbol = ?", (sym,))
+        ex = cur.fetchone()
+        if ex:
+            cur.execute(
+                """
+                UPDATE patrick_core_watch SET
+                    coin = ?, last_seen_cst = ?, sideways_days = ?, d6h = ?, px_chg = ?,
+                    est_mcap = ?, price = ?, low_price = ?, high_price = ?, summary_line = ?
+                WHERE symbol = ?
+                """,
+                (
+                    sig.get("coin"),
+                    now_label,
+                    int(sig.get("sideways_days") or 0),
+                    float(sig.get("d6h") or 0),
+                    float(sig.get("px_chg") or 0),
+                    float(sig.get("est_mcap") or 0),
+                    float(sig.get("price") or 0),
+                    float(sig.get("low_price") or 0),
+                    float(sig.get("high_price") or 0),
+                    summary,
+                    sym,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO patrick_core_watch (
+                    symbol, coin, generated_date, last_seen_cst,
+                    sideways_days, d6h, px_chg, est_mcap, price, low_price, high_price, summary_line
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sym,
+                    sig.get("coin"),
+                    generated_at_s,
+                    now_label,
+                    int(sig.get("sideways_days") or 0),
+                    float(sig.get("d6h") or 0),
+                    float(sig.get("px_chg") or 0),
+                    float(sig.get("est_mcap") or 0),
+                    float(sig.get("price") or 0),
+                    float(sig.get("low_price") or 0),
+                    float(sig.get("high_price") or 0),
+                    summary,
+                ),
+            )
+
+    conn.commit()
+    print(f"  💾 Patrick核心看盘已写入 SQLite ({DB_PATH})")
+    return _patrick_core_fetch_payload(conn, now)
+
+
+def clear_patrick_core_watch_table(conn: sqlite3.Connection) -> int:
+    """清空表 patrick_core_watch。返回清空前行数。"""
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM patrick_core_watch")
+    n = int(cur.fetchone()[0] or 0)
+    cur.execute("DELETE FROM patrick_core_watch")
     conn.commit()
     return n
 
@@ -881,6 +1067,20 @@ def init_db():
         c.execute("ALTER TABLE ambush_watch ADD COLUMN ambush_total REAL")
     except sqlite3.OperationalError:
         pass
+    c.execute("""CREATE TABLE IF NOT EXISTS patrick_core_watch (
+        symbol TEXT PRIMARY KEY,
+        coin TEXT,
+        generated_date TEXT NOT NULL,
+        last_seen_cst TEXT NOT NULL,
+        sideways_days INTEGER,
+        d6h REAL,
+        px_chg REAL,
+        est_mcap REAL,
+        price REAL,
+        low_price REAL,
+        high_price REAL,
+        summary_line TEXT
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS s2_funding_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         recorded_at TEXT NOT NULL,
@@ -1812,6 +2012,34 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         })
         highlights.append(base)
     
+    # Patrick 核心（文档 5–8 行）：收筹池 + OI 异动，不要求热度；去重避免与上文同币重复一条
+    patrick_core_pool = [
+        d
+        for d in coin_data.values()
+        if d["in_pool"] and abs(d["d6h"]) >= PATRICK_CORE_OI_MIN_ABS_PCT
+    ]
+    patrick_sorted = sorted(patrick_core_pool, key=lambda x: abs(x["d6h"]), reverse=True)
+    patrick_core_signals: List[Dict[str, Any]] = []
+    for s in patrick_sorted[:PATRICK_CORE_DB_TOP_N]:
+        patrick_core_signals.append(
+            {
+                "coin": s["coin"],
+                "symbol": s["sym"],
+                "sideways_days": s["sw_days"],
+                "d6h": s["d6h"],
+                "px_chg": s["px_chg"],
+                "est_mcap": s["est_mcap"],
+                "price": s["price"],
+                "low_price": s["low_price"],
+                "high_price": s["high_price"],
+            }
+        )
+    for s in patrick_sorted[: PATRICK_CORE_HIGHLIGHT_TOP_N]:
+        if s["coin"] not in " ".join(highlights):
+            highlights.append(
+                f"📍 {s['coin']} 收筹{s['sw_days']}天+OI{s['d6h']:+.0f}%（Patrick核心）"
+            )
+    
     # 热度+OI已经在涨 = 正在发生
     hot_oi = [d for d in coin_data.values() if d["heat"] > 0 and d["d6h"] > 5]
     for s in sorted(hot_oi, key=lambda x: x["d6h"], reverse=True)[:2]:
@@ -1863,6 +2091,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     lines.append("  🔥热度=CG热搜+成交量暴增(OI领先指标)")
     lines.append("  费率负=空头燃料 | 💎市值 | 💤横盘(收筹)")
     lines.append("  🔥💤热度+收筹=最强预判 | 🔥⚡热度+OI=正在发生")
+    lines.append("  📍收筹池+OI异动=Patrick核心（可无热度）")
     
     report = "\n".join(lines)
     # 🎯 暗流 / 💎 低市值+OI：与上文 highlights 中对应条目同源，每类至多 AMBUSH_WATCH_TOP_N 条写入 ambush_watch
@@ -1870,6 +2099,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         conn, ambush_dark, ambush_gem, now, mcap_str
     )
     heat_accum_watchlist = merge_and_persist_heat_accum_watchlist(conn, hot_pool_signals, now)
+    patrick_core_watchlist = merge_and_persist_patrick_core_watchlist(conn, patrick_core_signals, now)
     payload = {
         "ok": True,
         "generated_at_cst": now.strftime("%Y-%m-%d %H:%M") + " CST",
@@ -1877,6 +2107,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         "hot_pool_signals": hot_pool_signals,
         "heat_accum_watchlist": heat_accum_watchlist,
         "ambush_watchlist": ambush_watchlist,
+        "patrick_core_watchlist": patrick_core_watchlist,
         "report_markdown": report,
         "hot_coins": hot_coins[:16],
         "chase": chase[:16],

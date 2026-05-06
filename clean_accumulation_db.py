@@ -6,6 +6,7 @@
   python clean_accumulation_db.py                 # 默认只清空 ambush_watch
   python clean_accumulation_db.py --ambush
   python clean_accumulation_db.py --heat-accum
+  python clean_accumulation_db.py --patrick-core
   python clean_accumulation_db.py --all
 
 环境变量:
@@ -29,34 +30,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="清空 accumulation.db 看盘表")
     parser.add_argument("--ambush", action="store_true", help="清空 ambush_watch")
     parser.add_argument("--heat-accum", action="store_true", help="清空 heat_accum_watch")
+    parser.add_argument("--patrick-core", action="store_true", help="清空 patrick_core_watch")
     parser.add_argument(
         "--all",
         action="store_true",
-        help="同时清空 ambush_watch 与 heat_accum_watch",
+        help="同时清空 ambush_watch、heat_accum_watch、patrick_core_watch",
     )
     args = parser.parse_args()
 
     if args.all:
-        do_ambush = True
-        do_heat = True
-    elif args.ambush and args.heat_accum:
-        do_ambush = True
-        do_heat = True
-    elif args.heat_accum:
-        do_ambush = False
-        do_heat = True
-    elif args.ambush:
-        do_ambush = True
-        do_heat = False
+        do_ambush = do_heat = do_patrick = True
+    elif args.ambush or args.heat_accum or args.patrick_core:
+        do_ambush = args.ambush
+        do_heat = args.heat_accum
+        do_patrick = args.patrick_core
     else:
         do_ambush = True
         do_heat = False
+        do_patrick = False
 
     os.chdir(_ROOT)
     from accumulation_radar import (
         DB_PATH,
         clear_ambush_watch_table,
         clear_heat_accum_watch_table,
+        clear_patrick_core_watch_table,
         init_db,
     )
 
@@ -68,8 +66,10 @@ def main() -> None:
             report["ambush_watch"] = clear_ambush_watch_table(conn)
         if do_heat:
             report["heat_accum_watch"] = clear_heat_accum_watch_table(conn)
+        if do_patrick:
+            report["patrick_core_watch"] = clear_patrick_core_watch_table(conn)
         if not report:
-            parser.error("请指定 --ambush、--heat-accum 或 --all")
+            parser.error("请指定 --ambush、--heat-accum、--patrick-core 或 --all")
         print(f"数据库: {db_path}")
         for k, v in report.items():
             print(f"  已清空 {k}，删除前行数约 {v}")
