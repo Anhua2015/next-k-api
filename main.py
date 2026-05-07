@@ -1794,6 +1794,28 @@ async def get_ambush_watch():
         raise HTTPException(status_code=500, detail="ambush_watch_db_error")
 
 
+@app.get("/api/accumulation/focus-watch")
+async def get_focus_watch():
+    """👑 重点关注（逼空/天量/暗流 + 否决）：表 focus_watch；含生成日与 7 日保留。"""
+    try:
+        from accumulation_radar import init_db, load_focus_watchlist_from_db
+
+        conn = init_db()
+        try:
+            data = load_focus_watchlist_from_db(conn)
+        finally:
+            conn.close()
+        if not data.get("items"):
+            data.setdefault(
+                "message",
+                "尚无归档，请等待整点 :30 扫描或点击「刷新」后重试。",
+            )
+        return data
+    except Exception as e:
+        logger.warning("focus_watch read failed: %s", e)
+        raise HTTPException(status_code=500, detail="focus_watch_db_error")
+
+
 @app.get("/api/accumulation/patrick-core-watch")
 async def get_patrick_core_watch():
     """📍 Patrick 核心：收筹池 + OI 异动；表 patrick_core_watch；含生成日与 7 日保留。"""
@@ -1856,7 +1878,7 @@ class ClearWatchTablesBody(BaseModel):
 
     tables: List[str] = Field(
         default_factory=lambda: ["ambush_watch"],
-        description="watchlist（收筹池）/ ambush / heat / patrick；worth 侧可用 worth_watch_all 或单表 worth_watch_heat_accum 等",
+        description="watchlist（收筹池）/ focus_watch / ambush / heat / patrick；worth 侧可用 worth_watch_all 或单表 worth_watch_heat_accum 等",
     )
 
 
@@ -1872,6 +1894,7 @@ async def post_clear_watch_tables(body: ClearWatchTablesBody):
     _worth_tables = set(WORTH_WATCH_TABLE_BY_CATEGORY.values())
     allowed = {
         "watchlist",
+        "focus_watch",
         "ambush_watch",
         "heat_accum_watch",
         "patrick_core_watch",
@@ -1893,6 +1916,7 @@ async def post_clear_watch_tables(body: ClearWatchTablesBody):
             clear_heat_accum_watch_table,
             clear_one_worth_watch_category_table,
             clear_patrick_core_watch_table,
+            clear_focus_watch_table,
             clear_watchlist_table,
             init_db,
             patch_oi_radar_snapshot_after_watchlist_clear,
@@ -1904,6 +1928,8 @@ async def post_clear_watch_tables(body: ClearWatchTablesBody):
             cleared: Dict[str, Any] = {}
             if "watchlist" in tables:
                 cleared["watchlist"] = clear_watchlist_table(conn)
+            if "focus_watch" in tables:
+                cleared["focus_watch"] = clear_focus_watch_table(conn)
             if "ambush_watch" in tables:
                 cleared["ambush_watch"] = clear_ambush_watch_table(conn)
             if "heat_accum_watch" in tables:

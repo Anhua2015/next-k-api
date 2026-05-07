@@ -108,6 +108,37 @@ LIQUIDITY_SWEEP_POOL_MAX_SCAN = 45
 LIQUIDITY_SWEEP_PIERCE_FRAC = 0.0012  # 相对 zone_low 下探深度
 LIQUIDITY_SWEEP_RECOVERY_BARS = 5
 LIQUIDITY_SWEEP_OI_MAX_DROP = 0.15  # 相对洗盘 K 附近 OI，若之后萎缩超过该比例则不作弹簧
+# 👑 重点关注：否决 + 三通道（入库 focus_watch，保留 7 日）
+TOP_FOCUS_RETENTION_DAYS = 7
+TOP_FOCUS_MAX = 15
+FOCUS_VETO_PX_POS_OI_NEG_PCT = -5.0  # px_chg>0 且 d6h 低于此值 → 否决（空头平仓上涨）
+FOCUS_SQUEEZE_SW_MIN = 60
+FOCUS_SQUEEZE_FR_MAX = -0.05  # fr_pct <= -0.05%
+FOCUS_DARK_ABS_PX_MAX = 3.0
+FOCUS_DARK_D6H_MIN = 4.0
+FOCUS_DARK_MCAP_MAX_USD = 200_000_000
+FOCUS_VOL_IGNITE_BREAKOUT_MIN = 10.0
+FOCUS_VOL_IGNITE_STATUS_NEEDLE = "放量启动"
+FOCUS_CHANNEL_PRIORITY: Dict[str, int] = {
+    "squeeze": 1,
+    "volume_ignite": 2,
+    "dark_flow": 3,
+}
+FOCUS_CHANNEL_LABEL_ZH: Dict[str, str] = {
+    "squeeze": "极致逼空",
+    "volume_ignite": "绝地天量",
+    "dark_flow": "纯正暗流",
+}
+FOCUS_CHANNEL_EMOJI: Dict[str, str] = {
+    "squeeze": "🚀",
+    "volume_ignite": "🌋",
+    "dark_flow": "🥷",
+}
+FOCUS_STRATEGY_TIP_ZH: Dict[str, str] = {
+    "squeeze": "关注突破前高与费率变化，谨防末端踩踏反转。",
+    "volume_ignite": "等待 1h 缩量回踩价值区上沿再跟随，慎追阳线末端。",
+    "dark_flow": "贴近 POC/价值区观察，仓位随波动分批。",
+}
 _LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
 # 热度收筹表：突破—回踩—延续状态机（1h K 线，不含 OI）
 HEAT_ACCUM_BPC_INTERVAL = "1h"
@@ -1010,6 +1041,7 @@ def patch_oi_radar_snapshot_watchlists_from_db(conn: sqlite3.Connection) -> bool
     raw["heat_accum_watchlist"] = load_heat_accum_watchlist_from_db(conn, now=now)
     raw["patrick_core_watchlist"] = load_patrick_core_watchlist_from_db(conn, now=now)
     raw["worth_highlight_watchlist"] = load_worth_highlight_watchlist_from_db(conn, now=now)
+    raw["focus_watchlist"] = load_focus_watchlist_from_db(conn, now=now)
     _persist_oi_radar_snapshot(raw)
     return True
 
@@ -1048,6 +1080,7 @@ def patch_oi_radar_snapshot_after_watchlist_clear(conn: sqlite3.Connection) -> b
     raw["heat_accum_watchlist"] = load_heat_accum_watchlist_from_db(conn, now=now)
     raw["patrick_core_watchlist"] = load_patrick_core_watchlist_from_db(conn, now=now)
     raw["worth_highlight_watchlist"] = load_worth_highlight_watchlist_from_db(conn, now=now)
+    raw["focus_watchlist"] = load_focus_watchlist_from_db(conn, now=now)
     _persist_oi_radar_snapshot(raw)
     return True
 
@@ -1615,7 +1648,7 @@ def init_db():
         last_oi_alert TEXT,
         notes TEXT
     )""")
-    for _col in ("poc_price", "va_low", "va_high"):
+    for _col in ("poc_price", "va_low", "va_high", "vol_breakout"):
         try:
             c.execute(f"ALTER TABLE watchlist ADD COLUMN {_col} REAL")
         except sqlite3.OperationalError:
@@ -1713,6 +1746,18 @@ def init_db():
         c.execute("DROP TABLE IF EXISTS worth_highlight_watch")
     except sqlite3.OperationalError:
         pass
+    c.execute("""CREATE TABLE IF NOT EXISTS focus_watch (
+        symbol TEXT PRIMARY KEY,
+        coin TEXT,
+        generated_date TEXT NOT NULL,
+        last_seen_cst TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        priority INTEGER NOT NULL,
+        rank_in_list INTEGER,
+        summary_line TEXT,
+        strategy_tip TEXT,
+        detail_json TEXT
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS s2_funding_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         recorded_at TEXT NOT NULL,
@@ -2156,8 +2201,8 @@ def save_watchlist(conn, results):
             """INSERT OR REPLACE INTO watchlist 
             (symbol, coin, added_date, sideways_days, range_pct, avg_vol, 
              low_price, high_price, current_price, score, status,
-             poc_price, va_low, va_high)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             poc_price, va_low, va_high, vol_breakout)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 r["symbol"],
                 r["coin"],
@@ -2173,6 +2218,7 @@ def save_watchlist(conn, results):
                 float(r.get("poc_price") or 0),
                 float(r.get("va_low") or 0),
                 float(r.get("va_high") or 0),
+                float(r.get("vol_breakout") or 0),
             ),
         )
     
@@ -2273,6 +2319,264 @@ def build_fuel_report(fuel_targets, squeeze_targets):
     
     return "\n".join(lines)
 
+def _focus_cutoff_iso(now: datetime) -> str:
+    """含今天在内共 TOP_FOCUS_RETENTION_DAYS 个日历日。"""
+    now_cst = _heat_accum_now_cst(now)
+    today = now_cst.date()
+    cutoff = today - timedelta(days=TOP_FOCUS_RETENTION_DAYS - 1)
+    return cutoff.isoformat()
+
+
+def _focus_prune(conn: sqlite3.Connection, now: datetime) -> None:
+    cutoff_s = _focus_cutoff_iso(now)
+    conn.execute("DELETE FROM focus_watch WHERE generated_date < ?", (cutoff_s,))
+
+
+def _focus_sort_score(channel: str, d: Dict[str, Any], vb: float) -> float:
+    if channel == "squeeze":
+        return abs(float(d.get("fr_pct") or 0)) + max(float(d.get("d6h") or 0), 0.0)
+    if channel == "volume_ignite":
+        return float(vb) + float(d.get("heat") or 0) * 0.1
+    return float(d.get("d6h") or 0)
+
+
+def _focus_build_summary_line(coin: str, channel: str, d: Dict[str, Any], vb: float) -> str:
+    lab = FOCUS_CHANNEL_LABEL_ZH[channel]
+    em = FOCUS_CHANNEL_EMOJI[channel]
+    if channel == "squeeze":
+        return (
+            f"👑 {coin} · {em}{lab} | 费率{d['fr_pct']:.2f}% OI{d['d6h']:+.0f}% 横盘{int(d.get('sw_days') or 0)}天"
+        )
+    if channel == "volume_ignite":
+        return (
+            f"👑 {coin} · {em}{lab} | Vol×{vb:.1f} 热度{float(d.get('heat') or 0):.0f} 横盘{int(d.get('sw_days') or 0)}天"
+        )
+    m = float(d.get("est_mcap") or 0)
+    m_s = f"${m/1e6:.0f}M" if m >= 1e6 else f"${m/1e3:.0f}K"
+    return (
+        f"👑 {coin} · {em}{lab} | OI{d['d6h']:+.0f}% 涨跌{d['px_chg']:+.1f}% ~{m_s}"
+    )
+
+
+def compute_top_focus_candidates(
+    coin_data: Dict[str, Dict[str, Any]],
+    pool_map: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    重点关注候选：先否决（涨 + OI 大幅流出），再在收筹池内判定三通道之一；
+    同一标的只保留优先级最高的一条（squeeze > volume_ignite > dark_flow）。
+    """
+    picked: List[Dict[str, Any]] = []
+    for sym, d in coin_data.items():
+        if not d.get("in_pool"):
+            continue
+        pd = pool_map.get(sym) or {}
+        px = float(d.get("px_chg") or 0)
+        d6 = float(d.get("d6h") or 0)
+        if px > 0 and d6 < FOCUS_VETO_PX_POS_OI_NEG_PCT:
+            continue
+        st = str(pd.get("status") or "")
+        vb = float(pd.get("vol_breakout") or 0)
+        sw = int(d.get("sw_days") or 0)
+        fr = float(d.get("fr_pct") or 0)
+        heat = float(d.get("heat") or 0)
+        mcap = float(d.get("est_mcap") or 0)
+        hits: List[str] = []
+        if sw >= FOCUS_SQUEEZE_SW_MIN and fr <= FOCUS_SQUEEZE_FR_MAX and d6 > 0:
+            hits.append("squeeze")
+        if abs(px) < FOCUS_DARK_ABS_PX_MAX and d6 >= FOCUS_DARK_D6H_MIN and mcap < FOCUS_DARK_MCAP_MAX_USD:
+            hits.append("dark_flow")
+        if FOCUS_VOL_IGNITE_STATUS_NEEDLE in st and vb >= FOCUS_VOL_IGNITE_BREAKOUT_MIN and heat > 0:
+            hits.append("volume_ignite")
+        if not hits:
+            continue
+        best_ch = min(hits, key=lambda c: FOCUS_CHANNEL_PRIORITY[c])
+        pri = FOCUS_CHANNEL_PRIORITY[best_ch]
+        summary = _focus_build_summary_line(str(d.get("coin") or ""), best_ch, d, vb)
+        tip = FOCUS_STRATEGY_TIP_ZH.get(best_ch, "")
+        detail = {
+            "sym": sym,
+            "coin": d.get("coin"),
+            "channel": best_ch,
+            "priority": pri,
+            "px_chg": px,
+            "d6h": d6,
+            "fr_pct": fr,
+            "heat": heat,
+            "sw_days": sw,
+            "est_mcap": mcap,
+            "vol_breakout": vb,
+            "pool_status": st,
+            "poc_price": d.get("poc_price"),
+            "va_low": d.get("va_low"),
+            "va_high": d.get("va_high"),
+            "liquidity_spring": d.get("liquidity_spring"),
+        }
+        picked.append(
+            {
+                "symbol": sym,
+                "coin": d.get("coin"),
+                "channel": best_ch,
+                "priority": pri,
+                "sort_score": _focus_sort_score(best_ch, d, vb),
+                "summary_line": summary,
+                "strategy_tip": tip,
+                "detail": detail,
+            }
+        )
+    picked.sort(key=lambda x: (int(x["priority"]), -float(x["sort_score"])))
+    return picked[:TOP_FOCUS_MAX]
+
+
+def _sqlite_row_to_focus_item(row: Tuple[Any, ...]) -> Dict[str, Any]:
+    (
+        symbol,
+        coin,
+        generated_date,
+        last_seen_cst,
+        channel,
+        priority,
+        rank_in_list,
+        summary_line,
+        strategy_tip,
+        detail_json,
+    ) = row
+    det: Optional[Dict[str, Any]] = None
+    if detail_json:
+        try:
+            t = json.loads(detail_json)
+            det = t if isinstance(t, dict) else None
+        except Exception:
+            det = None
+    return {
+        "symbol": symbol,
+        "coin": coin,
+        "generated_date": generated_date,
+        "last_seen_cst": last_seen_cst,
+        "channel": channel,
+        "channel_label_zh": FOCUS_CHANNEL_LABEL_ZH.get(str(channel), channel),
+        "priority": int(priority or 0),
+        "rank_in_list": int(rank_in_list or 0),
+        "summary_line": summary_line,
+        "strategy_tip": strategy_tip,
+        "detail": det,
+    }
+
+
+def _focus_fetch_payload(conn: sqlite3.Connection, now: datetime) -> Dict[str, Any]:
+    now_cst = _heat_accum_now_cst(now)
+    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT symbol, coin, generated_date, last_seen_cst, channel, priority,
+               rank_in_list, summary_line, strategy_tip, detail_json
+        FROM focus_watch
+        ORDER BY priority ASC, rank_in_list ASC, symbol ASC
+        """
+    )
+    rows = cur.fetchall()
+    items = [_sqlite_row_to_focus_item(tuple(r)) for r in rows]
+    seen_times = [it.get("last_seen_cst") for it in items if isinstance(it.get("last_seen_cst"), str)]
+    updated_at = max(seen_times) if seen_times else now_label
+    return {
+        "ok": True,
+        "items": items,
+        "updated_at_cst": updated_at,
+        "retention_days": TOP_FOCUS_RETENTION_DAYS,
+        "storage": "sqlite",
+        "channels": dict(FOCUS_CHANNEL_LABEL_ZH),
+    }
+
+
+def load_focus_watchlist_from_db(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    if now is None:
+        now = datetime.now(timezone(timedelta(hours=8)))
+    _focus_prune(conn, now)
+    conn.commit()
+    return _focus_fetch_payload(conn, now)
+
+
+def merge_and_persist_focus_watch(
+    conn: sqlite3.Connection,
+    entries: List[Dict[str, Any]],
+    now: datetime,
+) -> Dict[str, Any]:
+    """写入 focus_watch：当前轮命中列表 upsert；保留最近 TOP_FOCUS_RETENTION_DAYS 个生成日。"""
+    now_cst = _heat_accum_now_cst(now)
+    generated_at_s = now_cst.strftime("%Y-%m-%d %H:%M")
+    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
+    _focus_prune(conn, now)
+    cur = conn.cursor()
+    for rank, ent in enumerate(entries, start=1):
+        if not isinstance(ent, dict):
+            continue
+        sym = str(ent.get("symbol") or "").strip()
+        if not sym:
+            continue
+        det = ent.get("detail")
+        det_s = json.dumps(det, ensure_ascii=False) if isinstance(det, dict) else None
+        cur.execute("SELECT generated_date FROM focus_watch WHERE symbol = ?", (sym,))
+        ex = cur.fetchone()
+        row_core = (
+            str(ent.get("coin") or ""),
+            now_label,
+            str(ent.get("channel") or ""),
+            int(ent.get("priority") or 99),
+            rank,
+            str(ent.get("summary_line") or ""),
+            str(ent.get("strategy_tip") or ""),
+            det_s,
+        )
+        if ex:
+            cur.execute(
+                """
+                UPDATE focus_watch SET
+                    coin = ?, last_seen_cst = ?, channel = ?, priority = ?,
+                    rank_in_list = ?, summary_line = ?, strategy_tip = ?, detail_json = ?
+                WHERE symbol = ?
+                """,
+                row_core + (sym,),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO focus_watch (
+                    symbol, coin, generated_date, last_seen_cst,
+                    channel, priority, rank_in_list, summary_line, strategy_tip, detail_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sym,
+                    str(ent.get("coin") or ""),
+                    generated_at_s,
+                    now_label,
+                    str(ent.get("channel") or ""),
+                    int(ent.get("priority") or 99),
+                    rank,
+                    str(ent.get("summary_line") or ""),
+                    str(ent.get("strategy_tip") or ""),
+                    det_s,
+                ),
+            )
+    conn.commit()
+    print(f"  💾 重点关注看盘已写入 SQLite（{len(entries)} 条） ({DB_PATH})")
+    return _focus_fetch_payload(conn, now)
+
+
+def clear_focus_watch_table(conn: sqlite3.Connection) -> int:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM focus_watch")
+    n = int(cur.fetchone()[0] or 0)
+    cur.execute("DELETE FROM focus_watch")
+    conn.commit()
+    return n
+
+
 def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dict[str, Any]:
     """综合扫描：OI + 费率 + 收筹。notify=False 时不推 Telegram，供 HTTP 刷新写快照。"""
     # === 综合扫描：OI + 费率 + 收筹 三维合一 ===
@@ -2365,7 +2669,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     c2 = conn.cursor()
     c2.execute(
         "SELECT symbol, score, sideways_days, range_pct, avg_vol, status, low_price, high_price, "
-        "poc_price, va_low, va_high FROM watchlist"
+        "poc_price, va_low, va_high, vol_breakout FROM watchlist"
     )
     pool_map = {}
     for row in c2.fetchall():
@@ -2380,6 +2684,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             "poc_price": row[8],
             "va_low": row[9],
             "va_high": row[10],
+            "vol_breakout": row[11],
         }
     
     # 3. 扫OI（标的池中放量的 + Top100）
@@ -2597,10 +2902,21 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         return f"${v:.0f}"
     
     now = datetime.now(timezone(timedelta(hours=8)))
+    focus_entries = compute_top_focus_candidates(coin_data, pool_map)
+    focus_watchlist_payload = merge_and_persist_focus_watch(conn, focus_entries, now)
+
     lines = [
         f"🏦 **庄家雷达** 三策略+热度",
         f"⏰ {now.strftime('%Y-%m-%d %H:%M')} CST",
     ]
+    if focus_entries:
+        lines.append("")
+        lines.append("👑 **重点关注**（否决：涨且 6h OI < -5%）")
+        for ent in focus_entries:
+            lines.append(f"  {ent.get('summary_line') or ''}")
+            tip = ent.get("strategy_tip") or ""
+            if tip:
+                lines.append(f"     💡 {tip}")
     
     # 表0: 热度榜（最重要，放最前面）
     hot_coins = sorted(
@@ -2928,6 +3244,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     lines.append("  费率负=空头燃料 | 💎市值 | 💤横盘(收筹)")
     lines.append("  🔥💤热度+收筹=最强预判 | 🔥⚡热度+OI=正在发生")
     lines.append("  📍收筹池+OI异动=Patrick核心（可无热度）")
+    lines.append("  👑重点关注=逼空/天量/暗流三通道+否决假上涨（详见段首）")
     
     report = "\n".join(lines)
     # 🎯 暗流 / 💎 低市值+OI：与上文 highlights 中对应条目同源，每类至多 AMBUSH_WATCH_TOP_N 条写入 ambush_watch
@@ -2946,6 +3263,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         "ambush_watchlist": ambush_watchlist,
         "patrick_core_watchlist": patrick_core_watchlist,
         "worth_highlight_watchlist": worth_highlight_watchlist,
+        "focus_watchlist": focus_watchlist_payload,
         "report_markdown": report,
         "hot_coins": hot_coins[:16],
         "chase": chase[:16],
