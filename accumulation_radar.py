@@ -426,9 +426,14 @@ def _parse_bpc_for_item(bpc_json: Optional[str], bpc_updated_cst: Optional[str])
     if not isinstance(d, dict):
         return None
     ph = str(d.get("phase") or "idle")
-    cr = d.get("continuation_reason") or d.get("last_continuation_reason")
-    cr_s = str(cr).strip() if cr else ""
-    cr_zh = BPC_CONTINUATION_REASON_ZH.get(cr_s, cr_s) if cr_s else ""
+    # last_continuation_reason 仅为窗口内快照；副标题只在「当前处于延续相位」时展示，
+    # 否则观望/回踩也会被套上陈旧形态（多为同一种吞没结论）。
+    cr_s = ""
+    cr_zh = ""
+    if ph == "continuation":
+        cr_raw = d.get("continuation_reason") or d.get("last_continuation_reason")
+        cr_s = str(cr_raw).strip() if cr_raw else ""
+        cr_zh = BPC_CONTINUATION_REASON_ZH.get(cr_s, cr_s) if cr_s else ""
     return {
         "ok": d.get("ok", True),
         "phase": ph,
