@@ -196,6 +196,10 @@ def evaluate_breakout_pullback_continuation(
         qvols.append(_quote_vol(k))
 
     st = BPCState()
+    # 上一根「延续确认」后可能 reset 回 idle，当前 st.continuation_reason 会被清空；
+    # 保留窗口内最近一次延续形态，供看盘/推送展示（与当前 phase 无关）。
+    last_continuation_reason_seen: str = ""
+    last_continuation_idx_seen: Optional[int] = None
 
     def reset_idle(reason: str = "") -> None:
         st.phase = BPCPhase.IDLE
@@ -311,6 +315,8 @@ def evaluate_breakout_pullback_continuation(
                 st.phase = BPCPhase.CONTINUATION
                 st.continuation_idx = i
                 st.continuation_reason = reason
+                last_continuation_reason_seen = reason
+                last_continuation_idx_seen = i
 
         i += 1
 
@@ -338,6 +344,8 @@ def evaluate_breakout_pullback_continuation(
         "pullback_low": st.pullback_low,
         "continuation_idx": st.continuation_idx,
         "continuation_reason": st.continuation_reason,
+        "last_continuation_reason": last_continuation_reason_seen,
+        "last_continuation_idx": last_continuation_idx_seen,
         "pullback_vol_contracted": vol_contracted,
         "breakout_burst_quote_vol_avg": burst_avg_f,
         "pullback_segment_quote_vol_avg": pullback_avg_f,

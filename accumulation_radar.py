@@ -154,6 +154,12 @@ BPC_PHASE_ZH: Dict[str, str] = {
     "pullback": "回踩中",
     "continuation": "延续确认",
 }
+# 与 breakout_pullback_fsm 的 continuation_reason 一致（用于前端/推送中文）
+BPC_CONTINUATION_REASON_ZH: Dict[str, str] = {
+    "pin_bar": "长下影·Pin",
+    "bullish_engulfing": "看涨吞没",
+    "reclaim_micro_high": "收复回踩段前高",
+}
 
 
 def worth_pick_dynamic(
@@ -420,12 +426,16 @@ def _parse_bpc_for_item(bpc_json: Optional[str], bpc_updated_cst: Optional[str])
     if not isinstance(d, dict):
         return None
     ph = str(d.get("phase") or "idle")
+    cr = d.get("continuation_reason") or d.get("last_continuation_reason")
+    cr_s = str(cr).strip() if cr else ""
+    cr_zh = BPC_CONTINUATION_REASON_ZH.get(cr_s, cr_s) if cr_s else ""
     return {
         "ok": d.get("ok", True),
         "phase": ph,
         "phase_zh": BPC_PHASE_ZH.get(ph, ph),
         "reason": d.get("reason"),
-        "continuation_reason": d.get("continuation_reason"),
+        "continuation_reason": cr_s or None,
+        "continuation_reason_zh": cr_zh or None,
         "pullback_vol_contracted": d.get("pullback_vol_contracted"),
         "breakout_level": d.get("breakout_level"),
         "peak_after_breakout": d.get("peak_after_breakout"),
@@ -2279,10 +2289,13 @@ def send_telegram_bpc_continuation_for_pooled_symbols(conn: sqlite3.Connection) 
             continue
 
         coin = sym[:-4] if sym.endswith("USDT") else sym
-        reason = str(ev.get("continuation_reason") or "").strip() or "continuation"
+        reason_raw = str(
+            ev.get("continuation_reason") or ev.get("last_continuation_reason") or ""
+        ).strip()
+        reason_zh = BPC_CONTINUATION_REASON_ZH.get(reason_raw, reason_raw or "延续确认")
         lvl = ev.get("breakout_level")
         lvl_s = f"{float(lvl):.6g}" if isinstance(lvl, (int, float)) else str(lvl)
-        lines.append(f"• {sym} ({coin}) | {reason} | 突破参考 {lvl_s}")
+        lines.append(f"• {sym} ({coin}) | 延续形态：{reason_zh} | 突破参考 {lvl_s}")
         upd.append((sym, bar_ms))
 
     for sym_u, ms_u in upd:
