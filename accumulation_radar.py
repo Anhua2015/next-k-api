@@ -2316,6 +2316,43 @@ def union_focus_watch_and_heat_accum_symbols(conn: sqlite3.Connection) -> List[s
     return sorted(s)
 
 
+def union_heat_accum_and_s2_funding_flip_symbols(
+    conn: sqlite3.Connection, *, s2_lookback_days: int = 7
+) -> List[str]:
+    """
+    Groq AI 批处理标的：worth_watch_heat_accum（热度+收筹）∪
+    近 ``s2_lookback_days`` 日内在 ``s2_funding_signals`` 中出现过的合约 symbol（费率转负+OI 涨归档，DISTINCT 去重）。
+    不含 focus_watch。
+    """
+    cst = timezone(timedelta(hours=8))
+    s: Set[str] = set()
+    cur = conn.cursor()
+    tbl = WORTH_WATCH_TABLE_BY_CATEGORY.get("heat_accum")
+    if tbl:
+        try:
+            cur.execute(f"SELECT symbol FROM {tbl}")
+            for row in cur.fetchall():
+                sym = str(row[0] or "").strip()
+                if sym:
+                    s.add(sym)
+        except sqlite3.OperationalError:
+            pass
+    days = max(1, int(s2_lookback_days))
+    try:
+        cutoff = (datetime.now(cst) - timedelta(days=days)).isoformat()
+        cur.execute(
+            "SELECT DISTINCT symbol FROM s2_funding_signals WHERE recorded_at >= ?",
+            (cutoff,),
+        )
+        for row in cur.fetchall():
+            sym = str(row[0] or "").strip()
+            if sym:
+                s.add(sym)
+    except sqlite3.OperationalError:
+        pass
+    return sorted(s)
+
+
 def send_telegram_bpc_continuation_for_pooled_symbols(conn: sqlite3.Connection) -> None:
     """
     仅当 1H BPC 相位为 continuation 时推送；标的限定为值得关注七类看板 ∪ 重点关注（不含收筹池）。

@@ -593,7 +593,7 @@ async def lifespan(app: FastAPI):
     logger.info(
         "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, "
         "heat_watch 每小时 xx:07（现价/摘要 + 1h BPC）; "
-        "groq_ai_trade_plan 每小时 xx:15（重点关注∪热度+收筹；需 GROQ_API_KEY）; "
+        "groq_ai_trade_plan 每小时 xx:15（热度+收筹∪s2费率转负+OI涨；需 GROQ_API_KEY）; "
         "oi 每小时 :30; "
         "s2_oi_funding_rate_scanner 每整点后 5 分 (xx:05); "
         + s6_cron_log
@@ -1898,7 +1898,7 @@ class AiTradePlanRefreshBody(BaseModel):
 
     symbol: Optional[str] = Field(
         None,
-        description="仅刷新该合约（如 BTCUSDT）；省略则后台批量刷新「重点关注 ∪ 热度+收筹」全部标的",
+        description="仅刷新该合约（如 BTCUSDT）；省略则后台批量刷新「热度+收筹 ∪ s2 费率转负+OI 涨」全部标的",
     )
 
 
@@ -1926,7 +1926,7 @@ async def post_ai_trade_plan_refresh(
     """
     调用 Groq 生成交易计划并写入 SQLite。
     - 若 body.symbol 有值：同步返回该标的结果（适合单测）。
-    - 若省略 symbol：后台线程批量跑「重点关注 ∪ 热度+收筹」标的（间隔约 1s，避免限流）。
+    - 若省略 symbol：后台线程批量跑「热度+收筹 ∪ s2 费率转负+OI 涨」标的（间隔约 1s，避免限流）。
     """
     sym = (body.symbol or "").strip().upper()
     if sym:
@@ -1966,7 +1966,7 @@ async def post_ai_trade_plan_refresh(
     return {
         "accepted": True,
         "mode": "batch",
-        "message": "后台刷新「重点关注 ∪ 热度+收筹」全部标的；完成后 GET /api/accumulation/ai-trade-plan 查看",
+        "message": "后台刷新「热度+收筹 ∪ s2 费率转负+OI 涨」全部标的；完成后 GET /api/accumulation/ai-trade-plan 查看",
     }
 
 
@@ -2075,13 +2075,13 @@ class TriggerCronBody(BaseModel):
 
 
 def run_groq_ai_trade_plan_task() -> None:
-    """Groq：对「重点关注 ∪ 热度+收筹」标的批量生成买入区间/止损/止盈，写入 ai_groq_trade_plan。
+    """Groq：对「热度+收筹 ∪ 近窗 s2 费率转负+OI 涨」标的批量生成买入区间/止损/止盈，写入 ai_groq_trade_plan。
     定时：每小时 xx:15（Asia/Shanghai）；与 POST refresh 共用锁，避免并发。"""
     if not _groq_ai_trade_plan_lock.acquire(blocking=False):
         logger.info("Groq AI 交易计划跳过：已有任务在执行")
         return
     try:
-        logger.info("开始执行 Groq AI 交易计划（重点关注 ∪ 热度+收筹）...")
+        logger.info("开始执行 Groq AI 交易计划（热度+收筹 ∪ s2 费率转负+OI 涨）...")
         from accumulation_radar import init_db
         from groq_trading_plan_integration import run_ai_plans_for_focus_and_heat_accum
 
@@ -2128,7 +2128,7 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
     - oi: accumulation_radar oi（定时每小时 :30）
     - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
-    - groq_ai_trade_plan: Groq AI 交易计划（重点关注 ∪ 热度+收筹；需 GROQ_API_KEY）
+    - groq_ai_trade_plan: Groq AI 交易计划（热度+收筹 ∪ s2 费率转负+OI 涨；需 GROQ_API_KEY）
     """
     key = (body.task or "").strip()
     fn = _CRON_TASK_FUNCS.get(key)

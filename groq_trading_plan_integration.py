@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Groq AI 交易计划：针对「重点关注 focus_watch ∪ 热度+收筹 worth_watch_heat_accum」标的拉上下文，
+Groq AI 交易计划：针对「热度+收筹 worth_watch_heat_accum ∪ 近窗 s2 费率转负+OI 涨」标的拉上下文，
 调用 groq_trading_plan，结果写入 ai_groq_trade_plan。
 """
 
@@ -20,7 +20,7 @@ from accumulation_radar import (
     WORTH_WATCH_TABLE_BY_CATEGORY,
     _parse_bpc_for_item,
     api_get,
-    union_focus_watch_and_heat_accum_symbols,
+    union_heat_accum_and_s2_funding_flip_symbols,
 )
 
 
@@ -217,15 +217,16 @@ def run_ai_plan_for_symbol(conn: sqlite3.Connection, symbol: str) -> Dict[str, A
     return {"symbol": sym, **out}
 
 
-def run_ai_plans_for_focus_and_heat_accum(conn: sqlite3.Connection, *, sleep_s: float = 1.0) -> Dict[str, Any]:
-    """批量：仅 focus_watch ∪ worth_watch_heat_accum（热度+收筹）。
+def run_ai_plans_for_heat_accum_and_s2_funding(conn: sqlite3.Connection, *, sleep_s: float = 1.0) -> Dict[str, Any]:
+    """批量：worth_watch_heat_accum（热度+收筹）∪ 近 GROQ_AI_S2_LOOKBACK_DAYS 日 s2_funding_signals（费率转负+OI 涨）。
     每批最多 GROQ_AI_BATCH_SIZE（默认 10）个标的；若还有剩余，间隔 GROQ_AI_BATCH_GAP_SEC（默认 120）秒再跑下一批。
     """
     batch_size = max(1, int(os.getenv("GROQ_AI_BATCH_SIZE", "10")))
     batch_gap_s = max(0.0, float(os.getenv("GROQ_AI_BATCH_GAP_SEC", "120")))
     sleep_between = float(os.getenv("GROQ_AI_SLEEP_SEC", str(sleep_s)))
+    s2_days = max(1, int(os.getenv("GROQ_AI_S2_LOOKBACK_DAYS", "7")))
 
-    syms = union_focus_watch_and_heat_accum_symbols(conn)
+    syms = union_heat_accum_and_s2_funding_flip_symbols(conn, s2_lookback_days=s2_days)
     items: List[Dict[str, Any]] = []
     n = len(syms)
     for start in range(0, n, batch_size):
@@ -253,7 +254,11 @@ def run_ai_plans_for_focus_and_heat_accum(conn: sqlite3.Connection, *, sleep_s: 
         "batch_size": batch_size,
         "batch_gap_sec": batch_gap_s,
         "batch_count": batch_count,
+        "s2_lookback_days": s2_days,
     }
+
+
+run_ai_plans_for_focus_and_heat_accum = run_ai_plans_for_heat_accum_and_s2_funding
 
 
 def load_ai_trade_plans_from_db(conn: sqlite3.Connection) -> Dict[str, Any]:
