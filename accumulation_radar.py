@@ -1890,6 +1890,9 @@ def init_db():
         outcome_at_utc TEXT,
         exit_price REAL,
         pnl_r REAL,
+        manual_entry_price REAL,
+        manual_exit_price REAL,
+        manual_notes TEXT,
         notes TEXT
     )""")
     for _col, _typ in (
@@ -1899,6 +1902,9 @@ def init_db():
         ("r_unit", "REAL"),
         ("virtual_notional_usdt", "REAL"),
         ("pnl_usdt", "REAL"),
+        ("manual_entry_price", "REAL"),
+        ("manual_exit_price", "REAL"),
+        ("manual_notes", "TEXT"),
     ):
         try:
             c.execute(f"ALTER TABLE zct_vwap_signals ADD COLUMN {_col} {_typ}")

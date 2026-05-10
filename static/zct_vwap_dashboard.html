@@ -127,7 +127,17 @@
     .status-open { color: var(--yellow); font-weight: 600; }
     .pnl-pos { color: var(--green); }
     .pnl-neg { color: var(--red); }
-    .reason { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+    .reason { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+    .note-manual { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+    button.btn-manual {
+      background: var(--panel);
+      color: var(--accent);
+      border: 1px solid var(--border);
+      padding: 0.25rem 0.5rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+    button.btn-manual:hover { border-color: var(--accent); }
     footer { margin-top: 1.5rem; font-size: 0.75rem; color: var(--muted); }
     @media (max-width: 720px) {
       .cards { grid-template-columns: 1fr 1fr; }
@@ -183,7 +193,12 @@
             <th>平仓价</th>
             <th>R</th>
             <th>盈亏U</th>
+            <th>实盘入</th>
+            <th>实盘平</th>
+            <th>实盘盈亏</th>
+            <th>实盘备注</th>
             <th>摘要</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody id="tbody"></tbody>
@@ -234,6 +249,60 @@
       $("cWr").textContent = wr != null ? (wr * 100).toFixed(1) + "%" : "—";
     }
 
+    let zctVwapLastItems = [];
+
+    async function patchZctManual(signalId, body) {
+      const r = await fetch(apiBase + "/api/zct-vwap/signals/" + encodeURIComponent(signalId), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      const text = await r.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        throw new Error(text || r.statusText);
+      }
+      if (!r.ok) {
+        const d = data.detail;
+        const msg = typeof d === "string" ? d : JSON.stringify(d || data);
+        throw new Error(msg || text);
+      }
+      return data;
+    }
+
+    async function zctVwapEditManual(id) {
+      const row = zctVwapLastItems.find((x) => Number(x.id) === Number(id));
+      if (!row) {
+        alert("未找到该行，请先刷新。");
+        return;
+      }
+      const defE = row.manual_entry_price != null ? String(row.manual_entry_price) : "";
+      const defX = row.manual_exit_price != null ? String(row.manual_exit_price) : "";
+      const defN = row.manual_notes != null ? String(row.manual_notes) : "";
+      const e = window.prompt("[" + id + "] 实盘入场价（留空跳过）", defE);
+      if (e === null) return;
+      const x = window.prompt("[" + id + "] 实盘平仓价（留空跳过）", defX);
+      if (x === null) return;
+      const n = window.prompt("[" + id + "] 实盘备注", defN);
+      if (n === null) return;
+      const body = {};
+      const et = e.trim();
+      const xt = x.trim();
+      if (et !== "") {
+        const v = parseFloat(et.replace(/,/g, ""));
+        if (Number.isFinite(v)) body.manual_entry_price = v;
+      }
+      if (xt !== "") {
+        const v = parseFloat(xt.replace(/,/g, ""));
+        if (Number.isFinite(v)) body.manual_exit_price = v;
+      }
+      body.manual_notes = n;
+      await patchZctManual(id, body);
+      await refreshAll();
+    }
+
     async function loadSignals() {
       const st = $("fStatus").value;
       const sym = $("fSymbol").value.trim();
@@ -242,9 +311,10 @@
       const r = await fetch(apiBase + "/api/zct-vwap/signals?" + q.toString());
       const j = await r.json();
       if (!j.ok) throw new Error(j.detail || "signals failed");
+      zctVwapLastItems = j.items || [];
       const tb = $("tbody");
       tb.innerHTML = "";
-      for (const row of j.items || []) {
+      for (const row of zctVwapLastItems) {
         const tr = document.createElement("tr");
         const side = row.side || "";
         let tagClass = "flat";
@@ -252,6 +322,8 @@
         if (side === "SHORT") tagClass = "short";
         const stText = row.display_status || "";
         const stCls = stText.indexOf("持仓") >= 0 ? "status-open" : "";
+        const rp = row.reasons_preview || "";
+        const mn = row.manual_notes || "";
         tr.innerHTML =
           '<td class="mono">' + row.id + "</td>" +
           '<td class="mono">' + (row.recorded_at_utc || "").replace("T", " ").replace("Z", "") + "</td>" +
@@ -266,13 +338,18 @@
           '<td class="mono">' + fmtNum(row.exit_price, 4) + "</td>" +
           '<td class="mono ' + fmtPnlClass(row.pnl_r) + '">' + fmtNum(row.pnl_r, 3) + "</td>" +
           '<td class="mono ' + fmtPnlClass(row.pnl_usdt) + '">' + fmtNum(row.pnl_usdt, 2) + "</td>" +
-          '<td class="reason" title="' + (row.reasons_preview || "").replace(/"/g, "&quot;") + '">' +
-          (row.reasons_preview || "") + "</td>";
+          '<td class="mono">' + fmtNum(row.manual_entry_price, 6) + "</td>" +
+          '<td class="mono">' + fmtNum(row.manual_exit_price, 4) + "</td>" +
+          '<td class="mono ' + fmtPnlClass(row.manual_pnl_est_usdt) + '">' + fmtNum(row.manual_pnl_est_usdt, 2) + "</td>" +
+          '<td class="note-manual" title="' + mn.replace(/"/g, "&quot;") + '">' + mn + "</td>" +
+          '<td class="reason" title="' + rp.replace(/"/g, "&quot;") + '">' +
+          rp + "</td>" +
+          '<td><button type="button" class="btn-manual" data-zct-manual="' + row.id + '">记录实盘</button></td>';
         tb.appendChild(tr);
       }
-      if (!(j.items || []).length) {
+      if (!zctVwapLastItems.length) {
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td colspan="14" style="color:#8b949e;padding:1.5rem">暂无数据</td>';
+        tr.innerHTML = '<td colspan="19" style="color:#8b949e;padding:1.5rem">暂无数据</td>';
         tb.appendChild(tr);
       }
     }
@@ -291,6 +368,13 @@
     $("fStatus").addEventListener("change", loadSignals);
     $("fSymbol").addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") loadSignals();
+    });
+    $("tbody").addEventListener("click", (ev) => {
+      const b = ev.target && ev.target.closest && ev.target.closest("[data-zct-manual]");
+      if (!b) return;
+      ev.preventDefault();
+      const sid = b.getAttribute("data-zct-manual");
+      if (sid) zctVwapEditManual(sid).catch((e) => showErr(e.message || String(e)));
     });
 
     refreshAll();

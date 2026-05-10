@@ -48,7 +48,7 @@ S6_FUTURES_ALPHA_SCHEDULER_ENABLED = False
 GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED = (
     os.getenv("GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
 )
-# ZCT VWAP + 关键位信号扫描（子进程跑 zct_vwap_signal_scanner.py）；设 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1 开启
+# ZCT VWAP + 关键位信号扫描（子进程跑 zct_vwap_signal_scanner.py）；设 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1 开启；每 15 分钟一次（Asia/Shanghai）
 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED = (
     os.getenv("ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
 )
@@ -608,7 +608,7 @@ async def lifespan(app: FastAPI):
         accumulation_scheduler.add_job(
             run_zct_vwap_signal_task,
             "cron",
-            minute=40,
+            minute="*/15",
             id="zct_vwap_signal_scanner",
         )
     accumulation_scheduler.start()
@@ -634,7 +634,7 @@ async def lifespan(app: FastAPI):
         else "groq_ai_trade_plan 定时已暂停（可手动触发或设 GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED=1 恢复）"
     )
     zct_vwap_log = (
-        "zct_vwap_signal_scanner 每整点后 40 分 (xx:40)"
+        "zct_vwap_signal_scanner 每 15 分钟 (xx:00/15/30/45, Asia/Shanghai)"
         if ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED
         else "zct_vwap_signal_scanner 定时未启用（设 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1）"
     )
@@ -1984,6 +1984,47 @@ async def get_zct_vwap_signals(
         raise HTTPException(status_code=500, detail="zct_vwap_signals_error")
 
 
+class ZctVwapManualPatchBody(BaseModel):
+    """实盘补充：部分更新；省略的字段不改写数据库。"""
+
+    manual_entry_price: Optional[float] = Field(
+        default=None,
+        description="实盘成交价；可显式传 null 清空",
+    )
+    manual_exit_price: Optional[float] = Field(
+        default=None,
+        description="实盘平仓价；可显式传 null 清空",
+    )
+    manual_notes: Optional[str] = Field(
+        default=None,
+        description="实盘备注",
+    )
+
+
+@app.patch("/api/zct-vwap/signals/{signal_id}")
+async def patch_zct_vwap_signal(signal_id: int, body: ZctVwapManualPatchBody):
+    """更新 ZCT VWAP 信号的实盘入场/平仓价与备注（不影响脚本虚拟字段）。"""
+    try:
+        from zct_vwap_api import patch_zct_vwap_manual
+
+        updates = body.model_dump(exclude_unset=True)
+        if not updates:
+            raise HTTPException(status_code=400, detail="no_fields_to_update")
+        out = patch_zct_vwap_manual(signal_id, updates)
+        if not out.get("ok"):
+            if out.get("error") == "not_found":
+                raise HTTPException(status_code=404, detail="signal_not_found")
+            raise HTTPException(status_code=500, detail="zct_vwap_patch_failed")
+        return out
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("zct_vwap patch failed: %s", e)
+        raise HTTPException(status_code=500, detail="zct_vwap_patch_error")
+
+
 @app.get("/dashboard/zct-vwap", response_class=HTMLResponse)
 async def zct_vwap_dashboard_page():
     """ZCT VWAP 虚拟信号看板（静态页 + 调用上方 JSON API）。"""
@@ -2235,7 +2276,7 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
     - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
     - groq_ai_trade_plan: Groq AI 交易计划（热度+收筹 ∪ s2 费率转负+OI 涨；需 GROQ_API_KEY）
-    - zct_vwap: ZCT VWAP + 关键位信号（与定时 xx:40 同源子进程）
+    - zct_vwap: ZCT VWAP + 关键位信号（与定时每 15 分钟同源子进程）
     """
     key = (body.task or "").strip()
     fn = _CRON_TASK_FUNCS.get(key)

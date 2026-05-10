@@ -40,9 +40,34 @@ _SIGNAL_SELECT = """
         pnl_r,
         pnl_usdt,
         reasons_json,
+        manual_entry_price,
+        manual_exit_price,
+        manual_notes,
         notes
     FROM zct_vwap_signals
 """
+
+
+def _manual_pnl_est_usdt(row: Dict[str, Any]) -> Optional[float]:
+    """按实盘入/平仓价与名义 U 估算盈亏（与脚本虚拟公式一致）。"""
+    side = row.get("side")
+    en = row.get("manual_entry_price")
+    ex = row.get("manual_exit_price")
+    n = float(row.get("virtual_notional_usdt") or 100)
+    if en is None or ex is None:
+        return None
+    try:
+        entry_f = float(en)
+        exit_f = float(ex)
+    except (TypeError, ValueError):
+        return None
+    if entry_f <= 0 or n <= 0:
+        return None
+    if side == "LONG":
+        return round(n * (exit_f - entry_f) / entry_f, 4)
+    if side == "SHORT":
+        return round(n * (entry_f - exit_f) / entry_f, 4)
+    return None
 
 
 def _display_status(row: Dict[str, Any]) -> str:
@@ -109,6 +134,7 @@ def load_zct_vwap_signals(
         for r in rows:
             r["display_status"] = _display_status(r)
             r["reasons_preview"] = "; ".join(_parse_reasons(r.get("reasons_json")))[:240]
+            r["manual_pnl_est_usdt"] = _manual_pnl_est_usdt(r)
 
         cur.execute(
             "SELECT COUNT(*) FROM zct_vwap_signals WHERE " + " AND ".join(where),
@@ -123,6 +149,34 @@ def load_zct_vwap_signals(
             "offset": offset,
             "items": rows,
         }
+    finally:
+        conn.close()
+
+
+def patch_zct_vwap_manual(signal_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
+    """更新实盘补充字段；updates 仅含 manual_* 键。"""
+    allowed = ("manual_entry_price", "manual_exit_price", "manual_notes")
+    keys = [k for k in updates if k in allowed]
+    if not keys:
+        raise ValueError("no updatable fields (manual_entry_price, manual_exit_price, manual_notes)")
+    conn = init_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM zct_vwap_signals WHERE id = ?", (signal_id,))
+        if cur.fetchone() is None:
+            return {"ok": False, "error": "not_found"}
+        sets = []
+        vals: List[Any] = []
+        for k in keys:
+            sets.append(f"{k} = ?")
+            vals.append(updates[k])
+        vals.append(signal_id)
+        cur.execute(
+            f"UPDATE zct_vwap_signals SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )
+        conn.commit()
+        return {"ok": True, "id": signal_id, "updated": keys}
     finally:
         conn.close()
 

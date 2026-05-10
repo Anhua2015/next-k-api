@@ -12,13 +12,15 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
   python zct_vwap_signal_scanner.py --no-tg     # 仅打印
 
 定时：由 next-k-api main.py APScheduler 调用（需 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1），
-      或系统计划任务 / cron 每小时执行本脚本。
+      默认东八区每 15 分钟一次（xx:00/15/30/45）；亦可自建 cron 执行本脚本。
 
 环境变量：
   ZCT_VWAP_SYMBOLS     逗号分隔永续标的；不设则用内置默认列表（见 _symbols_from_env）
   ZCT_VWAP_BAND_SIGMA  默认 1.0
   ZCT_VWAP_DB_SKIP_FLAT  设为 1 时不入库 side=FLAT 的行（减轻 NO_TRADE 噪音）
-  TG_BOT_TOKEN / TG_CHAT_ID  与 accumulation 雷达相同（可选）
+  TG_BOT_TOKEN / TG_CHAT_ID  与 accumulation 雷达相同；配置后即推送 Telegram
+  ZCT_VWAP_TG_PUSH_MODE  扫描推送：actionable（默认，仅方向单）| all（每轮全文）| off
+  ZCT_VWAP_TG_NOTIFY_RESOLVE  平仓结算是否推 TG，默认 1
 
 入库：accumulation.db 表 zct_vwap_signals（与 init_db 同源）。每笔定向信号写入
 sl_price / tp_price / r_unit / entry_bar_open_ms；每次扫描后自动用后续 1m K 线判定先触发
@@ -80,6 +82,15 @@ if _env_file.exists():
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
+# Telegram 推送：扫描结果 — all=每轮全文；actionable=仅当有 LONG/SHORT 且含 SL/TP；off=不推扫描（仍打印 stdout）
+TG_PUSH_MODE = os.getenv("ZCT_VWAP_TG_PUSH_MODE", "actionable").strip().lower()
+# 平仓结算是否单独推一条（平仓 id / 结果 / R / USDT）
+TG_NOTIFY_RESOLVE = os.getenv("ZCT_VWAP_TG_NOTIFY_RESOLVE", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 
 # 默认监控 U 本位永续（可通过 ZCT_VWAP_SYMBOLS 覆盖）
@@ -598,8 +609,7 @@ def analyze_symbol(symbol: str) -> Optional[SignalResult]:
 
 def send_telegram(text: str) -> None:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("\n[TG] 未配置 TG_BOT_TOKEN / TG_CHAT_ID，仅 stdout\n")
-        print(text)
+        print("[TG] 未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过 Telegram（扫描结果已在 stdout 打印）")
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     for chunk_start in range(0, len(text), 3800):
@@ -720,14 +730,16 @@ def format_result(r: SignalResult) -> str:
     return "\n".join(lines)
 
 
-def resolve_open_signals_from_db() -> Dict[str, int]:
+def resolve_open_signals_from_db() -> Dict[str, Any]:
     """
     对 outcome 为空且已写入 SL/TP 的记录，用信号 K 线之后的 1m 数据判定先触发止损或止盈。
+    返回 stats + resolved_events（供 Telegram 平仓推送）。
     """
     from accumulation_radar import DB_PATH, init_db
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    stats = {"checked": 0, "resolved": 0, "skipped": 0}
+    stats: Dict[str, Any] = {"checked": 0, "resolved": 0, "skipped": 0}
+    resolved_events: List[Dict[str, Any]] = []
     conn = init_db()
     try:
         cur = conn.cursor()
@@ -811,11 +823,58 @@ def resolve_open_signals_from_db() -> Dict[str, int]:
             )
             if cur.rowcount:
                 stats["resolved"] += 1
+                resolved_events.append(
+                    {
+                        "id": sid,
+                        "symbol": sym,
+                        "side": side,
+                        "outcome": outcome,
+                        "exit_price": exit_px,
+                        "pnl_r": round(pnl, 6),
+                        "pnl_usdt": round(pnl_u, 4),
+                    }
+                )
         conn.commit()
         print(f"[resolve] checked={stats['checked']} resolved={stats['resolved']} skipped={stats['skipped']} db={DB_PATH}")
+        stats["resolved_events"] = resolved_events
         return stats
     finally:
         conn.close()
+
+
+def _tg_push_scan_text(ts: str, syms: List[str], result_objs: List[SignalResult]) -> str:
+    """组装发 TG 的扫描正文（无 markdown）。"""
+    lines: List[str] = [
+        f"ZCT VWAP 信号扫描 {ts} UTC",
+        f"标的: {', '.join(syms)}",
+    ]
+    actionable = [
+        r
+        for r in result_objs
+        if r.side in ("LONG", "SHORT") and r.sl_price is not None and r.tp_price is not None
+    ]
+    if actionable:
+        lines.append("")
+        lines.append("—— 方向单 ——")
+        for r in actionable:
+            lines.append("")
+            lines.append(format_result(r).replace("*", "").replace("`", ""))
+    else:
+        lines.append("")
+        lines.append("本轮无方向单（观望/NO_TRADE）；明细见日志或看板。")
+    return "\n".join(lines)
+
+
+def _tg_push_resolve_text(events: List[Dict[str, Any]]) -> str:
+    if not events:
+        return ""
+    lines = ["📌 ZCT VWAP 平仓结算", ""]
+    for e in events:
+        lines.append(
+            f"#{e['id']} {e['symbol']} {e['side']} → {e['outcome']} | "
+            f"exit={e['exit_price']} | R={e['pnl_r']} | {e['pnl_usdt']} U"
+        )
+    return "\n".join(lines)
 
 
 def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
@@ -866,16 +925,38 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
         except Exception as e:
             print(f"[db] persist failed: {e}")
 
+    resolve_stats: Dict[str, Any] = {}
     if do_resolve:
         try:
-            resolve_open_signals_from_db()
+            resolve_stats = resolve_open_signals_from_db()
         except Exception as e:
             print(f"[resolve] failed: {e}")
 
     msg = "\n".join(text_blocks)
     print(msg)
-    if use_tg:
-        send_telegram(msg.replace("*", "").replace("`", ""))
+
+    if use_tg and TG_PUSH_MODE != "off":
+        mode = TG_PUSH_MODE if TG_PUSH_MODE in ("all", "actionable") else "actionable"
+        if mode == "all":
+            send_telegram(msg.replace("*", "").replace("`", ""))
+        else:
+            push_scan = any(
+                r.side in ("LONG", "SHORT")
+                and r.sl_price is not None
+                and r.tp_price is not None
+                for r in result_objs
+            )
+            if push_scan:
+                send_telegram(_tg_push_scan_text(ts, syms, result_objs))
+            else:
+                print("[TG] 本轮无方向单，跳过扫描推送（ZCT_VWAP_TG_PUSH_MODE=actionable）")
+
+    if (
+        use_tg
+        and TG_NOTIFY_RESOLVE
+        and resolve_stats.get("resolved_events")
+    ):
+        send_telegram(_tg_push_resolve_text(resolve_stats["resolved_events"]))
 
     return payload
 
@@ -891,7 +972,9 @@ def main() -> None:
     )
     args = ap.parse_args()
     if args.resolve_only:
-        resolve_open_signals_from_db()
+        rs = resolve_open_signals_from_db()
+        if not args.no_tg and TG_NOTIFY_RESOLVE and rs.get("resolved_events"):
+            send_telegram(_tg_push_resolve_text(rs["resolved_events"]))
         return
     run_scan(use_tg=not args.no_tg, do_resolve=not args.no_resolve)
 
