@@ -42,6 +42,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 必须在读取下方 GROQ/ZCT 等开关之前执行：uvicorn 不会自动加载 .env
+_env_oi = Path(__file__).resolve().parent / ".env.oi"
+if _env_oi.is_file():
+    with open(_env_oi, encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 # 临时关闭：s6 期货模拟盘定时任务（恢复时改为 True，并取消前端对应区块 hidden）
 S6_FUTURES_ALPHA_SCHEDULER_ENABLED = False
 # 临时关闭：Groq AI 交易计划定时任务（恢复时设 GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED=1）
