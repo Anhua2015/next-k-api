@@ -30,7 +30,7 @@ import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 # Static files removed - frontend is deployed separately on Vercel
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,10 @@ S6_FUTURES_ALPHA_SCHEDULER_ENABLED = False
 # 临时关闭：Groq AI 交易计划定时任务（恢复时设 GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED=1）
 GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED = (
     os.getenv("GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+)
+# ZCT VWAP + 关键位信号扫描（子进程跑 zct_vwap_signal_scanner.py）；设 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1 开启
+ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED = (
+    os.getenv("ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
 )
 
 
@@ -504,6 +508,28 @@ def run_s6_futures_alpha_task() -> None:
     _run_s6_futures_alpha_subprocess()
 
 
+# ============== ZCT VWAP 信号扫描（VWAP 体制 + 关键位） =============
+
+_ZCT_VWAP_SCRIPT = Path(__file__).resolve().parent / "zct_vwap_signal_scanner.py"
+
+
+def _run_zct_vwap_signal_subprocess() -> None:
+    logger.info("Starting zct_vwap_signal_scanner subprocess")
+    try:
+        subprocess.run(
+            [sys.executable, str(_ZCT_VWAP_SCRIPT)],
+            cwd=str(_ZCT_VWAP_SCRIPT.parent),
+            check=False,
+        )
+    except Exception as e:
+        logger.exception("zct_vwap_signal_scanner failed: %s", e)
+
+
+def run_zct_vwap_signal_task() -> None:
+    logger.info("开始执行 ZCT VWAP 信号扫描...")
+    _run_zct_vwap_signal_subprocess()
+
+
 # ============== Lifespan ==============
 
 @asynccontextmanager
@@ -578,6 +604,13 @@ async def lifespan(app: FastAPI):
             minute=25,
             id="s6_futures_alpha_autonomous_trading",
         )
+    if ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED:
+        accumulation_scheduler.add_job(
+            run_zct_vwap_signal_task,
+            "cron",
+            minute=40,
+            id="zct_vwap_signal_scanner",
+        )
     accumulation_scheduler.start()
     app.state.accumulation_scheduler = accumulation_scheduler
     try:
@@ -600,6 +633,11 @@ async def lifespan(app: FastAPI):
         if GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED
         else "groq_ai_trade_plan 定时已暂停（可手动触发或设 GROQ_AI_TRADE_PLAN_SCHEDULER_ENABLED=1 恢复）"
     )
+    zct_vwap_log = (
+        "zct_vwap_signal_scanner 每整点后 40 分 (xx:40)"
+        if ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED
+        else "zct_vwap_signal_scanner 定时未启用（设 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1）"
+    )
     logger.info(
         "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, "
         "heat_watch 每小时 xx:07（现价/摘要 + 1h BPC）; "
@@ -608,6 +646,8 @@ async def lifespan(app: FastAPI):
         "oi 每小时 :30; "
         "s2_oi_funding_rate_scanner 每整点后 5 分 (xx:05); "
         + s6_cron_log
+        + "; "
+        + zct_vwap_log
     )
 
     yield
@@ -1344,7 +1384,8 @@ async def root():
         "version": "2.0.0",
         "description": "AI-Powered K-Line Weather Forecast API",
         "docs": "/docs",
-        "health": "/api/health"
+        "health": "/api/health",
+        "zct_vwap_dashboard": "/dashboard/zct-vwap",
     }
 
 
@@ -1904,6 +1945,54 @@ async def get_worth_watch(category: Optional[str] = Query(None, description="可
         raise HTTPException(status_code=500, detail="worth_watch_db_error")
 
 
+@app.get("/api/zct-vwap/summary")
+async def get_zct_vwap_summary():
+    """ZCT VWAP 虚拟信号汇总：持仓笔数、已结算、累计 pnl_usdt、胜率等。"""
+    try:
+        from zct_vwap_api import load_zct_vwap_summary
+
+        return load_zct_vwap_summary()
+    except Exception as e:
+        logger.warning("zct_vwap summary failed: %s", e)
+        raise HTTPException(status_code=500, detail="zct_vwap_summary_error")
+
+
+@app.get("/api/zct-vwap/signals")
+async def get_zct_vwap_signals(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    symbol: Optional[str] = Query(None, description="如 BTCUSDT"),
+    status: Optional[str] = Query(
+        None,
+        description="all（默认）| open（持仓中）| settled（已结算）",
+    ),
+):
+    """分页列出 ZCT VWAP 扫描入库的信号（含 SL/TP、虚拟名义与结算结果）。"""
+    try:
+        from zct_vwap_api import load_zct_vwap_signals
+
+        return load_zct_vwap_signals(
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            status=status or "all",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("zct_vwap signals failed: %s", e)
+        raise HTTPException(status_code=500, detail="zct_vwap_signals_error")
+
+
+@app.get("/dashboard/zct-vwap", response_class=HTMLResponse)
+async def zct_vwap_dashboard_page():
+    """ZCT VWAP 虚拟信号看板（静态页 + 调用上方 JSON API）。"""
+    path = Path(__file__).resolve().parent / "static" / "zct_vwap_dashboard.html"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="dashboard_zct_vwap_not_found")
+    return HTMLResponse(content=path.read_text(encoding="utf-8"))
+
+
 class AiTradePlanRefreshBody(BaseModel):
     """Groq AI 交易计划刷新：可选单个合约。"""
 
@@ -2086,7 +2175,7 @@ class TriggerCronBody(BaseModel):
 
     task: str = Field(
         ...,
-        description="pool | heat_watch | heat_zones | heat_bpc | oi | s2_funding | s6_alpha | groq_ai_trade_plan",
+        description="pool | heat_watch | heat_zones | heat_bpc | oi | s2_funding | s6_alpha | groq_ai_trade_plan | zct_vwap",
     )
 
 
@@ -2130,6 +2219,7 @@ _CRON_TASK_FUNCS: Dict[str, Any] = {
     "s2_funding": run_s2_oi_funding_task,
     "s6_alpha": run_s6_futures_alpha_task,
     "groq_ai_trade_plan": run_groq_ai_trade_plan_task,
+    "zct_vwap": run_zct_vwap_signal_task,
 }
 
 
@@ -2145,6 +2235,7 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
     - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
     - groq_ai_trade_plan: Groq AI 交易计划（热度+收筹 ∪ s2 费率转负+OI 涨；需 GROQ_API_KEY）
+    - zct_vwap: ZCT VWAP + 关键位信号（与定时 xx:40 同源子进程）
     """
     key = (body.task or "").strip()
     fn = _CRON_TASK_FUNCS.get(key)

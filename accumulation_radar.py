@@ -1855,6 +1855,65 @@ def init_db():
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_s2_recorded_symbol "
         "ON s2_funding_signals(recorded_at, symbol)"
     )
+    c.execute("""CREATE TABLE IF NOT EXISTS zct_vwap_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recorded_at_utc TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        play TEXT NOT NULL,
+        side TEXT NOT NULL,
+        confidence TEXT,
+        regime TEXT,
+        entry_price REAL NOT NULL,
+        entry_bar_open_ms INTEGER,
+        sl_price REAL,
+        tp_price REAL,
+        r_unit REAL,
+        virtual_notional_usdt REAL DEFAULT 100,
+        pnl_usdt REAL,
+        vwap REAL,
+        vwap_upper REAL,
+        vwap_lower REAL,
+        slope_bps REAL,
+        band_width_pct REAL,
+        vwap_crosses INTEGER,
+        ma_crosses INTEGER,
+        chop_score TEXT,
+        bands_wide INTEGER NOT NULL DEFAULT 0,
+        bands_tight INTEGER NOT NULL DEFAULT 0,
+        slope_steep INTEGER NOT NULL DEFAULT 0,
+        slope_flat INTEGER NOT NULL DEFAULT 0,
+        ref_levels_json TEXT,
+        nearest_levels_json TEXT,
+        reasons_json TEXT,
+        scan_params_json TEXT,
+        outcome TEXT,
+        outcome_at_utc TEXT,
+        exit_price REAL,
+        pnl_r REAL,
+        notes TEXT
+    )""")
+    for _col, _typ in (
+        ("entry_bar_open_ms", "INTEGER"),
+        ("sl_price", "REAL"),
+        ("tp_price", "REAL"),
+        ("r_unit", "REAL"),
+        ("virtual_notional_usdt", "REAL"),
+        ("pnl_usdt", "REAL"),
+    ):
+        try:
+            c.execute(f"ALTER TABLE zct_vwap_signals ADD COLUMN {_col} {_typ}")
+        except sqlite3.OperationalError:
+            pass
+    for _ix_sql in (
+        "CREATE INDEX IF NOT EXISTS ix_zct_vwap_recorded ON zct_vwap_signals(recorded_at_utc)",
+        "CREATE INDEX IF NOT EXISTS ix_zct_vwap_symbol_recorded ON zct_vwap_signals(symbol, recorded_at_utc)",
+        "CREATE INDEX IF NOT EXISTS ix_zct_vwap_play ON zct_vwap_signals(play)",
+        "CREATE INDEX IF NOT EXISTS ix_zct_vwap_side ON zct_vwap_signals(side)",
+    ):
+        try:
+            c.execute(_ix_sql)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     _migrate_legacy_heat_accum_json(conn)
     return conn
