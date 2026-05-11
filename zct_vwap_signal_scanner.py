@@ -994,7 +994,7 @@ def _settle_open_for_scan_supersede(
     sx = float(exit_px)
     pnl = _pnl_r(side, en, sx, float(sl), tp_f)
     pnl_u = _pnl_usdt(side, en, sx, float(notion))
-    outcome = "win" if pnl_u > 0 else ("loss" if pnl_u < 0 else "win")
+    outcome = "supersede"
     cur.execute(
         """
         INSERT INTO zct_vwap_settlements (
@@ -1016,7 +1016,7 @@ def _settle_open_for_scan_supersede(
             float(notion),
         ),
     )
-    if outcome == "loss" and COOLDOWN_AFTER_LOSS_MS > 0:
+    if pnl_u < 0 and COOLDOWN_AFTER_LOSS_MS > 0:
         until_ms = int(time.time() * 1000) + COOLDOWN_AFTER_LOSS_MS
         cur.execute(
             """
@@ -1026,7 +1026,7 @@ def _settle_open_for_scan_supersede(
             (str(sym).upper(), until_ms),
         )
     print(
-        f"[db] scan_supersede settle id={sid} {sym} {side} @ exit={sx:g} → {outcome} "
+        f"[db] scan_supersede settle id={sid} {sym} {side} @ exit={sx:g} outcome={outcome} "
         f"pnl_u={round(pnl_u, 4)} (signal flip / FLAT)"
     )
 

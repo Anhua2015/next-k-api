@@ -79,9 +79,12 @@ def _display_status(row: Dict[str, Any]) -> str:
     sl = row.get("sl_price")
     side = row.get("side")
     if oc:
-        return {"win": "已平仓·盈利", "loss": "已平仓·止损", "expired": "已平仓·超时"}.get(
-            str(oc), str(oc)
-        )
+        return {
+            "win": "已平仓·盈利",
+            "loss": "已平仓·止损",
+            "expired": "已平仓·超时",
+            "supersede": "已平仓·信号结束",
+        }.get(str(oc), str(oc))
     if side in ("LONG", "SHORT") and sl is not None:
         return "持仓中"
     return "观望"
@@ -280,6 +283,9 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
                 SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN outcome = 'loss' THEN 1 ELSE 0 END) AS losses,
                 SUM(CASE WHEN outcome = 'expired' THEN 1 ELSE 0 END) AS expired_count,
+                SUM(CASE WHEN outcome = 'supersede' THEN 1 ELSE 0 END) AS supersede_count,
+                SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) AS pnl_positive_n,
+                SUM(CASE WHEN pnl_usdt < 0 THEN 1 ELSE 0 END) AS pnl_negative_n,
                 SUM(CASE WHEN pnl_usdt IS NOT NULL THEN pnl_usdt ELSE 0 END) AS total_pnl_usdt
             FROM zct_vwap_settlements
             """
@@ -292,8 +298,12 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
         settled = int(raw_hist.get("settled_count") or 0)
         wins = int(raw_hist.get("wins") or 0)
         losses = int(raw_hist.get("losses") or 0)
-        denom = wins + losses
-        win_rate_vs_sl = (wins / denom) if denom else None
+        denom_touch = wins + losses
+        win_rate_touch = (wins / denom_touch) if denom_touch else None
+        pn = int(raw_hist.get("pnl_positive_n") or 0)
+        nn = int(raw_hist.get("pnl_negative_n") or 0)
+        denom_all = pn + nn
+        win_rate_all_pnl = (pn / denom_all) if denom_all else None
 
         cur.execute(
             """
@@ -303,6 +313,9 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
                 SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) AS sym_wins,
                 SUM(CASE WHEN outcome = 'loss' THEN 1 ELSE 0 END) AS sym_losses,
                 SUM(CASE WHEN outcome = 'expired' THEN 1 ELSE 0 END) AS sym_expired,
+                SUM(CASE WHEN outcome = 'supersede' THEN 1 ELSE 0 END) AS sym_supersede,
+                SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) AS sym_pnl_pos,
+                SUM(CASE WHEN pnl_usdt < 0 THEN 1 ELSE 0 END) AS sym_pnl_neg,
                 SUM(CASE WHEN pnl_usdt IS NOT NULL THEN pnl_usdt ELSE 0 END) AS sym_pnl_usdt
             FROM zct_vwap_settlements
             GROUP BY symbol
@@ -316,9 +329,14 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
             sw = int(row[2] or 0)
             sl = int(row[3] or 0)
             se = int(row[4] or 0)
-            spnl = float(row[5] or 0)
-            dec = sw + sl
-            wr = (sw / dec) if dec > 0 else None
+            ss = int(row[5] or 0)
+            spos = int(row[6] or 0)
+            sneg = int(row[7] or 0)
+            spnl = float(row[8] or 0)
+            dec_touch = sw + sl
+            wr_touch = (sw / dec_touch) if dec_touch > 0 else None
+            dec_all = spos + sneg
+            wr_all = (spos / dec_all) if dec_all > 0 else None
             per_symbol.append(
                 {
                     "symbol": sym,
@@ -326,8 +344,11 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
                     "wins": sw,
                     "losses": sl,
                     "expired": se,
+                    "supersede": ss,
                     "total_pnl_usdt": round(spnl, 4),
-                    "win_rate_vs_sl": round(wr, 4) if wr is not None else None,
+                    "win_rate_touch": round(wr_touch, 4) if wr_touch is not None else None,
+                    "win_rate_all_pnl": round(wr_all, 4) if wr_all is not None else None,
+                    "win_rate_vs_sl": round(wr_touch, 4) if wr_touch is not None else None,
                     "win_rate_including_expired": round(sw / n, 4) if n > 0 else None,
                 }
             )
@@ -340,10 +361,15 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
             "wins": wins,
             "losses": losses,
             "expired_count": int(raw_hist.get("expired_count") or 0),
+            "supersede_count": int(raw_hist.get("supersede_count") or 0),
+            "pnl_positive_n": pn,
+            "pnl_negative_n": nn,
             "total_pnl_usdt": round(float(raw_hist.get("total_pnl_usdt") or 0), 4),
-            "win_rate_closed": round(win_rate_vs_sl, 4) if win_rate_vs_sl is not None else None,
+            "win_rate_touch": round(win_rate_touch, 4) if win_rate_touch is not None else None,
+            "win_rate_all_pnl": round(win_rate_all_pnl, 4) if win_rate_all_pnl is not None else None,
+            "win_rate_closed": round(win_rate_touch, 4) if win_rate_touch is not None else None,
             "per_symbol": per_symbol,
-            "note": "持仓与快照来自 zct_vwap_signals（每标的 1 行）；累计盈亏与已结算笔数来自 zct_vwap_settlements（同一 signal_id 可有多条，对应同一标的多次开平仓）。",
+            "note": "触轨胜率 = outcome 为 win/loss（resolve SL/TP）；全量平仓胜率 = 按 pnl_usdt 正负笔数；supersede=扫描翻转/观望平仓。",
         }
     finally:
         conn.close()
