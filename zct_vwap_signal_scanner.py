@@ -60,8 +60,9 @@ sl_price / tp_price / r_unit / entry_bar_open_ms；resolve 用 1m K 判定 SL/TP
   ZCT_SAME_BAR_RULE       pessimistic | optimistic，同根同时触轨时先后，默认 pessimistic
   ZCT_VIRTUAL_NOTIONAL_USDT  单笔保证金（USDT），默认 100；名义敞口 = 保证金 × ZCT_LEVERAGE
   ZCT_LEVERAGE               杠杆倍数，默认 10；盈亏按名义敞口计算（等价于保证金×杠杆）
-  流动性过滤（代码常量）：币安 `openInterestHist` 相邻两根统计的 OI **总量**环比（无法区分净多/净空）。
-  顺势（trend）下：多单 / 空单分别阈值 LIQUIDITY_OI_MIN_REL_LONG（默认 0）、SHORT（默认 -0.002）。
+  流动性过滤（代码常量）：币安 `openInterestHist` 用 **前一根相对前前一根** 的 OI 环比（跳过最新统计点，减轻刚切换时的抖动）。
+  顺势（trend）若 OI 环比未达阈值：`analyze_symbol` 内 **硬过滤**（不写方向单，等同带宽/enforce），
+  阈值见 LIQUIDITY_OI_MIN_REL_LONG（默认 0）、SHORT（默认 -0.002）。接口失败（ok=False）时不挡单。
 
 统计示例：
 
@@ -202,10 +203,12 @@ VIRTUAL_NOTIONAL_USDT = _ZCT_MARGIN_USDT * ZCT_LEVERAGE
 
 # 流动性（仅 OI）：币安 U 本位 openInterestHist，最近两根统计量的环比
 LIQUIDITY_OI_PERIOD = "15m"  # 5m / 15m / 30m / 1h / 2h / 4h / 6h / 12h / 1d
-# 顺势单：OI 环比 ≤ 该阈值则 confidence 降级（小数；LONG 默认须为正增长才不降级）。
+# 顺势单：OI 环比 ≤ 该阈值则由 analyze_symbol 硬抑制方向单（小数；LONG 默认须为正增长）。
 LIQUIDITY_OI_MIN_REL_LONG = 0.0
 # 空单略放宽：破位时多头平仓可导致总 OI 小幅下降，-0.002 ≈ 允许 -0.2% 环比仍不降级。
 LIQUIDITY_OI_MIN_REL_SHORT = -0.002
+# OI 环比定义：见 fetch_liquidity_data（当前为「前一根 vs 前前一根」）
+LIQUIDITY_OI_COMPARE_MODE = "prev_vs_prev2"
 
 
 def _circuit_breaker_halted() -> bool:
@@ -556,37 +559,68 @@ def nearest_level_distance_pct(price: float, levels: Dict[str, float]) -> List[T
 
 def fetch_liquidity_data(symbol: str) -> Dict[str, Any]:
     """
-    仅用币安免费 REST：U 本位持仓量历史，取最近两根 `sumOpenInterest` 算 **相邻统计周期** 的环比。
+    仅用币安免费 REST：U 本位持仓量历史，拉 **3 根**，环比取 **前一根 ÷ 前前一根 - 1**（不使用列表里最新一根）。
 
-    「两根」= 上一个周期 vs 当前周期各一点，定义清晰、延迟低；单根噪声会偏大。
-    若要更平滑，优先 **加长 LIQUIDITY_OI_PERIOD**（如 15m→1h），而不是在同一周期内多取几根再平均——
-    后者需改公式；当前保持 limit=2 的一阶差分即可。
+    数组按时间升序：[-3]=前前周期、[-2]=前一周期、[-1]=最新周期。
+    好处：最新统计点刚落盘时数值有时不稳定；用滞后一期差分更稳，代价是信号慢约一个 LIQUIDITY_OI_PERIOD。
 
-    接口：GET /futures/data/openInterestHist（与 api_get 同源 FAPI）。
-    失败或数据不足时 ok=False，不参与 classify 过滤。
+    接口：GET /futures/data/openInterestHist（limit≥3）。
+    失败或数据不足时 ok=False。
     """
     sym = str(symbol).strip().upper()
     data = api_get(
         "/futures/data/openInterestHist",
-        {"symbol": sym, "period": LIQUIDITY_OI_PERIOD, "limit": 2},
+        {"symbol": sym, "period": LIQUIDITY_OI_PERIOD, "limit": 3},
     )
-    if not isinstance(data, list) or len(data) < 2:
+    if not isinstance(data, list) or len(data) < 3:
         return {"ok": False}
     try:
-        prev_oi = float(data[-2]["sumOpenInterest"])
-        cur_oi = float(data[-1]["sumOpenInterest"])
+        oi_prev_prev = float(data[-3]["sumOpenInterest"])
+        oi_prev_bar = float(data[-2]["sumOpenInterest"])
+        oi_latest = float(data[-1]["sumOpenInterest"])
     except (KeyError, TypeError, ValueError, IndexError):
         return {"ok": False}
-    if prev_oi <= 0:
+    if oi_prev_prev <= 0:
         return {"ok": False}
-    oi_change_pct = (cur_oi - prev_oi) / prev_oi
+    oi_change_pct = (oi_prev_bar - oi_prev_prev) / oi_prev_prev
     return {
         "ok": True,
         "oi_change_pct": float(oi_change_pct),
-        "oi_prev": float(prev_oi),
-        "oi_now": float(cur_oi),
+        "oi_prev": float(oi_prev_prev),
+        "oi_now": float(oi_prev_bar),
+        "oi_latest": float(oi_latest),
         "oi_period": LIQUIDITY_OI_PERIOD,
+        "oi_compare_mode": LIQUIDITY_OI_COMPARE_MODE,
     }
+
+
+def _liquidity_oi_suppresses_direction(res: "SignalResult", liq: Dict[str, Any]) -> bool:
+    """顺势方向单：OI 环比 ≤ 多空阈值则抑制入库（需 liq ok 且能读到 oi_change_pct）。"""
+    if res.regime != "trend" or res.side not in ("LONG", "SHORT"):
+        return False
+    if not liq.get("ok"):
+        return False
+    oi_pct = liq.get("oi_change_pct")
+    if oi_pct is None:
+        return False
+    op = float(oi_pct)
+    if res.side == "LONG":
+        return op <= LIQUIDITY_OI_MIN_REL_LONG
+    return op <= LIQUIDITY_OI_MIN_REL_SHORT
+
+
+def _liquidity_oi_suppress_reason(res: "SignalResult", liq: Dict[str, Any]) -> str:
+    op = float(liq["oi_change_pct"])
+    per = liq.get("oi_period", "?")
+    if res.side == "LONG":
+        return (
+            f"P2 流动性（OI）：多单环比 {op*100:.4f}% ≤ 阈值 {LIQUIDITY_OI_MIN_REL_LONG*100:.4f}%"
+            f"（{per}），方向单已抑制"
+        )
+    return (
+        f"P2 流动性（OI）：空单环比 {op*100:.4f}% ≤ 阈值 {LIQUIDITY_OI_MIN_REL_SHORT*100:.4f}%"
+        f"（{per}），方向单已抑制"
+    )
 
 
 @dataclass
@@ -743,7 +777,6 @@ def classify_and_signal(
     symbol: str,
     sdf: pd.DataFrame,
     levels: Dict[str, float],
-    liquidity: Optional[Dict[str, Any]] = None,
 ) -> SignalResult:
     last = sdf.iloc[-1]
     price = float(last["close"])
@@ -843,24 +876,6 @@ def classify_and_signal(
             play = "NO_TRADE"
             reasons.append("斜率/带宽未同时满足顺势或反转模板")
 
-    liq = liquidity or {}
-    if liq.get("ok"):
-        oi_pct = liq.get("oi_change_pct")
-        if regime == "trend" and oi_pct is not None and side in ("LONG", "SHORT"):
-            op = float(oi_pct)
-            if side == "LONG" and op <= LIQUIDITY_OI_MIN_REL_LONG:
-                confidence = "low"
-                reasons.append(
-                    f"流动性：多单 OI 环比 {op*100:.4f}% ≤ 阈值 {LIQUIDITY_OI_MIN_REL_LONG*100:.4f}%"
-                    f"（{liq.get('oi_period', '?')}），顺势动能降级"
-                )
-            elif side == "SHORT" and op <= LIQUIDITY_OI_MIN_REL_SHORT:
-                confidence = "low"
-                reasons.append(
-                    f"流动性：空单 OI 环比 {op*100:.4f}% ≤ 阈值 {LIQUIDITY_OI_MIN_REL_SHORT*100:.4f}%"
-                    f"（{liq.get('oi_period', '?')}），顺势动能降级"
-                )
-
     if chop_score == "high" and regime == "trend":
         reasons.append("会话 VWAP 交叉或 MA 纠缠偏多→谨慎追涨杀跌，易震荡")
         confidence = "low"
@@ -925,7 +940,20 @@ def analyze_symbol(
     sdf = compute_vwap_bands_session(sdf, BAND_SIGMA)
     levels = ref_levels(symbol)
     liq = fetch_liquidity_data(symbol)
-    res = classify_and_signal(symbol, sdf, levels, liquidity=liq)
+    res = classify_and_signal(symbol, sdf, levels)
+    if _liquidity_oi_suppresses_direction(res, liq):
+        res = replace(
+            res,
+            side="FLAT",
+            play="NO_TRADE",
+            confidence="low",
+            reasons=res.reasons + [_liquidity_oi_suppress_reason(res, liq)],
+            sl_price=None,
+            tp_price=None,
+            r_unit=None,
+            entry_bar_open_ms=None,
+            paper_notional_usdt=None,
+        )
     entry_ms = int(sdf.iloc[-1]["open_time"])
     sl, tp, ru = compute_sl_tp(res, sdf)
     res = replace(
@@ -1680,6 +1708,7 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
         "cooldown_after_close_ms": COOLDOWN_AFTER_CLOSE_MS,
         "max_notional_cap_usdt": MAX_NOTIONAL_CAP_USDT,
         "liquidity_oi_period": LIQUIDITY_OI_PERIOD,
+        "liquidity_oi_compare_mode": LIQUIDITY_OI_COMPARE_MODE,
         "liquidity_oi_min_rel_long": LIQUIDITY_OI_MIN_REL_LONG,
         "liquidity_oi_min_rel_short": LIQUIDITY_OI_MIN_REL_SHORT,
     }
