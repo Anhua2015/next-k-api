@@ -23,7 +23,7 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
                         1000SHIB、1000PEPE、DOGE、BNB、LINK、GALA、LTC、BCH、SUI（见 _DEFAULT_ZCT_SYMBOLS）
   ZCT_VWAP_BAND_SIGMA  默认 1.0
   ZCT_VWAP_DB_SKIP_FLAT  设为 1 时不入库 side=FLAT 的行（减轻 NO_TRADE 噪音）
-  ZCT_ENFORCE_SETUP_LEVEL  设为 1 时：仅当 setup_level≥ZCT_MIN_SETUP_LEVEL（默认 3，对齐海报 level 3+）才保留 LONG/SHORT+SL/TP，否则降为观望
+  ZCT_ENFORCE_SETUP_LEVEL  默认开启：仅当 setup_level≥ZCT_MIN_SETUP_LEVEL（默认 3，海报 level 3+）才保留方向单+SL/TP；设为 0/false/off 关闭
   ZCT_MIN_SETUP_LEVEL      默认 3；与 ZCT_ENFORCE_SETUP_LEVEL 联用
   ZCT_VWAP_CROSS_MAX_LOW   VWAP 交叉刻度「0–3」上界，默认 3
   ZCT_VWAP_CROSS_MAX_MID   「4–6」上界，默认 6；交叉数>此值归入「7+」
@@ -32,7 +32,7 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
   ZCT_RISK_PCT_PER_TRADE     单笔风险占权益，默认 0.005
   ZCT_USE_RISK_SIZED_NOTIONAL 设为 1 时按「权益×风险÷止损距离」推算名义（上限 ZCT_MAX_NOTIONAL_CAP_USDT）
   ZCT_MAX_DAILY_LOSS_PCT     当日已实现合计亏损 ≥ 权益×该比例 则暂停新开方向单（UTC 日），默认 0.05；0=关闭
-  ZCT_MAX_BAND_WIDTH_PCT     band_width_pct 大于则跳过方向单，默认 0=关闭
+  ZCT_MAX_BAND_WIDTH_PCT     band_width_pct 大于则跳过方向单；默认 15（极端宽轨过滤）；设为 0 关闭
   ZCT_COOLDOWN_AFTER_LOSS_MS 止损后冷却（毫秒），默认 2h；表 zct_symbol_cooldown；0=关闭
   同标的「持仓中」保护：若已有未平仓 LONG/SHORT（与看板一致），默认**跳过**入库以免洗掉 SL/TP。
                         **例外**：本轮扫描为观望(FLAT)或与持仓**方向相反**时，先按**本轮扫描价**纸面平仓并写入
@@ -153,13 +153,9 @@ DB_SKIP_FLAT = os.getenv("ZCT_VWAP_DB_SKIP_FLAT", "").strip().lower() in ("1", "
 # 海报：会话内 VWAP 交叉刻度 0–3 / 4–6 / 7+
 VWAP_CROSS_MAX_LOW = int(os.getenv("ZCT_VWAP_CROSS_MAX_LOW", "3"))
 VWAP_CROSS_MAX_MID = int(os.getenv("ZCT_VWAP_CROSS_MAX_MID", "6"))
-# 海报「use level 3+」：仅当三信号与 Play 模板完全一致（setup_level==3）才给方向单
-ENFORCE_SETUP_LEVEL = os.getenv("ZCT_ENFORCE_SETUP_LEVEL", "").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
+# 海报「use level 3+」：仅当三信号与 Play 模板完全一致（setup_level==3）才给方向单；默认启用严格模板
+_ENFORCE_SETUP_RAW = os.getenv("ZCT_ENFORCE_SETUP_LEVEL", "1").strip().lower()
+ENFORCE_SETUP_LEVEL = _ENFORCE_SETUP_RAW not in ("0", "false", "no", "off", "disabled")
 MIN_SETUP_LEVEL_FOR_SIDE = int(os.getenv("ZCT_MIN_SETUP_LEVEL", "3"))
 
 # --- P1：固定风险名义 + 日损熔断（账户为纸面权益基准）---
@@ -176,7 +172,11 @@ MAX_DAILY_LOSS_PCT = float(os.getenv("ZCT_MAX_DAILY_LOSS_PCT", "0.05"))
 
 # --- P2：止损后冷却（毫秒）+ 极端带宽跳过 ---
 COOLDOWN_AFTER_LOSS_MS = int(os.getenv("ZCT_COOLDOWN_AFTER_LOSS_MS", str(2 * 60 * 60 * 1000)))
-MAX_BAND_WIDTH_PCT = float(os.getenv("ZCT_MAX_BAND_WIDTH_PCT", "0") or 0)
+_DEFAULT_MAX_BAND_WIDTH_PCT = 15.0
+MAX_BAND_WIDTH_PCT = float(
+    os.getenv("ZCT_MAX_BAND_WIDTH_PCT", str(_DEFAULT_MAX_BAND_WIDTH_PCT))
+    or _DEFAULT_MAX_BAND_WIDTH_PCT
+)
 
 SWING_LOOKBACK = int(os.getenv("ZCT_SWING_LOOKBACK", "20"))
 MIN_SL_PCT = float(os.getenv("ZCT_MIN_SL_PCT", "0.003"))
