@@ -68,9 +68,14 @@ ZCT_VWAP_RESOLVE_INTERVAL_MINUTES = max(
     0, int(os.getenv("ZCT_VWAP_RESOLVE_INTERVAL_MINUTES", "5") or 5)
 )
 # ZCT · 🔥⚡热度+OI：标的来自 worth_watch_hot_oi；库表 zct_hot_oi_*；定时与主 lane 错开（默认 35min / 7min）
-ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED = (
-    os.getenv("ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED", "").strip().lower()
-    in ("1", "true", "yes", "on")
+# 默认开启；设 ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED=0|false|off|disabled 可关闭
+_zct_hot_oi_sched_raw = os.getenv("ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED", "1").strip().lower()
+ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED = _zct_hot_oi_sched_raw not in (
+    "0",
+    "false",
+    "no",
+    "off",
+    "disabled",
 )
 ZCT_HOT_OI_SCAN_INTERVAL_MINUTES = max(
     1, int(os.getenv("ZCT_HOT_OI_SCAN_INTERVAL_MINUTES", "35") or 35)
@@ -759,7 +764,9 @@ async def lifespan(app: FastAPI):
             )
         )
     else:
-        zct_hot_oi_log = "zct_hot_oi 定时未启用（设 ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED=1）"
+        zct_hot_oi_log = (
+            "zct_hot_oi 定时已关闭（默认开启；当前由 ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED=0|false|off 关闭）"
+        )
     logger.info(
         "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, "
         "heat_watch 每小时 xx:07（现价/摘要 + 1h BPC）; "

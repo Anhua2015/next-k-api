@@ -23,8 +23,8 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
                           自动剔除非 U 本位永续/未上市合约（与 exchangeInfo 对齐）
   ZCT_DB_SIGNALS_TABLE   默认 zct_vwap_signals；热度 lane 为 zct_hot_oi_signals
   ZCT_DB_SETTLEMENTS_TABLE 默认 zct_vwap_settlements；热度 lane 为 zct_hot_oi_settlements
-  main.py 另支持 ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED / ZCT_HOT_OI_SCAN_INTERVAL_MINUTES（默认 35）
-  / ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES（默认 7），与主 ZCT 定时错开。
+  main.py：🔥⚡热度+OI 定时默认开启；ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED=0|false|off 可关闭。
+           ZCT_HOT_OI_SCAN_INTERVAL_MINUTES（默认 35）/ ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES（默认 7），与主 ZCT 错开。
 
 环境变量：
   ZCT_VWAP_SYMBOLS     逗号分隔永续标的；不设则默认含 BTC/ETH/SOL、XRP、ADA、
