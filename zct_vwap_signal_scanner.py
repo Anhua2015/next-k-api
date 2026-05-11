@@ -18,6 +18,13 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
       默认全量扫描每 30 分钟、独立结算(resolve-only)每 5 分钟（IntervalTrigger，环境变量可调）；
       亦可自建 cron 执行本脚本。
 
+🔥⚡热度+OI 独立 lane（子进程或 `python zct_vwap_signal_scanner.py --hot-oi`）：
+  ZCT_HOT_OI_UNIVERSE=1   标的从 worth_watch_hot_oi 读；需已跑 OI 雷达写入七类
+  ZCT_DB_SIGNALS_TABLE   默认 zct_vwap_signals；热度 lane 为 zct_hot_oi_signals
+  ZCT_DB_SETTLEMENTS_TABLE 默认 zct_vwap_settlements；热度 lane 为 zct_hot_oi_settlements
+  main.py 另支持 ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED / ZCT_HOT_OI_SCAN_INTERVAL_MINUTES（默认 35）
+  / ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES（默认 7），与主 ZCT 定时错开。
+
 环境变量：
   ZCT_VWAP_SYMBOLS     逗号分隔永续标的；不设则默认含 BTC/ETH/SOL、XRP、ADA、
                         1000SHIB、1000PEPE、DOGE、BNB、LINK、GALA、LTC、BCH、SUI、
@@ -79,6 +86,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import io
 import time
@@ -110,6 +118,12 @@ if _env_file.exists():
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
+# 🔥⚡热度+OI lane：CLI `--hot-oi`（与 FastAPI 子进程注入的环境一致）
+if "--hot-oi" in sys.argv:
+    os.environ.setdefault("ZCT_HOT_OI_UNIVERSE", "1")
+    os.environ.setdefault("ZCT_DB_SIGNALS_TABLE", "zct_hot_oi_signals")
+    os.environ.setdefault("ZCT_DB_SETTLEMENTS_TABLE", "zct_hot_oi_settlements")
+
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 # Telegram 推送：扫描结果 — summary=每轮简报（默认）；actionable=仅当有 LONG/SHORT 且含 SL/TP；
@@ -124,6 +138,60 @@ TG_NOTIFY_RESOLVE = os.getenv("ZCT_VWAP_TG_NOTIFY_RESOLVE", "1").strip().lower()
 )
 
 
+def _sql_ident(name: str, default: str) -> str:
+    s = (name or "").strip()
+    if s and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", s):
+        return s
+    return default
+
+
+ZCT_DB_SIGNALS_TABLE = _sql_ident(
+    os.getenv("ZCT_DB_SIGNALS_TABLE", "zct_vwap_signals"), "zct_vwap_signals"
+)
+ZCT_DB_SETTLEMENTS_TABLE = _sql_ident(
+    os.getenv("ZCT_DB_SETTLEMENTS_TABLE", "zct_vwap_settlements"),
+    "zct_vwap_settlements",
+)
+
+
+def _hot_oi_universe_enabled() -> bool:
+    return os.getenv("ZCT_HOT_OI_UNIVERSE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _symbols_hot_oi_from_db() -> List[str]:
+    """标的来自值得关注 · 🔥⚡热度+OI（worth_watch_hot_oi）。"""
+    from accumulation_radar import init_db
+
+    conn = init_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT symbol FROM worth_watch_hot_oi
+            ORDER BY COALESCE(rank_in_category, 999) ASC, symbol ASC
+            """
+        )
+        return [str(x[0]).strip().upper() for x in cur.fetchall() if x and x[0]]
+    except Exception as e:
+        print(f"[hot_oi] worth_watch_hot_oi 读取失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def _scan_title_short() -> str:
+    return (
+        "ZCT VWAP · 🔥⚡热度+OI"
+        if _hot_oi_universe_enabled()
+        else "ZCT VWAP"
+    )
+
+
 # 默认监控 U 本位永续（可通过 ZCT_VWAP_SYMBOLS 覆盖）。
 # SHIB/PEPE 在币安合约为 1000SHIBUSDT、1000PEPEUSDT（标的报价按「千枚」计）。
 _DEFAULT_ZCT_SYMBOLS = (
@@ -134,6 +202,14 @@ _DEFAULT_ZCT_SYMBOLS = (
 
 
 def _symbols_from_env() -> List[str]:
+    if _hot_oi_universe_enabled():
+        syms = _symbols_hot_oi_from_db()
+        if syms:
+            return syms
+        print(
+            "[warn] ZCT_HOT_OI_UNIVERSE：worth_watch_hot_oi 无标的，本轮跳过扫描（请先跑 OI 雷达写入七类）"
+        )
+        return []
     raw = os.getenv("ZCT_VWAP_SYMBOLS", _DEFAULT_ZCT_SYMBOLS).strip()
     parts = [x.strip().upper() for x in raw.split(",") if x.strip()]
     return parts or [x.strip() for x in _DEFAULT_ZCT_SYMBOLS.split(",") if x.strip()]
@@ -238,9 +314,9 @@ def _circuit_breaker_halted() -> bool:
     try:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT COALESCE(SUM(pnl_usdt), 0)
-            FROM zct_vwap_settlements
+            FROM {ZCT_DB_SETTLEMENTS_TABLE}
             WHERE settled_at_utc >= ?
             """,
             (start_iso,),
@@ -1117,8 +1193,8 @@ def _is_open_hold_row(r: SignalResult) -> bool:
 def _fetch_symbols_with_open_positions(cur) -> Set[str]:
     """已平仓(outcome 非空)之前，同一标的不再新开方向单。"""
     cur.execute(
-        """
-        SELECT DISTINCT symbol FROM zct_vwap_signals
+        f"""
+        SELECT DISTINCT symbol FROM {ZCT_DB_SIGNALS_TABLE}
         WHERE outcome IS NULL
           AND sl_price IS NOT NULL
           AND side IN ('LONG', 'SHORT')
@@ -1161,8 +1237,8 @@ def _settle_open_for_scan_supersede(
     pnl_u = _pnl_usdt(side, en, sx, float(notion))
     outcome = "supersede"
     cur.execute(
-        """
-        INSERT INTO zct_vwap_settlements (
+        f"""
+        INSERT INTO {ZCT_DB_SETTLEMENTS_TABLE} (
             settled_at_utc, signal_id, symbol, side, play, outcome,
             entry_price, exit_price, pnl_r, pnl_usdt, virtual_notional_usdt
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -1205,8 +1281,9 @@ def _persist_results_db(
         params_json = json.dumps(scan_params, ensure_ascii=False)
         written = 0
         skipped_open = 0
-        upsert = """
-            INSERT INTO zct_vwap_signals (
+        sig_tbl = ZCT_DB_SIGNALS_TABLE
+        upsert = f"""
+            INSERT INTO {sig_tbl} (
                 recorded_at_utc, symbol, play, side, confidence, regime,
                 entry_price, entry_bar_open_ms, sl_price, tp_price, r_unit,
                 virtual_notional_usdt,
@@ -1263,19 +1340,19 @@ def _persist_results_db(
                 exit_price = excluded.exit_price,
                 pnl_r = excluded.pnl_r,
                 pnl_usdt = excluded.pnl_usdt,
-                manual_entry_price = zct_vwap_signals.manual_entry_price,
-                manual_exit_price = zct_vwap_signals.manual_exit_price,
-                manual_notes = zct_vwap_signals.manual_notes,
-                notes = zct_vwap_signals.notes
+                manual_entry_price = {sig_tbl}.manual_entry_price,
+                manual_exit_price = {sig_tbl}.manual_exit_price,
+                manual_notes = {sig_tbl}.manual_notes,
+                notes = {sig_tbl}.notes
         """
         for r in rows:
             # 必须先于 FLAT 删除：否则未平仓行会被 DB_SKIP_FLAT 删掉，或被 FLAT upsert 清空 sl/tp，resolve 永远选不中
             if r.symbol in open_syms:
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, symbol, side, play, entry_price, sl_price, tp_price,
                            COALESCE(virtual_notional_usdt, ?)
-                    FROM zct_vwap_signals
+                    FROM {ZCT_DB_SIGNALS_TABLE}
                     WHERE symbol = ? AND outcome IS NULL
                       AND sl_price IS NOT NULL AND side IN ('LONG','SHORT')
                     """,
@@ -1309,7 +1386,8 @@ def _persist_results_db(
                         continue
             if DB_SKIP_FLAT and r.side == "FLAT":
                 cur.execute(
-                    "DELETE FROM zct_vwap_signals WHERE symbol = ?", (r.symbol,)
+                    f"DELETE FROM {ZCT_DB_SIGNALS_TABLE} WHERE symbol = ?",
+                    (r.symbol,),
                 )
                 continue
             cur.execute(
@@ -1419,10 +1497,10 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT id, symbol, side, play, entry_price, sl_price, tp_price, entry_bar_open_ms,
                    COALESCE(virtual_notional_usdt, ?) AS notion
-            FROM zct_vwap_signals
+            FROM {ZCT_DB_SIGNALS_TABLE}
             WHERE outcome IS NULL
               AND sl_price IS NOT NULL AND tp_price IS NOT NULL
               AND side IN ('LONG','SHORT')
@@ -1525,8 +1603,8 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
             pnl = _pnl_r(side, entry, exit_px, sl, tp)
             pnl_u = _pnl_usdt(side, entry, exit_px, float(notion))
             cur.execute(
-                """
-                UPDATE zct_vwap_signals
+                f"""
+                UPDATE {ZCT_DB_SIGNALS_TABLE}
                 SET outcome = ?, outcome_at_utc = ?, exit_price = ?, pnl_r = ?, pnl_usdt = ?,
                     notes = CASE WHEN notes IS NULL OR notes = '' THEN ?
                                  ELSE notes || '; ' || ? END
@@ -1557,8 +1635,8 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
                     }
                 )
                 cur.execute(
-                    """
-                    INSERT INTO zct_vwap_settlements (
+                    f"""
+                    INSERT INTO {ZCT_DB_SETTLEMENTS_TABLE} (
                         settled_at_utc, signal_id, symbol, side, play, outcome,
                         entry_price, exit_price, pnl_r, pnl_usdt, virtual_notional_usdt
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -1584,9 +1662,10 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
                     pnl_usdt=float(pnl_u),
                 )
         conn.commit()
+        lane_tag = "[hot_oi] " if _hot_oi_universe_enabled() else ""
         print(
-            f"[resolve] checked={stats['checked']} resolved={stats['resolved']} "
-            f"skipped={stats['skipped']} db={DB_PATH}"
+            f"[resolve]{lane_tag}checked={stats['checked']} resolved={stats['resolved']} "
+            f"skipped={stats['skipped']} db={DB_PATH} table={ZCT_DB_SIGNALS_TABLE}"
         )
         for d in stats.get("skip_detail") or []:
             if d.get("reason") == "no_sl_tp_touch_yet":
@@ -1626,7 +1705,7 @@ def _tg_push_summary_text(
 ) -> str:
     """每轮一条精简结论（每个标的一行），便于定时任务必达推送。"""
     lines: List[str] = [
-        f"📊 ZCT VWAP 扫描结论  {ts} UTC",
+        f"📊 {_scan_title_short()} 扫描结论  {ts} UTC",
         f"标的 {len(syms)} 个 · 本轮回合方向单（含 SL/TP）: {n_actionable}",
         "",
         *per_symbol_lines,
@@ -1639,7 +1718,7 @@ def _tg_push_summary_text(
 def _tg_push_scan_text(ts: str, syms: List[str], result_objs: List[SignalResult]) -> str:
     """组装发 TG 的扫描正文（无 markdown）。"""
     lines: List[str] = [
-        f"ZCT VWAP 信号扫描 {ts} UTC",
+        f"{_scan_title_short()} 信号扫描 {ts} UTC",
         f"标的: {', '.join(syms)}",
     ]
     actionable = [
@@ -1662,7 +1741,14 @@ def _tg_push_scan_text(ts: str, syms: List[str], result_objs: List[SignalResult]
 def _tg_push_resolve_text(events: List[Dict[str, Any]]) -> str:
     if not events:
         return ""
-    lines = ["📌 ZCT VWAP 平仓结算", ""]
+    lines = [
+        (
+            "📌 ZCT · 🔥⚡热度+OI 平仓结算"
+            if _hot_oi_universe_enabled()
+            else "📌 ZCT VWAP 平仓结算"
+        ),
+        "",
+    ]
     for e in events:
         lines.append(
             f"#{e['id']} {e['symbol']} {e['side']} → {e['outcome']} | "
@@ -1683,7 +1769,9 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     result_objs: List[SignalResult] = []
     tg_summary_lines: List[str] = []
-    text_blocks: List[str] = [f"ZCT VWAP 信号扫描 `{ts}` UTC\n标的: {', '.join(syms)}"]
+    text_blocks: List[str] = [
+        f"{_scan_title_short()} 信号扫描 `{ts}` UTC\n标的: {', '.join(syms) if syms else '(无)'}"
+    ]
 
     for sym in syms:
         try:
@@ -1709,6 +1797,9 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
             tg_summary_lines.append(f"· {sym}  ERROR {e}")
 
     scan_params: Dict[str, Any] = {
+        "lane": "hot_oi" if _hot_oi_universe_enabled() else "vwap_default",
+        "signals_table": ZCT_DB_SIGNALS_TABLE,
+        "settlements_table": ZCT_DB_SETTLEMENTS_TABLE,
         "symbols_scanned": syms,
         "band_sigma": BAND_SIGMA,
         "slope_bars": VWAP_SLOPE_BARS,
@@ -1764,7 +1855,7 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
     if result_objs:
         try:
             n, dbp = _persist_results_db(ts, result_objs, scan_params)
-            print(f"[db] zct_vwap_signals upserted={n} → {dbp}")
+            print(f"[db] {ZCT_DB_SIGNALS_TABLE} upserted={n} → {dbp}")
         except Exception as e:
             print(f"[db] persist failed: {e}")
 
@@ -1811,6 +1902,11 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="ZCT VWAP signal scanner")
+    ap.add_argument(
+        "--hot-oi",
+        action="store_true",
+        help="🔥⚡热度+OI lane：worth_watch_hot_oi 标的 + zct_hot_oi_signals / zct_hot_oi_settlements",
+    )
     ap.add_argument("--no-tg", action="store_true", help="Do not send Telegram")
     ap.add_argument("--no-resolve", action="store_true", help="Skip SL/TP outcome resolution pass")
     ap.add_argument(

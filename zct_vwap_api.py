@@ -1,18 +1,18 @@
 """
 ZCT VWAP 只读查询（accumulation.db）。
-- zct_vwap_signals：每标的一行当前快照（观望 / 持仓 / 待写入）
-- zct_vwap_settlements：已平仓历史（汇总统计与 status=settled 列表）
+- zct_vwap_signals / zct_vwap_settlements：默认全量标的 lane
+- zct_hot_oi_signals / zct_hot_oi_settlements：🔥⚡热度+OI（worth_watch_hot_oi）lane
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from accumulation_radar import init_db
 
-_SIGNAL_SELECT = """
+_SIGNAL_COLS = """
     SELECT
         id,
         recorded_at_utc,
@@ -48,8 +48,25 @@ _SIGNAL_SELECT = """
         manual_exit_price,
         manual_notes,
         notes
-    FROM zct_vwap_signals
 """
+
+
+def _tables_lane(lane: Optional[str]) -> Tuple[str, str]:
+    """lane 缺省或 default/vwap → 主表；hot_oi → 热度+OI 专用表。"""
+    lk = (lane or "").strip().lower()
+    if lk in ("", "default", "vwap"):
+        return "zct_vwap_signals", "zct_vwap_settlements"
+    if lk == "hot_oi":
+        return "zct_hot_oi_signals", "zct_hot_oi_settlements"
+    raise ValueError(f"invalid zct lane: {lane!r}")
+
+
+def _lane_json(lane: Optional[str]) -> str:
+    return "hot_oi" if (lane or "").strip().lower() == "hot_oi" else "default"
+
+
+def _signal_select_sql(signals_table: str) -> str:
+    return f"{_SIGNAL_COLS}\n    FROM {signals_table}\n"
 
 
 def _manual_pnl_est_usdt(row: Dict[str, Any]) -> Optional[float]:
@@ -151,8 +168,10 @@ def load_zct_vwap_signals(
     offset: int = 0,
     symbol: Optional[str] = None,
     status: Optional[str] = None,
+    lane: Optional[str] = None,
 ) -> Dict[str, Any]:
     """分页列出信号；status: all（默认）| open | settled。"""
+    sig_tbl, set_tbl = _tables_lane(lane)
     conn = init_db()
     conn.row_factory = sqlite3.Row
     try:
@@ -173,18 +192,19 @@ def load_zct_vwap_signals(
             sql = (
                 "SELECT id, settled_at_utc, signal_id, symbol, side, play, outcome, "
                 "entry_price, exit_price, pnl_r, pnl_usdt, virtual_notional_usdt "
-                f"FROM zct_vwap_settlements WHERE {wh} ORDER BY id DESC LIMIT ? OFFSET ?"
+                f"FROM {set_tbl} WHERE {wh} ORDER BY id DESC LIMIT ? OFFSET ?"
             )
             params_list = list(params_s) + [limit, offset]
             cur.execute(sql, params_list)
             rows = [_row_from_settlement(r) for r in cur.fetchall()]
             cur.execute(
-                f"SELECT COUNT(*) FROM zct_vwap_settlements WHERE {wh}",
+                f"SELECT COUNT(*) FROM {set_tbl} WHERE {wh}",
                 params_s,
             )
             total_match = int(cur.fetchone()[0])
             return {
                 "ok": True,
+                "lane": _lane_json(lane),
                 "total": total_match,
                 "limit": limit,
                 "offset": offset,
@@ -203,7 +223,7 @@ def load_zct_vwap_signals(
             )
 
         sql = (
-            _SIGNAL_SELECT
+            _signal_select_sql(sig_tbl)
             + " WHERE "
             + " AND ".join(where)
             + " ORDER BY id DESC LIMIT ? OFFSET ?"
@@ -217,13 +237,14 @@ def load_zct_vwap_signals(
             r["manual_pnl_est_usdt"] = _manual_pnl_est_usdt(r)
 
         cur.execute(
-            "SELECT COUNT(*) FROM zct_vwap_signals WHERE " + " AND ".join(where),
+            f"SELECT COUNT(*) FROM {sig_tbl} WHERE " + " AND ".join(where),
             params[:-2],
         )
         total_match = int(cur.fetchone()[0])
 
         return {
             "ok": True,
+            "lane": _lane_json(lane),
             "total": total_match,
             "limit": limit,
             "offset": offset,
@@ -233,8 +254,14 @@ def load_zct_vwap_signals(
         conn.close()
 
 
-def patch_zct_vwap_manual(signal_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
+def patch_zct_vwap_manual(
+    signal_id: int,
+    updates: Dict[str, Any],
+    *,
+    lane: Optional[str] = None,
+) -> Dict[str, Any]:
     """更新实盘补充字段；updates 仅含 manual_* 键。"""
+    sig_tbl, _ = _tables_lane(lane)
     allowed = ("manual_entry_price", "manual_exit_price", "manual_notes")
     keys = [k for k in updates if k in allowed]
     if not keys:
@@ -242,7 +269,7 @@ def patch_zct_vwap_manual(signal_id: int, updates: Dict[str, Any]) -> Dict[str, 
     conn = init_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id FROM zct_vwap_signals WHERE id = ?", (signal_id,))
+        cur.execute(f"SELECT id FROM {sig_tbl} WHERE id = ?", (signal_id,))
         if cur.fetchone() is None:
             return {"ok": False, "error": "not_found"}
         sets = []
@@ -252,7 +279,7 @@ def patch_zct_vwap_manual(signal_id: int, updates: Dict[str, Any]) -> Dict[str, 
             vals.append(updates[k])
         vals.append(signal_id)
         cur.execute(
-            f"UPDATE zct_vwap_signals SET {', '.join(sets)} WHERE id = ?",
+            f"UPDATE {sig_tbl} SET {', '.join(sets)} WHERE id = ?",
             vals,
         )
         conn.commit()
@@ -261,18 +288,19 @@ def patch_zct_vwap_manual(signal_id: int, updates: Dict[str, Any]) -> Dict[str, 
         conn.close()
 
 
-def load_zct_vwap_summary() -> Dict[str, Any]:
+def load_zct_vwap_summary(*, lane: Optional[str] = None) -> Dict[str, Any]:
     """汇总：持仓笔数（快照表）、已结算/胜负/累计盈亏（settlements 历史表）。"""
+    sig_tbl, set_tbl = _tables_lane(lane)
     conn = init_db()
     try:
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) AS total_rows,
                 SUM(CASE WHEN outcome IS NULL AND sl_price IS NOT NULL
                           AND side IN ('LONG','SHORT') THEN 1 ELSE 0 END) AS open_positions
-            FROM zct_vwap_signals
+            FROM {sig_tbl}
             """
         )
         snap = cur.fetchone()
@@ -287,7 +315,7 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
                 SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) AS pnl_positive_n,
                 SUM(CASE WHEN pnl_usdt < 0 THEN 1 ELSE 0 END) AS pnl_negative_n,
                 SUM(CASE WHEN pnl_usdt IS NOT NULL THEN pnl_usdt ELSE 0 END) AS total_pnl_usdt
-            FROM zct_vwap_settlements
+            FROM {set_tbl}
             """
         )
         hist = cur.fetchone()
@@ -317,7 +345,7 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
                 SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END) AS sym_pnl_pos,
                 SUM(CASE WHEN pnl_usdt < 0 THEN 1 ELSE 0 END) AS sym_pnl_neg,
                 SUM(CASE WHEN pnl_usdt IS NOT NULL THEN pnl_usdt ELSE 0 END) AS sym_pnl_usdt
-            FROM zct_vwap_settlements
+            FROM {set_tbl}
             GROUP BY symbol
             ORDER BY n DESC
             """
@@ -355,6 +383,7 @@ def load_zct_vwap_summary() -> Dict[str, Any]:
 
         return {
             "ok": True,
+            "lane": _lane_json(lane),
             "total_rows": int(raw_snap.get("total_rows") or 0),
             "open_positions": int(raw_snap.get("open_positions") or 0),
             "settled_count": settled,

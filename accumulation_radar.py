@@ -1807,6 +1807,146 @@ def _migrate_zct_vwap_snapshot_and_settlements(c: sqlite3.Cursor) -> None:
         pass
 
 
+def _migrate_zct_hot_oi_lane_tables(c: sqlite3.Cursor) -> None:
+    """
+    ZCT · 🔥⚡热度+OI：独立 lane，与 zct_vwap_signals / zct_vwap_settlements 同 schema。
+    标的来自 worth_watch_hot_oi（扫描脚本读取）；与本 lane 的 settlements / 熔断单独累计。
+    """
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS zct_hot_oi_settlements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        settled_at_utc TEXT NOT NULL,
+        signal_id INTEGER NOT NULL,
+        symbol TEXT NOT NULL,
+        side TEXT,
+        play TEXT,
+        outcome TEXT NOT NULL,
+        entry_price REAL,
+        exit_price REAL,
+        pnl_r REAL,
+        pnl_usdt REAL,
+        virtual_notional_usdt REAL
+    )"""
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS ix_zct_hot_oi_settle_symbol ON zct_hot_oi_settlements(symbol)"
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS ix_zct_hot_oi_settle_time ON zct_hot_oi_settlements(settled_at_utc)"
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS ix_zct_hot_oi_settle_signal_id ON zct_hot_oi_settlements(signal_id)"
+    )
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS zct_hot_oi_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recorded_at_utc TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        play TEXT NOT NULL,
+        side TEXT NOT NULL,
+        confidence TEXT,
+        regime TEXT,
+        entry_price REAL NOT NULL,
+        entry_bar_open_ms INTEGER,
+        sl_price REAL,
+        tp_price REAL,
+        r_unit REAL,
+        virtual_notional_usdt REAL DEFAULT 100,
+        pnl_usdt REAL,
+        vwap REAL,
+        vwap_upper REAL,
+        vwap_lower REAL,
+        slope_bps REAL,
+        band_width_pct REAL,
+        vwap_crosses INTEGER,
+        ma_crosses INTEGER,
+        chop_score TEXT,
+        bands_wide INTEGER NOT NULL DEFAULT 0,
+        bands_tight INTEGER NOT NULL DEFAULT 0,
+        slope_steep INTEGER NOT NULL DEFAULT 0,
+        slope_flat INTEGER NOT NULL DEFAULT 0,
+        ref_levels_json TEXT,
+        nearest_levels_json TEXT,
+        reasons_json TEXT,
+        scan_params_json TEXT,
+        setup_level INTEGER,
+        vwap_cross_bucket TEXT,
+        position_vs_vwap TEXT,
+        outcome TEXT,
+        outcome_at_utc TEXT,
+        exit_price REAL,
+        pnl_r REAL,
+        manual_entry_price REAL,
+        manual_exit_price REAL,
+        manual_notes TEXT,
+        notes TEXT
+    )"""
+    )
+    for _ix_sql in (
+        "CREATE INDEX IF NOT EXISTS ix_zct_hot_oi_recorded ON zct_hot_oi_signals(recorded_at_utc)",
+        "CREATE INDEX IF NOT EXISTS ix_zct_hot_oi_symbol_recorded ON zct_hot_oi_signals(symbol, recorded_at_utc)",
+        "CREATE INDEX IF NOT EXISTS ix_zct_hot_oi_play ON zct_hot_oi_signals(play)",
+        "CREATE INDEX IF NOT EXISTS ix_zct_hot_oi_side ON zct_hot_oi_signals(side)",
+    ):
+        try:
+            c.execute(_ix_sql)
+        except sqlite3.OperationalError:
+            pass
+    try:
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_zct_hot_oi_symbol ON zct_hot_oi_signals(symbol)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("SELECT COUNT(*) FROM zct_hot_oi_signals")
+        n_sig = int(c.fetchone()[0] or 0)
+        if n_sig > 0:
+            c.execute("SELECT DISTINCT symbol FROM zct_hot_oi_signals")
+            for (sym,) in c.fetchall():
+                c.execute(
+                    """
+                    SELECT id FROM zct_hot_oi_signals
+                    WHERE symbol = ?
+                    ORDER BY
+                      CASE WHEN outcome IS NULL AND side IN ('LONG', 'SHORT')
+                                AND sl_price IS NOT NULL THEN 0 ELSE 1 END,
+                      recorded_at_utc DESC,
+                      id DESC
+                    """,
+                    (sym,),
+                )
+                ids = [r[0] for r in c.fetchall()]
+                if len(ids) <= 1:
+                    continue
+                keep, drop = ids[0], ids[1:]
+                c.execute(
+                    f"DELETE FROM zct_hot_oi_signals WHERE id IN ({','.join('?' * len(drop))})",
+                    drop,
+                )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute(
+            """
+            INSERT INTO zct_hot_oi_settlements (
+                settled_at_utc, signal_id, symbol, side, play, outcome,
+                entry_price, exit_price, pnl_r, pnl_usdt, virtual_notional_usdt
+            )
+            SELECT s.outcome_at_utc, s.id, s.symbol, s.side, s.play, s.outcome,
+                   s.entry_price, s.exit_price, s.pnl_r, s.pnl_usdt, s.virtual_notional_usdt
+            FROM zct_hot_oi_signals s
+            WHERE s.outcome IS NOT NULL AND s.outcome_at_utc IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM zct_hot_oi_settlements z
+                WHERE z.signal_id = s.id AND z.settled_at_utc = s.outcome_at_utc
+              )
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
 def init_db():
     """初始化数据库"""
     conn = sqlite3.connect(str(DB_PATH))
@@ -2042,6 +2182,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
     _migrate_zct_vwap_snapshot_and_settlements(c)
+    _migrate_zct_hot_oi_lane_tables(c)
     conn.commit()
     _migrate_legacy_heat_accum_json(conn)
     return conn

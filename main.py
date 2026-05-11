@@ -67,6 +67,17 @@ ZCT_VWAP_SCAN_INTERVAL_MINUTES = max(
 ZCT_VWAP_RESOLVE_INTERVAL_MINUTES = max(
     0, int(os.getenv("ZCT_VWAP_RESOLVE_INTERVAL_MINUTES", "5") or 5)
 )
+# ZCT · 🔥⚡热度+OI：标的来自 worth_watch_hot_oi；库表 zct_hot_oi_*；定时与主 lane 错开（默认 35min / 7min）
+ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED = (
+    os.getenv("ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED", "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+ZCT_HOT_OI_SCAN_INTERVAL_MINUTES = max(
+    1, int(os.getenv("ZCT_HOT_OI_SCAN_INTERVAL_MINUTES", "35") or 35)
+)
+ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES = max(
+    0, int(os.getenv("ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES", "7") or 7)
+)
 
 
 # ============== Asset Types & Symbols ==============
@@ -564,6 +575,50 @@ def run_zct_vwap_resolve_only_task() -> None:
     _run_zct_vwap_resolve_only_subprocess()
 
 
+def _zct_hot_oi_child_env() -> dict:
+    env = os.environ.copy()
+    env["ZCT_HOT_OI_UNIVERSE"] = "1"
+    env["ZCT_DB_SIGNALS_TABLE"] = "zct_hot_oi_signals"
+    env["ZCT_DB_SETTLEMENTS_TABLE"] = "zct_hot_oi_settlements"
+    return env
+
+
+def _run_zct_hot_oi_signal_subprocess() -> None:
+    logger.info("Starting zct_vwap_signal_scanner subprocess (hot_oi lane)")
+    try:
+        subprocess.run(
+            [sys.executable, str(_ZCT_VWAP_SCRIPT)],
+            cwd=str(_ZCT_VWAP_SCRIPT.parent),
+            env=_zct_hot_oi_child_env(),
+            check=False,
+        )
+    except Exception as e:
+        logger.exception("zct hot_oi scan failed: %s", e)
+
+
+def run_zct_hot_oi_signal_task() -> None:
+    logger.info("开始执行 ZCT 🔥⚡热度+OI 扫描...")
+    _run_zct_hot_oi_signal_subprocess()
+
+
+def _run_zct_hot_oi_resolve_only_subprocess() -> None:
+    logger.info("Starting zct_vwap_signal_scanner --resolve-only (hot_oi lane)")
+    try:
+        subprocess.run(
+            [sys.executable, str(_ZCT_VWAP_SCRIPT), "--resolve-only"],
+            cwd=str(_ZCT_VWAP_SCRIPT.parent),
+            env=_zct_hot_oi_child_env(),
+            check=False,
+        )
+    except Exception as e:
+        logger.exception("zct hot_oi resolve failed: %s", e)
+
+
+def run_zct_hot_oi_resolve_only_task() -> None:
+    logger.info("开始执行 ZCT 🔥⚡热度+OI 结算...")
+    _run_zct_hot_oi_resolve_only_subprocess()
+
+
 # ============== Lifespan ==============
 
 @asynccontextmanager
@@ -652,6 +707,18 @@ async def lifespan(app: FastAPI):
                 IntervalTrigger(minutes=ZCT_VWAP_RESOLVE_INTERVAL_MINUTES),
                 id="zct_vwap_resolve_only",
             )
+    if ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED:
+        accumulation_scheduler.add_job(
+            run_zct_hot_oi_signal_task,
+            IntervalTrigger(minutes=ZCT_HOT_OI_SCAN_INTERVAL_MINUTES),
+            id="zct_hot_oi_signal_scanner",
+        )
+        if ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES > 0:
+            accumulation_scheduler.add_job(
+                run_zct_hot_oi_resolve_only_task,
+                IntervalTrigger(minutes=ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES),
+                id="zct_hot_oi_resolve_only",
+            )
     accumulation_scheduler.start()
     app.state.accumulation_scheduler = accumulation_scheduler
     try:
@@ -681,6 +748,18 @@ async def lifespan(app: FastAPI):
         )
     else:
         zct_vwap_log = "zct_vwap 定时未启用（设 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1）"
+    if ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED:
+        zct_hot_oi_log = (
+            f"zct_hot_oi 🔥⚡ 每 {ZCT_HOT_OI_SCAN_INTERVAL_MINUTES} 分钟 · "
+            f"结算每 {ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES} 分钟"
+            if ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES > 0
+            else (
+                f"zct_hot_oi 🔥⚡ 每 {ZCT_HOT_OI_SCAN_INTERVAL_MINUTES} 分钟 · "
+                "独立结算已关闭（ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES=0）"
+            )
+        )
+    else:
+        zct_hot_oi_log = "zct_hot_oi 定时未启用（设 ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED=1）"
     logger.info(
         "后台定时任务已启动: accumulation_radar pool 每日 10:00 CST, "
         "heat_watch 每小时 xx:07（现价/摘要 + 1h BPC）; "
@@ -689,6 +768,8 @@ async def lifespan(app: FastAPI):
         + s6_cron_log
         + "; "
         + zct_vwap_log
+        + "; "
+        + zct_hot_oi_log
     )
 
     yield
@@ -2106,6 +2187,106 @@ async def post_zct_vwap_clear_db():
         raise HTTPException(status_code=500, detail="zct_vwap_clear_db_failed")
 
 
+@app.get("/api/zct-hot-oi/summary")
+async def get_zct_hot_oi_summary():
+    """ZCT · 🔥⚡热度+OI lane：汇总（zct_hot_oi_*）。"""
+    try:
+        from zct_vwap_api import load_zct_vwap_summary
+
+        return load_zct_vwap_summary(lane="hot_oi")
+    except Exception as e:
+        logger.warning("zct_hot_oi summary failed: %s", e)
+        raise HTTPException(status_code=500, detail="zct_hot_oi_summary_error")
+
+
+@app.get("/api/zct-hot-oi/signals")
+async def get_zct_hot_oi_signals(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    symbol: Optional[str] = Query(None, description="如 BTCUSDT"),
+    status: Optional[str] = Query(
+        None,
+        description="all（默认）| open（持仓中）| settled（已结算）",
+    ),
+):
+    try:
+        from zct_vwap_api import load_zct_vwap_signals
+
+        return load_zct_vwap_signals(
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            status=status or "all",
+            lane="hot_oi",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("zct_hot_oi signals failed: %s", e)
+        raise HTTPException(status_code=500, detail="zct_hot_oi_signals_error")
+
+
+@app.patch("/api/zct-hot-oi/signals/{signal_id}")
+async def patch_zct_hot_oi_signal(signal_id: int, body: ZctVwapManualPatchBody):
+    try:
+        from zct_vwap_api import patch_zct_vwap_manual
+
+        updates = body.model_dump(exclude_unset=True)
+        if not updates:
+            raise HTTPException(status_code=400, detail="no_fields_to_update")
+        out = patch_zct_vwap_manual(signal_id, updates, lane="hot_oi")
+        if not out.get("ok"):
+            if out.get("error") == "not_found":
+                raise HTTPException(status_code=404, detail="signal_not_found")
+            raise HTTPException(status_code=500, detail="zct_hot_oi_patch_failed")
+        return out
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.warning("zct_hot_oi patch failed: %s", e)
+        raise HTTPException(status_code=500, detail="zct_hot_oi_patch_error")
+
+
+@app.post("/api/zct-hot-oi/maintenance/clear-db")
+async def post_zct_hot_oi_clear_db():
+    """清空 zct_hot_oi_signals 与 zct_hot_oi_settlements。"""
+    try:
+        from accumulation_radar import init_db
+
+        conn = init_db()
+        try:
+            cur = conn.cursor()
+            n_settle = 0
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='zct_hot_oi_settlements'"
+            )
+            if cur.fetchone():
+                cur.execute("SELECT COUNT(*) FROM zct_hot_oi_settlements")
+                n_settle = int(cur.fetchone()[0] or 0)
+                cur.execute("DELETE FROM zct_hot_oi_settlements")
+            cur.execute("SELECT COUNT(*) FROM zct_hot_oi_signals")
+            n_sig = int(cur.fetchone()[0] or 0)
+            cur.execute("DELETE FROM zct_hot_oi_signals")
+            conn.commit()
+            logger.warning(
+                "zct_hot_oi clear-db: deleted signals=%s settlements=%s",
+                n_sig,
+                n_settle,
+            )
+            return {
+                "ok": True,
+                "deleted_zct_hot_oi_signals": n_sig,
+                "deleted_zct_hot_oi_settlements": n_settle,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("zct_hot_oi clear-db failed: %s", e)
+        raise HTTPException(status_code=500, detail="zct_hot_oi_clear_db_failed")
+
+
 @app.get("/dashboard/zct-vwap", response_class=HTMLResponse)
 async def zct_vwap_dashboard_page():
     """ZCT VWAP 虚拟信号看板（静态页 + 调用上方 JSON API）。"""
@@ -2215,7 +2396,7 @@ class TriggerCronBody(BaseModel):
 
     task: str = Field(
         ...,
-        description="pool | heat_watch | heat_zones | heat_bpc | oi | s2_funding | s6_alpha | zct_vwap | zct_vwap_resolve",
+        description="pool | heat_watch | heat_zones | heat_bpc | oi | s2_funding | s6_alpha | zct_vwap | zct_vwap_resolve | zct_hot_oi | zct_hot_oi_resolve",
     )
 
 
@@ -2229,6 +2410,8 @@ _CRON_TASK_FUNCS: Dict[str, Any] = {
     "s6_alpha": run_s6_futures_alpha_task,
     "zct_vwap": run_zct_vwap_signal_task,
     "zct_vwap_resolve": run_zct_vwap_resolve_only_task,
+    "zct_hot_oi": run_zct_hot_oi_signal_task,
+    "zct_hot_oi_resolve": run_zct_hot_oi_resolve_only_task,
 }
 
 
@@ -2245,6 +2428,8 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
     - zct_vwap: ZCT VWAP 全量扫描（与定时同源子进程，间隔见 ZCT_VWAP_SCAN_INTERVAL_MINUTES）
     - zct_vwap_resolve: 仅纸面结算（--resolve-only，与定时 ZCT_VWAP_RESOLVE_INTERVAL_MINUTES 同源）
+    - zct_hot_oi: 🔥⚡热度+OI 扫描（worth_watch_hot_oi → zct_hot_oi_*；间隔 ZCT_HOT_OI_SCAN_INTERVAL_MINUTES）
+    - zct_hot_oi_resolve: 🔥⚡热度+OI 仅结算（ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES）
     """
     key = (body.task or "").strip()
     fn = _CRON_TASK_FUNCS.get(key)
