@@ -55,7 +55,8 @@ sl_price / tp_price / r_unit / entry_bar_open_ms；resolve 用 1m K 判定 SL/TP
   ZCT_SL_BUFFER_BPS       σ 带 / 摆动外侧缓冲（基点），默认 2
   ZCT_RESOLVE_MAX_BARS    未触轨最长等待根数，默认 720（约 12h）
   ZCT_RESOLVE_INTER_SYMBOL_SLEEP_SEC  结算(resolve)时按标的顺序请求币安 K 线，每处理完上一标的后休眠秒数；默认 0；
-                        标的多或结算 cron 较频时可设 5，减轻权重限制风险
+                        标的多或结算 cron 较频时可设 5，减轻权重限制风险。
+                        更高频时亦可考虑 U 本位 K 线 WebSocket 做 SL/TP、REST 仅断线补偿（当前实现为每持仓标的 REST 拉 1m）
   ZCT_SAME_BAR_RULE       pessimistic | optimistic，同根同时触轨时先后，默认 pessimistic
   ZCT_VIRTUAL_NOTIONAL_USDT  单笔保证金（USDT），默认 100；名义敞口 = 保证金 × ZCT_LEVERAGE
   ZCT_LEVERAGE               杠杆倍数，默认 10；盈亏按名义敞口计算（等价于保证金×杠杆）
@@ -384,7 +385,11 @@ def klines_to_df(rows: List[List[Any]]) -> pd.DataFrame:
 
 
 def compute_vwap_bands_session(df: pd.DataFrame, sigma: float) -> pd.DataFrame:
-    """UTC 当日会话内累积 VWAP 与 ±sigma 加权标准差轨。"""
+    """UTC 当日会话内累积 VWAP 与 ±sigma 加权标准差轨。
+
+    会话内加权方差 Var = E[X^2] - E[X]^2，其中权重为各根成交量：
+    sum(v·tp^2)/sum(v) - vwap^2，全程 cumsum 向量化，O(N) 而非逐根二重循环。
+    """
     if df.empty:
         return df
     tp = (df["high"] + df["low"] + df["close"]) / 3.0
@@ -392,19 +397,14 @@ def compute_vwap_bands_session(df: pd.DataFrame, sigma: float) -> pd.DataFrame:
     tpv = tp.values
     cum_pv = np.cumsum(tpv * v)
     cum_v = np.cumsum(v)
+    cum_tp2v = np.cumsum(v * tpv * tpv)
     vwap = cum_pv / np.maximum(cum_v, 1e-12)
-    upper = np.zeros(len(df))
-    lower = np.zeros(len(df))
-    for i in range(len(df)):
-        cv = cum_v[i]
-        if cv <= 0:
-            upper[i] = lower[i] = vwap[i]
-            continue
-        dev = tpv[: i + 1] - vwap[i]
-        var = np.sum(v[: i + 1] * (dev ** 2)) / cv
-        std = float(np.sqrt(max(var, 0.0)))
-        upper[i] = vwap[i] + sigma * std
-        lower[i] = vwap[i] - sigma * std
+    # 加权总体方差（与旧实现 sum(v*(tp-vwap_i)^2)/cum_v 在代数上等价）
+    var = cum_tp2v / np.maximum(cum_v, 1e-12) - vwap * vwap
+    std = np.sqrt(np.maximum(var, 0.0))
+    std = np.where(cum_v > 0, std, 0.0)
+    upper = vwap + sigma * std
+    lower = vwap - sigma * std
     out = df.copy()
     out["typical"] = tp
     out["vwap"] = vwap
@@ -1294,6 +1294,9 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
     """
     对 outcome 为空且已写入 SL/TP 的记录，用信号 K 线之后的 1m 数据判定先触发止损或止盈。
     返回 stats + resolved_events（供 Telegram 平仓推送）。
+
+    当前实现：每个待结算标的各请求一次 REST /fapi/v1/klines；间隔休眠见 RESOLVE_INTER_SYMBOL_SLEEP_SEC。
+    若将来需要更高频判定且权重吃紧，可在进程内维护 K 线 WebSocket，REST 仅作补偿。
     """
     from accumulation_radar import DB_PATH, init_db
 
