@@ -17,18 +17,8 @@ pytz>=2023.3
 ccxt>=4.0.0
 aiohttp>=3.9.0
 
-# Multi-Asset Data (Stocks & Forex)
+# Multi-Asset Data (Stocks & Forex) — used by /api/radar OHLCV fetch
 yfinance>=0.2.0
-
-# Kronos Model (CPU-only to reduce memory usage)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.0.0
-einops>=0.7.0
-huggingface_hub>=0.20.0
-safetensors>=0.4.0
-
-# Chart Generation
-matplotlib>=3.7.0
 
 # Utils
 tqdm>=4.65.0

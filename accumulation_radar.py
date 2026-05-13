@@ -18,7 +18,6 @@ import json
 import os
 import sys
 import time
-from collections import defaultdict
 import requests
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -54,8 +53,7 @@ TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 # 且标的仅限「值得关注七类看板 worth_watch_* ∪ 重点关注 focus_watch」（不含收筹池 watchlist）。
 TELEGRAM_SEND_LEGACY_POOL_SCAN_REPORT = False
 TELEGRAM_SEND_LEGACY_OI_HOURLY_REPORT = False
-# 1H 结构（BPC）：默认关闭；设置 BPC_FEATURE_ENABLED=1 恢复热表/worth/focus 的 BPC 重算与 OI 结束后的 BPC TG
-BPC_FEATURE_ENABLED: bool = os.getenv("BPC_FEATURE_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+# 1H BPC（突破—回踩—延续）原由 breakout_pullback_fsm 实现；模块已移除，热表不再重算 bpc_json。
 FAPI = "https://fapi.binance.com"
 db_dir = os.getenv("DATA_DIR", Path(__file__).parent)
 DB_PATH = Path(db_dir) / "accumulation.db"
@@ -155,14 +153,14 @@ _LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
 # 热度收筹表：突破—回踩—延续状态机（1h K 线，不含 OI）
 HEAT_ACCUM_BPC_INTERVAL = "1h"
 HEAT_ACCUM_BPC_KLINE_LIMIT = 120
-# API / 看盘展示：与 breakout_pullback_fsm 相位对应（避免「待突破」暗示必做多）
+# API / 看盘展示：与 BPC phase 字段对应（避免「待突破」暗示必做多）
 BPC_PHASE_ZH: Dict[str, str] = {
     "idle": "观望",
     "post_breakout": "突破跟进",
     "pullback": "回踩中",
     "continuation": "延续确认",
 }
-# 与 breakout_pullback_fsm 的 continuation_reason 一致（用于前端/推送中文）
+# continuation_reason 英文 key → 中文（用于前端/推送）
 BPC_CONTINUATION_REASON_ZH: Dict[str, str] = {
     "pin_bar": "长下影·Pin",
     "bullish_engulfing": "看涨吞没",
@@ -677,178 +675,20 @@ def refresh_all_heat_accum_watch_prices(
     return payload
 
 
-def refresh_all_heat_accum_bpc_states(
-    conn: sqlite3.Connection,
-    *,
-    now: Optional[datetime] = None,
-) -> Dict[str, Any]:
-    """
-    对 heat_accum_watch 全表按 1h K 线重算「突破—回踩—延续」状态（不含 OI），写入 bpc_json / bpc_updated_cst。
-    由「热度看盘整表刷新」每小时与其它步骤一并调用。
-    """
-    from breakout_pullback_fsm import BPCParams, evaluate_breakout_pullback_continuation
-
-    if now is None:
-        now = datetime.now(timezone(timedelta(hours=8)))
-    now_cst = _heat_accum_now_cst(now)
-    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
-
-    _heat_accum_prune(conn, now)
-    cur = conn.cursor()
-    cur.execute("SELECT symbol FROM heat_accum_watch")
-    syms = [str(r[0] or "") for r in cur.fetchall() if r and r[0]]
-    if not syms:
-        conn.commit()
-        return _heat_accum_fetch_payload(conn, now)
-
-    params = BPCParams()
-    recalculated = 0
-    failed_klines = 0
-    for sym in syms:
-        if not sym:
-            continue
-        kl = api_get(
-            "/fapi/v1/klines",
-            {"symbol": sym, "interval": HEAT_ACCUM_BPC_INTERVAL, "limit": HEAT_ACCUM_BPC_KLINE_LIMIT},
-        )
-        time.sleep(0.06)
-        if not kl:
-            err_payload = {
-                "ok": False,
-                "reason": "no_klines",
-                "phase": "idle",
-                "interval": HEAT_ACCUM_BPC_INTERVAL,
-            }
-            cur.execute(
-                """
-                UPDATE heat_accum_watch SET bpc_json = ?, bpc_updated_cst = ?
-                WHERE symbol = ?
-                """,
-                (json.dumps(err_payload, ensure_ascii=False), now_label, sym),
-            )
-            failed_klines += 1
-            continue
-        ev = evaluate_breakout_pullback_continuation(kl, params)
-        ev["interval"] = HEAT_ACCUM_BPC_INTERVAL
-        cur.execute(
-            """
-            UPDATE heat_accum_watch SET bpc_json = ?, bpc_updated_cst = ?
-            WHERE symbol = ?
-            """,
-            (json.dumps(ev, ensure_ascii=False), now_label, sym),
-        )
-        recalculated += 1
-
-    conn.commit()
-    try:
-        patch_oi_radar_snapshot_watchlists_from_db(conn)
-    except Exception as e:
-        print(f"⚠️ patch oi_radar snapshot after heat BPC refresh failed: {e}")
-
-    payload = _heat_accum_fetch_payload(conn, now)
-    payload["bpc_recalculated"] = recalculated
-    payload["bpc_failed_klines"] = failed_klines
-    return payload
-
-
 def refresh_all_worth_watch_bpc_states(
     conn: sqlite3.Connection,
     *,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
-    对全部 worth_watch_* 七张表 + focus_watch 中出现的标的（按 symbol 去重）拉 1h K 线，重算 BPC，
-    写回各表对应行的 bpc_json / bpc_updated_cst。与 heat_accum_watch BPC 同源算法；
-    定时任务中与热度看盘刷新同一连接顺序执行（每小时一次）。
+    原 worth_watch / focus 各行 1h BPC（breakout_pullback_fsm）已移除；保留空操作以兼容 main 调用链。
     """
-    if not BPC_FEATURE_ENABLED:
-        conn.commit()
-        return {
-            "worth_watch_bpc_recalculated": 0,
-            "worth_watch_bpc_failed_klines": 0,
-            "worth_watch_bpc_symbols": 0,
-            "bpc_disabled": True,
-        }
-
-    from breakout_pullback_fsm import BPCParams, evaluate_breakout_pullback_continuation
-
-    if now is None:
-        now = datetime.now(timezone(timedelta(hours=8)))
-    now_cst = _heat_accum_now_cst(now)
-    now_label = now_cst.strftime("%Y-%m-%d %H:%M") + " CST"
-
-    _worth_watch_prune_all(conn, now)
-    cur = conn.cursor()
-    sym_to_tables: Dict[str, List[str]] = defaultdict(list)
-    allowed_tbls = sorted(set(WORTH_WATCH_TABLE_BY_CATEGORY.values()))
-    for tbl in allowed_tbls:
-        cur.execute(f"SELECT symbol FROM {tbl}")
-        for r in cur.fetchall():
-            s = str(r[0] or "").strip()
-            if s:
-                sym_to_tables[s].append(tbl)
-
-    try:
-        cur.execute("SELECT symbol FROM focus_watch")
-        for r in cur.fetchall():
-            s = str(r[0] or "").strip()
-            if s and "focus_watch" not in sym_to_tables[s]:
-                sym_to_tables[s].append("focus_watch")
-    except sqlite3.OperationalError:
-        pass
-
-    if not sym_to_tables:
-        conn.commit()
-        return {
-            "worth_watch_bpc_recalculated": 0,
-            "worth_watch_bpc_failed_klines": 0,
-            "worth_watch_bpc_symbols": 0,
-        }
-
-    params = BPCParams()
-    recalculated = 0
-    failed_klines = 0
-    for sym in sorted(sym_to_tables.keys()):
-        if not sym:
-            continue
-        kl = api_get(
-            "/fapi/v1/klines",
-            {"symbol": sym, "interval": HEAT_ACCUM_BPC_INTERVAL, "limit": HEAT_ACCUM_BPC_KLINE_LIMIT},
-        )
-        time.sleep(0.06)
-        if not kl:
-            err_payload = {
-                "ok": False,
-                "reason": "no_klines",
-                "phase": "idle",
-                "interval": HEAT_ACCUM_BPC_INTERVAL,
-            }
-            payload_json = json.dumps(err_payload, ensure_ascii=False)
-            failed_klines += 1
-        else:
-            ev = evaluate_breakout_pullback_continuation(kl, params)
-            ev["interval"] = HEAT_ACCUM_BPC_INTERVAL
-            payload_json = json.dumps(ev, ensure_ascii=False)
-            recalculated += 1
-        for tbl in sym_to_tables[sym]:
-            cur.execute(
-                f"""
-                UPDATE {tbl} SET bpc_json = ?, bpc_updated_cst = ?
-                WHERE symbol = ?
-                """,
-                (payload_json, now_label, sym),
-            )
-
     conn.commit()
-    try:
-        patch_oi_radar_snapshot_watchlists_from_db(conn)
-    except Exception as e:
-        print(f"⚠️ patch oi_radar snapshot after worth watch BPC refresh failed: {e}")
-
     return {
-        "worth_watch_bpc_recalculated": recalculated,
-        "worth_watch_bpc_failed_klines": failed_klines,
-        "worth_watch_bpc_symbols": len(sym_to_tables),
+        "worth_watch_bpc_recalculated": 0,
+        "worth_watch_bpc_failed_klines": 0,
+        "worth_watch_bpc_symbols": 0,
+        "bpc_disabled": True,
     }
 
 
@@ -858,24 +698,18 @@ def refresh_all_heat_accum_watch_full(
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
-    heat_accum_watch 整表：先同步现价/摘要并清空 zone，再按 1h K 线重算 BPC。
+    heat_accum_watch 整表：同步现价/摘要并清空 zone（1h BPC 重算已随 breakout_pullback_fsm 移除）。
     每小时定时与单一维护接口共用。
     """
     if now is None:
         now = datetime.now(timezone(timedelta(hours=8)))
     p_px = refresh_all_heat_accum_watch_prices(conn, now=now)
-    if not BPC_FEATURE_ENABLED:
-        out = dict(p_px)
-        out["recalculated_prices"] = p_px.get("recalculated")
-        out["price_rows"] = p_px.get("recalculated")
-        out["bpc_recalculated"] = 0
-        out["bpc_failed_klines"] = 0
-        out["bpc_disabled"] = True
-        return out
-    p_bpc = refresh_all_heat_accum_bpc_states(conn, now=now)
-    out = dict(p_bpc)
+    out = dict(p_px)
     out["recalculated_prices"] = p_px.get("recalculated")
     out["price_rows"] = p_px.get("recalculated")
+    out["bpc_recalculated"] = 0
+    out["bpc_failed_klines"] = 0
+    out["bpc_disabled"] = True
     return out
 
 
@@ -2626,121 +2460,6 @@ def send_telegram(text):
         time.sleep(0.5)
 
 
-def union_worth_watch_seven_tables_and_focus_symbols(conn: sqlite3.Connection) -> List[str]:
-    """值得关注七张 worth_watch_* 表 ∪ 重点关注 focus_watch，按 symbol 去重。"""
-    s: Set[str] = set()
-    cur = conn.cursor()
-    for tbl in sorted(set(WORTH_WATCH_TABLE_BY_CATEGORY.values())):
-        try:
-            cur.execute(f"SELECT symbol FROM {tbl}")
-            for row in cur.fetchall():
-                sym = str(row[0] or "").strip()
-                if sym:
-                    s.add(sym)
-        except sqlite3.OperationalError:
-            pass
-    try:
-        cur.execute("SELECT symbol FROM focus_watch")
-        for row in cur.fetchall():
-            sym = str(row[0] or "").strip()
-            if sym:
-                s.add(sym)
-    except sqlite3.OperationalError:
-        pass
-    return sorted(s)
-
-
-def union_focus_watch_and_heat_accum_symbols(conn: sqlite3.Connection) -> List[str]:
-    """重点关注 focus_watch ∪ 值得关注「热度+收筹」worth_watch_heat_accum，按 symbol 去重。"""
-    s: Set[str] = set()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT symbol FROM focus_watch")
-        for row in cur.fetchall():
-            sym = str(row[0] or "").strip()
-            if sym:
-                s.add(sym)
-    except sqlite3.OperationalError:
-        pass
-    tbl = WORTH_WATCH_TABLE_BY_CATEGORY.get("heat_accum")
-    if tbl:
-        try:
-            cur.execute(f"SELECT symbol FROM {tbl}")
-            for row in cur.fetchall():
-                sym = str(row[0] or "").strip()
-                if sym:
-                    s.add(sym)
-        except sqlite3.OperationalError:
-            pass
-    return sorted(s)
-
-
-def send_telegram_bpc_continuation_for_pooled_symbols(conn: sqlite3.Connection) -> None:
-    """
-    仅当 1H BPC 相位为 continuation 时推送；标的限定为值得关注七类看板 ∪ 重点关注（不含收筹池）。
-    同一根延续确认 K（open time）对每个标的只推一次，避免每小时重复刷屏。
-    """
-    from breakout_pullback_fsm import BPCParams, evaluate_breakout_pullback_continuation
-
-    syms = union_worth_watch_seven_tables_and_focus_symbols(conn)
-    if not syms:
-        return
-
-    params = BPCParams()
-    cur = conn.cursor()
-    lines: List[str] = []
-    upd: List[Tuple[str, int]] = []
-
-    for sym in syms:
-        kl = api_get(
-            "/fapi/v1/klines",
-            {"symbol": sym, "interval": HEAT_ACCUM_BPC_INTERVAL, "limit": HEAT_ACCUM_BPC_KLINE_LIMIT},
-        )
-        time.sleep(0.06)
-        if not kl:
-            continue
-        ev = evaluate_breakout_pullback_continuation(kl, params)
-        if ev.get("phase") != "continuation":
-            continue
-        ci = ev.get("continuation_idx")
-        if ci is None or ci < 0 or ci >= len(kl):
-            continue
-        try:
-            bar_ms = int(kl[ci][0])
-        except (TypeError, ValueError, IndexError):
-            continue
-        cur.execute("SELECT last_cont_bar_open_ms FROM bpc_telegram_dedup WHERE symbol = ?", (sym,))
-        row = cur.fetchone()
-        if row is not None and int(row[0]) == bar_ms:
-            continue
-
-        coin = sym[:-4] if sym.endswith("USDT") else sym
-        reason_raw = str(
-            ev.get("continuation_reason") or ev.get("last_continuation_reason") or ""
-        ).strip()
-        reason_zh = BPC_CONTINUATION_REASON_ZH.get(reason_raw, reason_raw or "延续确认")
-        lvl = ev.get("breakout_level")
-        lvl_s = f"{float(lvl):.6g}" if isinstance(lvl, (int, float)) else str(lvl)
-        lines.append(f"• {sym} ({coin}) | 延续形态：{reason_zh} | 突破参考 {lvl_s}")
-        upd.append((sym, bar_ms))
-
-    for sym_u, ms_u in upd:
-        cur.execute(
-            "INSERT OR REPLACE INTO bpc_telegram_dedup (symbol, last_cont_bar_open_ms) VALUES (?, ?)",
-            (sym_u, ms_u),
-        )
-    conn.commit()
-
-    if not lines:
-        return
-
-    header = (
-        f"🟢 1H BPC · 延续（值得关注七类看板 ∪ 重点关注）\n"
-        f"周期: {HEAT_ACCUM_BPC_INTERVAL}\n\n"
-    )
-    send_telegram(header + "\n".join(lines))
-
-
 def save_watchlist(conn, results):
     """保存标的池到数据库（每日 pool；先按 WATCHLIST_RETENTION_DAYS 修剪落选超窗行再 UPSERT）。"""
     c = conn.cursor()
@@ -3848,8 +3567,6 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     if notify:
         if TELEGRAM_SEND_LEGACY_OI_HOURLY_REPORT:
             send_telegram(report)
-        if BPC_FEATURE_ENABLED:
-            send_telegram_bpc_continuation_for_pooled_symbols(conn)
     return payload
 
 
