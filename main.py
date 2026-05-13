@@ -19,7 +19,7 @@ import pandas as pd
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 # Static files removed - frontend is deployed separately on Vercel
@@ -1282,6 +1282,53 @@ async def post_zct_hot_oi_clear_db():
     except Exception as e:
         logger.exception("zct_hot_oi clear-db failed: %s", e)
         raise HTTPException(status_code=500, detail="zct_hot_oi_clear_db_failed")
+
+
+class VpRegimeScanBody(BaseModel):
+    """POST /api/vp-regime/scan：同步跑一轮 vp_regime_scanner（可能数十秒，勿并发狂点）。"""
+
+    symbols: Optional[str] = Field(
+        default=None,
+        description="逗号分隔 USDT 永续，如 BTCUSDT,ETHUSDT；指定时与 watchlist 互斥",
+    )
+    watchlist: bool = Field(default=False, description="为 True 且未传 symbols 时从收筹池 watchlist 取标的")
+    persist: bool = Field(default=True, description="是否写入 vp_regime_snapshots")
+    notify_tg: bool = Field(default=True, description="是否发 Telegram；关可避免推送")
+
+
+@app.post("/api/vp-regime/scan")
+async def post_vp_regime_scan(body: VpRegimeScanBody = Body(default_factory=VpRegimeScanBody)):
+    """
+    量价环境扫描（VolUSD 代理 + 三态量环境）；与定时无关，供维护面板手动试跑。
+    """
+    from starlette.concurrency import run_in_threadpool
+
+    sy = (body.symbols or "").strip()
+    if sy and body.watchlist:
+        raise HTTPException(status_code=400, detail="symbols 与 watchlist 互斥")
+    ov: Optional[List[str]] = None
+    if sy:
+        ov = [x.strip() for x in sy.split(",") if x.strip()]
+        if not ov:
+            raise HTTPException(status_code=400, detail="symbols 无效或为空")
+    wl: Optional[bool] = True if (body.watchlist and not ov) else None
+
+    def _work():
+        import vp_regime_scanner as vp
+
+        return vp.run_scan(
+            use_db=body.persist,
+            use_tg=body.notify_tg,
+            symbols_override=ov,
+            watchlist_request=wl,
+            quiet=True,
+        )
+
+    try:
+        return await run_in_threadpool(_work)
+    except Exception as e:
+        logger.exception("vp_regime scan failed: %s", e)
+        raise HTTPException(status_code=500, detail="vp_regime_scan_failed")
 
 
 @app.get("/dashboard/zct-vwap", response_class=HTMLResponse)
