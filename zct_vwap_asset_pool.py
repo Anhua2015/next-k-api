@@ -11,6 +11,7 @@ ZCT VWAP 触轨资产池：walk-forward 近 N 天（默认 3 天 ≈ 72 小时�
 用法：
   cd next-k-api
   python zct_vwap_asset_pool.py --days 3 --zct-default-22
+  python zct_vwap_asset_pool.py --days 3 --hot-oi-plus-default-22
 
 定时 + 写入 accumulation.db 见 **`zct_vwap_asset_pool_daily_job.py`**（`--once` / `--daemon`）。
 """
@@ -24,7 +25,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from zct_vwap_walkforward_backtest import (
     _default_symbol_list,
@@ -33,6 +34,22 @@ from zct_vwap_walkforward_backtest import (
 )
 
 import zct_vwap_signal_scanner as z
+
+
+def touch_pool_symbols_hot_oi_plus_default_22() -> List[str]:
+    """
+    worth_watch_hot_oi（🔥⚡ 热度+OI）∪ 扫描器默认 22 永续；顺序为默认 22 在前，再追加 hot 表独有标的。
+    """
+    base = zct_default_22_symbols()
+    hot = z.hot_oi_watchlist_symbols()
+    seen = set(base)
+    out = list(base)
+    for s in hot:
+        su = str(s).strip().upper()
+        if su and su not in seen:
+            seen.add(su)
+            out.append(su)
+    return out
 
 
 def _window_touch_rows(summary: Dict[str, Any], symbols: List[str]) -> List[Dict[str, Any]]:
@@ -152,6 +169,7 @@ def run_asset_pool_scan(
     min_touch_win_rate: float = 0.8,
     strict_greater_rate: bool = False,
     quiet: bool = True,
+    symbols_source: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """跑 walk-forward 并筛选；返回 (pool_payload, raw_backtest_summary)。"""
     ctx = contextlib.redirect_stdout(io.StringIO()) if quiet else contextlib.nullcontext()
@@ -177,16 +195,20 @@ def run_asset_pool_scan(
         strict_greater_rate=bool(strict_greater_rate),
     )
 
+    crit: Dict[str, Any] = {
+        "days": float(days),
+        "signal_interval": str(signal_interval),
+        "min_touch_win_rate": float(min_touch_win_rate),
+        "touch_rate_comparison": ">" if strict_greater_rate else ">=",
+        "min_win_plus_loss": int(min_touch_trades),
+        "win_plus_loss_comparison": ">" if strict_greater_touch else ">=",
+    }
+    if symbols_source:
+        crit["symbols_source"] = str(symbols_source)
+
     out: Dict[str, Any] = {
         "generated_at_ms": int(time.time() * 1000),
-        "criteria": {
-            "days": float(days),
-            "signal_interval": str(signal_interval),
-            "min_touch_win_rate": float(min_touch_win_rate),
-            "touch_rate_comparison": ">" if strict_greater_rate else ">=",
-            "min_win_plus_loss": int(min_touch_trades),
-            "win_plus_loss_comparison": ">" if strict_greater_touch else ">=",
-        },
+        "criteria": crit,
         "symbols_scanned": [str(s).strip().upper() for s in symbols],
         "matched_symbols": [m["symbol"] for m in filt["matched"]],
         "matched": filt["matched"],
@@ -206,6 +228,11 @@ def main() -> None:
     ap.add_argument("--days", type=float, default=3.0)
     ap.add_argument("--symbols", type=str, default="")
     ap.add_argument("--zct-default-22", action="store_true")
+    ap.add_argument(
+        "--hot-oi-plus-default-22",
+        action="store_true",
+        help="worth_watch_hot_oi ∪ 扫描器默认 22 永续（默认 22 顺序在前）",
+    )
     ap.add_argument("--use-env-symbols", action="store_true")
     ap.add_argument("--ignore-db-cooldown", action="store_true")
     ap.add_argument("--use-db-cooldown", action="store_true")
@@ -220,17 +247,46 @@ def main() -> None:
         default=str(Path(__file__).resolve().parent / "zct_vwap_asset_pool.json"),
     )
     ap.add_argument("--no-json-out", action="store_true")
+    ap.add_argument(
+        "--write-db",
+        action="store_true",
+        help="walk-forward 完成后：先清空 zct_vwap_touch_pool 再写入 accumulation.db，并追加 runs 审计",
+    )
     ap.add_argument("--sleep-between-symbols", type=float, default=0.0)
     args = ap.parse_args()
 
-    if args.zct_default_22:
+    mode_n = sum(
+        1
+        for x in (
+            args.hot_oi_plus_default_22,
+            args.zct_default_22,
+            args.use_env_symbols,
+            bool(args.symbols.strip()),
+        )
+        if x
+    )
+    if mode_n > 1:
+        ap.error(
+            "标的来源请只选一种：--hot-oi-plus-default-22 / --zct-default-22 / "
+            "--use-env-symbols / --symbols"
+        )
+
+    sym_src: Optional[str] = None
+    if args.hot_oi_plus_default_22:
+        symbols = touch_pool_symbols_hot_oi_plus_default_22()
+        sym_src = "hot_oi_plus_default_22"
+    elif args.zct_default_22:
         symbols = zct_default_22_symbols()
+        sym_src = "zct_default_22"
     elif args.use_env_symbols:
         symbols = z._symbols_from_env()
+        sym_src = "env_symbols"
     elif args.symbols.strip():
         symbols = [x.strip().upper() for x in args.symbols.split(",") if x.strip()]
+        sym_src = "cli_symbols"
     else:
         symbols = _default_symbol_list()
+        sym_src = "default_symbol_list"
 
     if not symbols:
         print("[pool] no symbols", file=sys.stderr)
@@ -250,7 +306,20 @@ def main() -> None:
         min_touch_win_rate=float(args.min_touch_win_rate),
         strict_greater_rate=bool(args.strict_greater_rate),
         quiet=True,
+        symbols_source=sym_src,
     )
+
+    if args.write_db:
+        from accumulation_radar import init_db
+        from zct_vwap_touch_pool_db import touch_pool_ensure_schema, touch_pool_write_db
+
+        conn = init_db()
+        try:
+            touch_pool_ensure_schema(conn)
+            n = touch_pool_write_db(conn, out)
+        finally:
+            conn.close()
+        print(f"[pool] db cleared+written touch_pool_rows={n}", flush=True)
 
     if not args.no_json_out:
         p = Path(args.json_out.strip() or "zct_vwap_asset_pool.json")

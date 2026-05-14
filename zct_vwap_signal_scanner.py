@@ -17,20 +17,17 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
 
 定时：由 next-k-api main.py APScheduler 调用（需 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1），
       默认全量扫描每 30 分钟、独立结算(resolve-only)每 5 分钟（IntervalTrigger，环境变量可调）；
+      主 lane 子进程注入 **ZCT_TOUCH_POOL_UNIVERSE=1**，标的仅从 **accumulation.db / zct_vwap_touch_pool**
+      读取（须先跑触轨资产池 daily job 或 touch-pool-scan）；表空则本轮跳过扫描。
       亦可自建 cron 执行本脚本。
 
-🔥⚡热度+OI 独立 lane（子进程或 `python zct_vwap_signal_scanner.py --hot-oi`）：
-  ZCT_HOT_OI_UNIVERSE=1   标的从 worth_watch_hot_oi 读；需已跑 OI 雷达写入七类；
-                          自动剔除非 U 本位永续/未上市合约（与 exchangeInfo 对齐）
-  ZCT_DB_SIGNALS_TABLE   默认 zct_vwap_signals；热度 lane 为 zct_hot_oi_signals
-  ZCT_DB_SETTLEMENTS_TABLE 默认 zct_vwap_settlements；热度 lane 为 zct_hot_oi_settlements
-  main.py：🔥⚡热度+OI 定时默认开启；ZCT_HOT_OI_SIGNAL_SCHEDULER_ENABLED=0|false|off 可关闭。
-           ZCT_HOT_OI_SCAN_INTERVAL_MINUTES（默认 35）/ ZCT_HOT_OI_RESOLVE_INTERVAL_MINUTES（默认 7），与主 ZCT 错开。
+信号与结算统一写入 **zct_vwap_signals / zct_vwap_settlements**（旧 zct_hot_oi_* 在 accumulation init_db 时一次性并入后删除）。
 
 环境变量：
   ZCT_VWAP_SYMBOLS     逗号分隔永续标的；不设则默认含 BTC/ETH/SOL、XRP、ADA、
                         1000SHIB、1000PEPE、DOGE、BNB、LINK、GALA、LTC、BCH、SUI、
-                        DOT、UNI、AVAX、AXS、MANA、ZEC、TAO、ONDO（见 _DEFAULT_ZCT_SYMBOLS）
+                        DOT、UNI、AVAX、AXS、MANA、ZEC、TAO、ONDO（见 _DEFAULT_ZCT_SYMBOLS）。
+                        **若 ZCT_TOUCH_POOL_UNIVERSE=1，本项被忽略**（以触轨表为准）。
   ZCT_VWAP_BAND_SIGMA  默认 1.0
   ZCT_VWAP_DB_SKIP_FLAT  设为 1 时不入库 side=FLAT 的行（减轻 NO_TRADE 噪音）
   ZCT_BTC_MACRO_FILTER_ENABLED  默认 **开启**「BTC 大盘红绿灯」：BTC VWAP 斜率极陡且非高震荡时，
@@ -142,11 +139,9 @@ if _env_file.exists():
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
-# 🔥⚡热度+OI lane：CLI `--hot-oi`（与 FastAPI 子进程注入的环境一致）
-if "--hot-oi" in sys.argv:
-    os.environ.setdefault("ZCT_HOT_OI_UNIVERSE", "1")
-    os.environ.setdefault("ZCT_DB_SIGNALS_TABLE", "zct_hot_oi_signals")
-    os.environ.setdefault("ZCT_DB_SETTLEMENTS_TABLE", "zct_hot_oi_settlements")
+# 主 lane：触轨资产库标的（与 main 定时子进程注入一致）
+if "--touch-pool" in sys.argv:
+    os.environ.setdefault("ZCT_TOUCH_POOL_UNIVERSE", "1")
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
@@ -178,8 +173,8 @@ ZCT_DB_SETTLEMENTS_TABLE = _sql_ident(
 )
 
 
-def _hot_oi_universe_enabled() -> bool:
-    return os.getenv("ZCT_HOT_OI_UNIVERSE", "").strip().lower() in (
+def _touch_pool_universe_enabled() -> bool:
+    return os.getenv("ZCT_TOUCH_POOL_UNIVERSE", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -251,53 +246,15 @@ def _symbols_hot_oi_from_db() -> List[str]:
         conn.close()
 
 
-def _prune_zct_hot_oi_orphans() -> int:
-    """
-    🔥⚡热度+OI lane：worth_watch_hot_oi 仅保留约 2 个日历日（见 accumulation_radar WORTH 修剪）。
-    将 zct_hot_oi_signals 与当前池同步：不在当前 universe 的行删除，但保留「持仓中」
-    （与 _fetch_symbols_with_open_positions / 看板一致：outcome 空 + LONG/SHORT + 已写 sl_price）。
-    settlements 表保留历史，不随删信号行清理。
-    """
-    if not _hot_oi_universe_enabled():
-        return 0
-    from accumulation_radar import init_db
-
-    allowed = _symbols_hot_oi_from_db()
-    allowed_set = set(allowed)
-    tbl = ZCT_DB_SIGNALS_TABLE
-    conn = init_db()
-    try:
-        cur = conn.cursor()
-        hold_clause = (
-            "(outcome IS NULL AND sl_price IS NOT NULL "
-            "AND side IN ('LONG', 'SHORT'))"
-        )
-        if not allowed_set:
-            cur.execute(
-                f"DELETE FROM {tbl} WHERE NOT {hold_clause}"
-            )
-        else:
-            ph = ",".join("?" * len(allowed_set))
-            cur.execute(
-                f"""
-                DELETE FROM {tbl}
-                WHERE symbol NOT IN ({ph}) AND NOT {hold_clause}
-                """,
-                tuple(sorted(allowed_set)),
-            )
-        n = int(cur.rowcount or 0)
-        conn.commit()
-        return n
-    finally:
-        conn.close()
+def hot_oi_watchlist_symbols() -> List[str]:
+    """worth_watch_hot_oi 当前标的（已过滤为币安 U 本位永续；供触轨资产池合并等）。"""
+    return _symbols_hot_oi_from_db()
 
 
 def _scan_title_short() -> str:
-    return (
-        "ZCT VWAP · 🔥⚡热度+OI"
-        if _hot_oi_universe_enabled()
-        else "ZCT VWAP"
-    )
+    if _touch_pool_universe_enabled():
+        return "ZCT VWAP · 触轨资产池"
+    return "ZCT VWAP"
 
 
 # 默认监控 U 本位永续（可通过 ZCT_VWAP_SYMBOLS 覆盖）。
@@ -309,13 +266,21 @@ _DEFAULT_ZCT_SYMBOLS = (
 )
 
 
+def _symbols_touch_pool_from_db() -> List[str]:
+    """主 lane：标的来自触轨入选表 zct_vwap_touch_pool（与 daily job / touch-pool-scan 写入同源）。"""
+    from zct_vwap_touch_pool_db import touch_pool_list_symbols
+
+    return touch_pool_list_symbols()
+
+
 def _symbols_from_env() -> List[str]:
-    if _hot_oi_universe_enabled():
-        syms = _symbols_hot_oi_from_db()
+    if _touch_pool_universe_enabled():
+        syms = _symbols_touch_pool_from_db()
         if syms:
             return syms
         print(
-            "[warn] ZCT_HOT_OI_UNIVERSE：worth_watch_hot_oi 无标的，本轮跳过扫描（请先跑 OI 雷达写入七类）"
+            "[warn] ZCT_TOUCH_POOL_UNIVERSE：zct_vwap_touch_pool 无标的，本轮跳过扫描"
+            "（请先跑 zct_vwap_asset_pool_daily_job 或 POST /api/zct-vwap/touch-pool-scan）"
         )
         return []
     raw = os.getenv("ZCT_VWAP_SYMBOLS", _DEFAULT_ZCT_SYMBOLS).strip()
@@ -2462,7 +2427,7 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
                     pnl_usdt=float(pnl_u),
                 )
         conn.commit()
-        lane_tag = "[hot_oi] " if _hot_oi_universe_enabled() else ""
+        lane_tag = "[touch_pool] " if _touch_pool_universe_enabled() else ""
         print(
             f"[resolve]{lane_tag}checked={stats['checked']} resolved={stats['resolved']} "
             f"skipped={stats['skipped']} db={DB_PATH} table={ZCT_DB_SIGNALS_TABLE}"
@@ -2542,11 +2507,7 @@ def _tg_push_resolve_text(events: List[Dict[str, Any]]) -> str:
     if not events:
         return ""
     lines = [
-        (
-            "📌 ZCT · 🔥⚡热度+OI 平仓结算"
-            if _hot_oi_universe_enabled()
-            else "📌 ZCT VWAP 平仓结算"
-        ),
+        "📌 ZCT 平仓结算",
         "",
     ]
     for e in events:
@@ -2563,16 +2524,6 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
         _btc_macro_reset_for_scan()
         if "BTCUSDT" in syms:
             syms = ["BTCUSDT"] + [s for s in syms if s != "BTCUSDT"]
-    if _hot_oi_universe_enabled():
-        try:
-            n_pr = _prune_zct_hot_oi_orphans()
-            if n_pr:
-                print(
-                    f"[hot_oi] pruned_signals_not_in_worth_watch_hot_oi={n_pr} "
-                    f"（已保留持仓中未平仓行）"
-                )
-        except Exception as e:
-            print(f"[hot_oi] prune orphan signals failed: {e}")
     halt_day = _circuit_breaker_halted()
     if halt_day:
         print(
@@ -2611,7 +2562,7 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
             tg_summary_lines.append(f"· {sym}  ERROR {e}")
 
     scan_params: Dict[str, Any] = {
-        "lane": "hot_oi" if _hot_oi_universe_enabled() else "vwap_default",
+        "lane": "touch_pool" if _touch_pool_universe_enabled() else "vwap_default",
         "signals_table": ZCT_DB_SIGNALS_TABLE,
         "settlements_table": ZCT_DB_SETTLEMENTS_TABLE,
         "symbols_scanned": syms,
@@ -2737,9 +2688,9 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="ZCT VWAP signal scanner")
     ap.add_argument(
-        "--hot-oi",
+        "--touch-pool",
         action="store_true",
-        help="🔥⚡热度+OI lane：worth_watch_hot_oi 标的 + zct_hot_oi_signals / zct_hot_oi_settlements",
+        help="标的仅从 zct_vwap_touch_pool（触轨资产库）读取；与 main 定时子进程一致",
     )
     ap.add_argument("--no-tg", action="store_true", help="Do not send Telegram")
     ap.add_argument("--no-resolve", action="store_true", help="Skip SL/TP outcome resolution pass")
@@ -2750,16 +2701,6 @@ def main() -> None:
     )
     args = ap.parse_args()
     if args.resolve_only:
-        if _hot_oi_universe_enabled():
-            try:
-                n_pr = _prune_zct_hot_oi_orphans()
-                if n_pr:
-                    print(
-                        f"[hot_oi] pruned_signals_not_in_worth_watch_hot_oi={n_pr} "
-                        f"（已保留持仓中未平仓行）"
-                    )
-            except Exception as e:
-                print(f"[hot_oi] prune orphan signals failed: {e}")
         rs = resolve_open_signals_from_db()
         if not args.no_tg and TG_NOTIFY_RESOLVE and rs.get("resolved_events"):
             send_telegram(_tg_push_resolve_text(rs["resolved_events"]))

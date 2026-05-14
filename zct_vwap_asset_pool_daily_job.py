@@ -3,15 +3,18 @@
 每日（或可定时）执行：近 N 天 walk-forward → 触轨池筛选 → 写入 accumulation.db。
 
 表：
-- **zct_vwap_touch_pool**：每轮先清空再写入当前入选标的（symbol PRIMARY KEY）。
+- **zct_vwap_touch_pool**：每轮在单事务内 **先 DELETE 全表** 再写入当前入选标的（symbol PRIMARY KEY）。
 - **zct_vwap_touch_pool_runs**：每轮追加一条审计（含完整 pool JSON）。
 
 运行：
+  python zct_vwap_asset_pool_daily_job.py --once --hot-oi-plus-default-22
   python zct_vwap_asset_pool_daily_job.py --once --zct-default-22
-  python zct_vwap_asset_pool_daily_job.py --daemon --tz Asia/Shanghai --cron-hour 8
+  python zct_vwap_asset_pool_daily_job.py --daemon
+  （`--daemon` 默认：**Asia/Shanghai 每天 08:30**；可用 `--tz` / `--cron-hour` / `--cron-minute` 或环境变量覆盖）
 
 环境变量：`DATA_DIR`、`ZCT_TOUCH_POOL_TABLE`、`ZCT_TOUCH_POOL_RUNS_TABLE`、
-`ZCT_TOUCH_POOL_CRON_HOUR`、`ZCT_TOUCH_POOL_TZ`、`ZCT_TOUCH_POOL_SLEEP_SYMBOLS`（默认 0.25）。
+`ZCT_TOUCH_POOL_CRON_HOUR`（默认 8）、`ZCT_TOUCH_POOL_CRON_MINUTE`（默认 30）、
+`ZCT_TOUCH_POOL_TZ`（默认 Asia/Shanghai）、`ZCT_TOUCH_POOL_SLEEP_SYMBOLS`（默认 0.25）。
 """
 
 from __future__ import annotations
@@ -20,9 +23,7 @@ import argparse
 import json
 import logging
 import os
-import sqlite3
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -30,7 +31,13 @@ from accumulation_radar import DB_PATH, init_db
 from zct_vwap_asset_pool import (
     _default_symbol_list,
     run_asset_pool_scan,
+    touch_pool_symbols_hot_oi_plus_default_22,
     zct_default_22_symbols,
+)
+from zct_vwap_touch_pool_db import (
+    touch_pool_ensure_schema,
+    touch_pool_physical_table_names,
+    touch_pool_write_db,
 )
 
 import zct_vwap_signal_scanner as z
@@ -44,124 +51,10 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_POOL = "zct_vwap_touch_pool"
-_DEFAULT_RUNS = "zct_vwap_touch_pool_runs"
-
-
-def _pool_table() -> str:
-    t = os.getenv("ZCT_TOUCH_POOL_TABLE", _DEFAULT_POOL).strip()
-    return t if all(c.isalnum() or c == "_" for c in t) else _DEFAULT_POOL
-
-
-def _runs_table() -> str:
-    t = os.getenv("ZCT_TOUCH_POOL_RUNS_TABLE", _DEFAULT_RUNS).strip()
-    return t if all(c.isalnum() or c == "_" for c in t) else _DEFAULT_RUNS
-
-
-def ensure_schema(conn: sqlite3.Connection) -> None:
-    pt, rt = _pool_table(), _runs_table()
-    c = conn.cursor()
-    c.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {pt} (
-            symbol TEXT PRIMARY KEY,
-            updated_at_ms INTEGER NOT NULL,
-            days REAL NOT NULL,
-            signal_interval TEXT NOT NULL,
-            win INTEGER NOT NULL,
-            loss INTEGER NOT NULL,
-            win_plus_loss INTEGER NOT NULL,
-            win_rate_touch_sl_tp REAL,
-            expired INTEGER NOT NULL,
-            unresolved INTEGER NOT NULL,
-            user_start_open_ms INTEGER,
-            hist_end_open_ms INTEGER,
-            trades_emitted INTEGER,
-            criteria_json TEXT NOT NULL
-        )
-        """
-    )
-    c.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {rt} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_at_ms INTEGER NOT NULL,
-            matched_count INTEGER NOT NULL,
-            scanned_count INTEGER NOT NULL,
-            criteria_json TEXT NOT NULL,
-            pool_json TEXT NOT NULL
-        )
-        """
-    )
-    conn.commit()
-
-
-def write_db(conn: sqlite3.Connection, out: Dict[str, Any]) -> int:
-    pt, rt = _pool_table(), _runs_table()
-    crit = json.dumps(out.get("criteria") or {}, ensure_ascii=False)
-    run_ms = int(out.get("generated_at_ms") or int(time.time() * 1000))
-    matched: List[Dict[str, Any]] = list(out.get("matched") or [])
-    meta = out.get("backtest_meta") or {}
-    scanned = len(out.get("symbols_scanned") or [])
-    days = float((out.get("criteria") or {}).get("days") or 0)
-    sig_iv = str((out.get("criteria") or {}).get("signal_interval") or "1m")
-
-    cur = conn.cursor()
-    cur.execute(f"DELETE FROM {pt}")
-    rows: List[tuple] = []
-    for m in matched:
-        sym = str(m.get("symbol", "")).strip().upper()
-        if not sym:
-            continue
-        rows.append(
-            (
-                sym,
-                run_ms,
-                days,
-                sig_iv,
-                int(m.get("win", 0) or 0),
-                int(m.get("loss", 0) or 0),
-                int(m.get("win_plus_loss", 0) or 0),
-                m.get("win_rate_touch_sl_tp"),
-                int(m.get("expired", 0) or 0),
-                int(m.get("unresolved", 0) or 0),
-                meta.get("user_start_open_ms"),
-                meta.get("hist_end_open_ms"),
-                meta.get("trades_emitted"),
-                crit,
-            )
-        )
-    if rows:
-        cur.executemany(
-            f"""
-            INSERT INTO {pt} (
-                symbol, updated_at_ms, days, signal_interval,
-                win, loss, win_plus_loss, win_rate_touch_sl_tp,
-                expired, unresolved,
-                user_start_open_ms, hist_end_open_ms, trades_emitted,
-                criteria_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            rows,
-        )
-    cur.execute(
-        f"""
-        INSERT INTO {rt} (run_at_ms, matched_count, scanned_count, criteria_json, pool_json)
-        VALUES (?,?,?,?,?)
-        """,
-        (
-            run_ms,
-            len(rows),
-            scanned,
-            crit,
-            json.dumps(out, ensure_ascii=False),
-        ),
-    )
-    conn.commit()
-    return len(rows)
-
 
 def resolve_symbols(ns: argparse.Namespace) -> List[str]:
+    if ns.hot_oi_plus_default_22:
+        return touch_pool_symbols_hot_oi_plus_default_22()
     if ns.zct_default_22:
         return zct_default_22_symbols()
     if ns.use_env_symbols:
@@ -187,6 +80,8 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
         except ValueError:
             ns.sleep_between_symbols = 0.25
 
+    sym_src = "hot_oi_plus_default_22" if ns.hot_oi_plus_default_22 else None
+
     out, _ = run_asset_pool_scan(
         days=float(ns.days),
         symbols=syms,
@@ -198,16 +93,18 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
         min_touch_win_rate=float(ns.min_touch_win_rate),
         strict_greater_rate=bool(ns.strict_greater_rate),
         quiet=True,
+        symbols_source=sym_src,
     )
 
     conn = init_db()
     try:
-        ensure_schema(conn)
-        n = write_db(conn, out)
+        touch_pool_ensure_schema(conn)
+        n = touch_pool_write_db(conn, out)
+        pool_tbl, _ = touch_pool_physical_table_names()
         logger.info(
             "touch_pool db=%s table=%s rows=%d symbols=%s",
             DB_PATH,
-            _pool_table(),
+            pool_tbl,
             n,
             out.get("matched_symbols"),
         )
@@ -232,11 +129,27 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--once", action="store_true", help="跑一轮退出（给计划任务用）")
     ap.add_argument("--daemon", action="store_true", help="APScheduler 常驻按 Cron 跑")
     ap.add_argument("--cron-hour", type=int, default=None, metavar="H")
-    ap.add_argument("--cron-minute", type=int, default=0, metavar="M")
-    ap.add_argument("--tz", type=str, default="", help="默认同环境 ZCT_TOUCH_POOL_TZ 或 UTC")
+    ap.add_argument(
+        "--cron-minute",
+        type=int,
+        default=None,
+        metavar="M",
+        help="默认同环境 ZCT_TOUCH_POOL_CRON_MINUTE 或 30",
+    )
+    ap.add_argument(
+        "--tz",
+        type=str,
+        default="",
+        help="默认同环境 ZCT_TOUCH_POOL_TZ 或 Asia/Shanghai",
+    )
     ap.add_argument("--days", type=float, default=3.0)
     ap.add_argument("--symbols", type=str, default="")
     ap.add_argument("--zct-default-22", action="store_true")
+    ap.add_argument(
+        "--hot-oi-plus-default-22",
+        action="store_true",
+        help="worth_watch_hot_oi ∪ 扫描器默认 22 永续",
+    )
     ap.add_argument("--use-env-symbols", action="store_true")
     ap.add_argument("--ignore-db-cooldown", action="store_true")
     ap.add_argument("--use-db-cooldown", action="store_true")
@@ -260,6 +173,22 @@ def main() -> None:
     ap = build_parser()
     ns = ap.parse_args()
 
+    mode_n = sum(
+        1
+        for x in (
+            ns.hot_oi_plus_default_22,
+            ns.zct_default_22,
+            ns.use_env_symbols,
+            bool(ns.symbols.strip()),
+        )
+        if x
+    )
+    if mode_n > 1:
+        ap.error(
+            "标的来源请只选一种：--hot-oi-plus-default-22 / --zct-default-22 / "
+            "--use-env-symbols / --symbols"
+        )
+
     if ns.once and ns.daemon:
         ap.error("--once 与 --daemon 互斥")
     if not ns.once and not ns.daemon:
@@ -272,11 +201,20 @@ def main() -> None:
         h = ns.cron_hour
         if h is None:
             try:
-                h = int(os.getenv("ZCT_TOUCH_POOL_CRON_HOUR", "2").strip() or "2")
+                h = int(os.getenv("ZCT_TOUCH_POOL_CRON_HOUR", "8").strip() or "8")
             except ValueError:
-                h = 2
+                h = 8
         h = max(0, min(23, h))
-        tz_name = (ns.tz or os.getenv("ZCT_TOUCH_POOL_TZ", "UTC")).strip() or "UTC"
+
+        m = ns.cron_minute
+        if m is None:
+            try:
+                m = int(os.getenv("ZCT_TOUCH_POOL_CRON_MINUTE", "30").strip() or "30")
+            except ValueError:
+                m = 30
+        m = max(0, min(59, m))
+
+        tz_name = (ns.tz or os.getenv("ZCT_TOUCH_POOL_TZ", "Asia/Shanghai")).strip() or "Asia/Shanghai"
 
         def job() -> None:
             try:
@@ -302,11 +240,11 @@ def main() -> None:
         sched = BlockingScheduler(timezone=tzobj)
         sched.add_job(
             job,
-            CronTrigger(hour=h, minute=int(ns.cron_minute)),
+            CronTrigger(hour=h, minute=m),
             id="zct_touch_pool",
             replace_existing=True,
         )
-        logger.info("touch_pool daemon tz=%s %02d:%02d", tz_name, h, int(ns.cron_minute))
+        logger.info("touch_pool daemon tz=%s %02d:%02d", tz_name, h, m)
         sched.start()
         return
 

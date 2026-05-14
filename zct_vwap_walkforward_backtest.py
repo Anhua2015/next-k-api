@@ -291,7 +291,7 @@ def analyze_symbol_pit(
 
 
 def _default_symbol_list() -> List[str]:
-    if os.getenv("ZCT_HOT_OI_UNIVERSE", "").strip().lower() in (
+    if os.getenv("ZCT_TOUCH_POOL_UNIVERSE", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -1582,7 +1582,7 @@ def main() -> None:
     ap.add_argument(
         "--use-env-symbols",
         action="store_true",
-        help="标的列表完全等同 z._symbols_from_env()（含 HOT_OI）",
+        help="标的列表完全等同 z._symbols_from_env()（含触轨池 TOUCH_POOL）",
     )
     ap.add_argument(
         "--ignore-db-cooldown",

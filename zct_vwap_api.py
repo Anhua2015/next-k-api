@@ -1,7 +1,6 @@
 """
 ZCT VWAP 只读查询（accumulation.db）。
-- zct_vwap_signals / zct_vwap_settlements：默认全量标的 lane
-- zct_hot_oi_signals / zct_hot_oi_settlements：🔥⚡热度+OI（worth_watch_hot_oi）lane
+统一使用 zct_vwap_signals / zct_vwap_settlements（旧 zct_hot_oi_* 已在 init_db 迁移中并入并删除）。
 """
 
 from __future__ import annotations
@@ -52,17 +51,14 @@ _SIGNAL_COLS = """
 
 
 def _tables_lane(lane: Optional[str]) -> Tuple[str, str]:
-    """lane 缺省或 default/vwap → 主表；hot_oi → 热度+OI 专用表。"""
-    lk = (lane or "").strip().lower()
-    if lk in ("", "default", "vwap"):
-        return "zct_vwap_signals", "zct_vwap_settlements"
-    if lk == "hot_oi":
-        return "zct_hot_oi_signals", "zct_hot_oi_settlements"
-    raise ValueError(f"invalid zct lane: {lane!r}")
+    """历史参数 lane 已废弃；始终返回统一 ZCT 表。"""
+    _ = lane
+    return "zct_vwap_signals", "zct_vwap_settlements"
 
 
 def _lane_json(lane: Optional[str]) -> str:
-    return "hot_oi" if (lane or "").strip().lower() == "hot_oi" else "default"
+    _ = lane
+    return "unified"
 
 
 def _signal_select_sql(signals_table: str) -> str:
