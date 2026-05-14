@@ -19,8 +19,8 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
 定时：由 next-k-api main.py APScheduler 调用（需 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=1），
       默认全量扫描每 12 分钟、独立结算(resolve-only)每 5 分钟（IntervalTrigger，环境变量可调）；
       主 lane 子进程注入 **ZCT_TOUCH_POOL_UNIVERSE=1**，标的仅从 **accumulation.db / zct_vwap_touch_pool**
-      读取（须先跑触轨资产池 daily job 或 touch-pool-scan）；表空则本轮跳过扫描。
-      亦可自建 cron 执行本脚本。
+      读取；每轮 `run_scan` 结束后按当前入选表清理 **不在库且无未结方向单** 的 `zct_vwap_signals` 行（与触轨池落库同源逻辑）。
+      表空则本轮跳过扫描（须先跑触轨资产池 daily job 或 touch-pool-scan）；亦可自建 cron 执行本脚本。
 
 信号与结算统一写入 **zct_vwap_signals / zct_vwap_settlements**（旧 zct_hot_oi_* 在 accumulation init_db 时一次性并入后删除）。
 
@@ -2313,6 +2313,26 @@ def _persist_results_db(
         conn.close()
 
 
+def _touch_pool_prune_signals_after_lane_scan() -> None:
+    """触轨资产库 lane：按当前入选表删除不应存在的 signals 行（无未结 LONG/SHORT）。"""
+    if not _touch_pool_universe_enabled():
+        return
+    try:
+        from accumulation_radar import init_db
+        from zct_vwap_touch_pool_db import touch_pool_prune_signals_for_current_pool
+
+        conn = init_db()
+        try:
+            n = touch_pool_prune_signals_for_current_pool(conn)
+            conn.commit()
+            if n:
+                print(f"[db] touch_pool_lane pruned stale signals rows={n}")
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[db] touch_pool_lane prune failed: {e}")
+
+
 def format_result(r: SignalResult) -> str:
     lines = [
         f"*{r.symbol}*  `{r.play}`  side={r.side}  conf={r.confidence}",
@@ -2764,6 +2784,8 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
             resolve_stats = _merge_resolve_stats(resolve_stats, rs2)
         except Exception as e:
             print(f"[resolve] post_persist failed: {e}")
+
+    _touch_pool_prune_signals_after_lane_scan()
 
     msg = "\n".join(text_blocks)
     print(msg)

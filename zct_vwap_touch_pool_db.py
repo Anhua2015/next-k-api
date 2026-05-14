@@ -6,6 +6,8 @@
 
 入选表写完后：默认从 `zct_vwap_signals` 删除 **已不在本轮入选** 且 **无未结方向持仓**
 （`outcome IS NULL` 且 `side IN ('LONG','SHORT')` 且 `sl_price IS NOT NULL` 视为仍持仓，保留行）。
+
+**触轨主 lane**（`ZCT_TOUCH_POOL_UNIVERSE=1`）下，每次 `run_scan` 入库/结算结束后亦会按 **当前入选表** 执行同一清理，避免看板残留已出池标的。
 环境变量 **`ZCT_TOUCH_POOL_PRUNE_SIGNALS=0|false|off`** 可关闭该清理。
 """
 
@@ -112,6 +114,44 @@ def touch_pool_ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def touch_pool_prune_signals_vs_allowlist(
+    conn: sqlite3.Connection, allowed_symbols: List[str]
+) -> int:
+    """
+    删除 `zct_vwap_signals` 中 symbol 不在 allowed 列表且 **无未结方向持仓** 的行。
+    allowed 为空表示入选表当前无标的：删尽所有「非持仓中」行。
+    不 commit；由调用方在同一事务或随后 commit。
+    """
+    if not _touch_pool_prune_signals_enabled():
+        return 0
+    sig_tbl = _signals_table_ident()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (sig_tbl,),
+    )
+    if not cur.fetchone():
+        return 0
+    hold = (
+        "outcome IS NULL AND sl_price IS NOT NULL AND side IN ('LONG', 'SHORT')"
+    )
+    au = [str(s).strip().upper() for s in allowed_symbols if str(s).strip()]
+    if not au:
+        cur.execute(f"DELETE FROM {sig_tbl} WHERE NOT ({hold})")
+    else:
+        ph = ",".join("?" * len(au))
+        cur.execute(
+            f"DELETE FROM {sig_tbl} WHERE symbol NOT IN ({ph}) AND NOT ({hold})",
+            au,
+        )
+    return int(cur.rowcount or 0)
+
+
+def touch_pool_prune_signals_for_current_pool(conn: sqlite3.Connection) -> int:
+    """按当前 `zct_vwap_touch_pool` 入选清理 signals；不 commit。"""
+    return touch_pool_prune_signals_vs_allowlist(conn, touch_pool_list_symbols(conn))
+
+
 def touch_pool_write_db(conn: sqlite3.Connection, out: Dict[str, Any]) -> int:
     """
     先清空 `zct_vwap_touch_pool` 全表，再写入本轮 matched；最后追加一条 runs 审计。
@@ -182,23 +222,7 @@ def touch_pool_write_db(conn: sqlite3.Connection, out: Dict[str, Any]) -> int:
             ),
         )
         if _touch_pool_prune_signals_enabled():
-            sig_tbl = _signals_table_ident()
-            cur.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-                (sig_tbl,),
-            )
-            if cur.fetchone():
-                cur.execute(
-                    f"""
-                    DELETE FROM {sig_tbl}
-                    WHERE symbol NOT IN (SELECT symbol FROM {pt})
-                      AND NOT (
-                          outcome IS NULL
-                          AND sl_price IS NOT NULL
-                          AND side IN ('LONG', 'SHORT')
-                      )
-                    """
-                )
+            touch_pool_prune_signals_vs_allowlist(conn, [t[0] for t in rows])
         conn.commit()
     except Exception:
         conn.rollback()
