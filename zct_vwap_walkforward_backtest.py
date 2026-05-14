@@ -26,14 +26,14 @@ ZCT VWAP 信号扫描器 — walk-forward 回测（不经 DB、不推 TG）。
   - `adjacent_stack_chains_only`：**仅连打叠仓**——同标的相邻一根信号 K 且链长≥2 时，链内**每笔**都参与胜率；
   - `one_open_per_symbol`：同标的 **未平仓前不接新单**（下一笔 `entry_bar` 须 ≥ 上一笔 `exit_bar+1 根信号 K`；若上一笔未结则该标的后继全弃）。
 - **JSON `per_symbol_daily`**：`utc_dates` 仅为 walk 窗口内的 **完整 UTC 自然日**（首尾半日剔除）；`by_symbol` 按发单 `signal_open_ms`；`by_symbol_exit_day` 按已决 `exit_bar_open_ms`（结案日，无未结）。
-- **`--portfolio-sim`**：逐根状态机（同向忽略、反向先平再开、满 N 小时未触轨强平、窗口末强平），
+- **`--portfolio-sim`**：逐根状态机（同向忽略、反向先平再开、未触轨时间强平默认与 `ZCT_RESOLVE_MAX_HOLD_MS` 一致、窗口末强平），
   固定 `margin×leverage` 名义用 `_pnl_usdt`；明细见 `--portfolio-csv`。
 
 用法：
   cd next-k-api
   python zct_vwap_walkforward_backtest.py --days 14 --zct-default-22
   python zct_vwap_walkforward_backtest.py --days 14 --zct-default-22 --use-db-cooldown
-  python zct_vwap_walkforward_backtest.py --portfolio-sim --symbols ZECUSDT --days 3 --margin-usdt 100 --leverage 10 --force-flat-hours 6 --portfolio-csv zec_pf.csv
+  python zct_vwap_walkforward_backtest.py --portfolio-sim --symbols ZECUSDT --days 3 --margin-usdt 100 --leverage 10 --portfolio-csv zec_pf.csv
   python zct_vwap_walkforward_backtest.py --days 14 --zct-default-22 --signal-interval 5m
 """
 
@@ -67,6 +67,14 @@ def _signal_interval_binance(s: str) -> str:
 
 def _bar_step_ms(interval: str) -> int:
     return 300_000 if interval == "5m" else 60_000
+
+
+def _default_force_flat_hours() -> float:
+    """与 `RESOLVE_MAX_HOLD_MS` 一致（毫秒→小时）；0ms 时退回 `_DEFAULT_RESOLVE_HOLD_HOURS`。"""
+    ms = int(z.RESOLVE_MAX_HOLD_MS)
+    if ms <= 0:
+        return float(getattr(z, "_DEFAULT_RESOLVE_HOLD_HOURS", 8))
+    return ms / 3_600_000.0
 
 
 def _resolve_max_bars_effective(bar_step_ms: int) -> int:
@@ -681,7 +689,7 @@ def _portfolio_advance(
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     从 `resume_from_open_ms` 起逐根推进到 `until_bo_inclusive`（含）：
-    先 SL/TP（同根规则与 `resolve_forward` 一致），再墙上时钟时间强平（ZCT_RESOLVE_MAX_HOLD_MS，默认 8h），再 max_bars（按信号周期缩放根数上限，默认与 8h 对齐）。
+    先 SL/TP（同根规则与 `resolve_forward` 一致），再墙上时钟时间强平（ZCT_RESOLVE_MAX_HOLD_MS），再 max_bars（按信号周期缩放根数上限；未单独改 env 时与默认持仓小时同源）。
     未触发则更新 `resume_from_open_ms = until_bo_inclusive + bar_step_ms`。
     """
     fills: List[Dict[str, Any]] = []
@@ -811,6 +819,7 @@ def run_portfolio_backtest(
     - 已有持仓且新信号同向 → 忽略；
     - 已有持仓且新信号反向 → 当前根收盘价强平，并同价开新仓；
     - 持仓满 `force_flat_hours`（自 entry_bar_open_ms 起算，按信号 K 线根的 open_time）仍未触轨 → 该根收盘价强平；
+      CLI 省略 `--force-flat-hours` 时与 `ZCT_RESOLVE_MAX_HOLD_MS` 默认一致；
     - 固定保证金×杠杆 → 线性 PnL 名义 `notional = margin * leverage`（与 `_pnl_usdt` 一致）。
     """
     end_ms = int(time.time() * 1000)
@@ -1535,7 +1544,7 @@ def main() -> None:
     ap.add_argument(
         "--portfolio-sim",
         action="store_true",
-        help="组合仿真：同向持仓忽略新信号；反向先平再开；满 N 小时未结强平；"
+        help="组合仿真：同向持仓忽略新信号；反向先平再开；未触轨时间强平默认同 ZCT_RESOLVE_MAX_HOLD_MS；"
         "保证金×杠杆=名义；写 --portfolio-csv",
     )
     ap.add_argument(
@@ -1550,8 +1559,10 @@ def main() -> None:
     ap.add_argument(
         "--force-flat-hours",
         type=float,
-        default=6.0,
-        help="portfolio：自 entry_bar_open_ms 起满该小时数未触轨则市价强平（按信号 K 线根的 open_time）",
+        default=None,
+        metavar="H",
+        help="portfolio：自 entry_bar_open_ms 起满该小时数未触轨则市价强平（按信号 K 线根的 open_time）；"
+        "省略则取 RESOLVE_MAX_HOLD_MS 折算小时（与 DB resolve / 默认根数同源，见 ZCT_RESOLVE_*）",
     )
     args = ap.parse_args()
 
@@ -1576,6 +1587,11 @@ def main() -> None:
         pcsv = (args.portfolio_csv or "").strip() or str(
             Path(__file__).resolve().parent / "zct_portfolio_trades.csv"
         )
+        ffh = (
+            float(args.force_flat_hours)
+            if args.force_flat_hours is not None
+            else _default_force_flat_hours()
+        )
         run_portfolio_backtest(
             days=args.days,
             symbols=symbols,
@@ -1587,7 +1603,7 @@ def main() -> None:
             portfolio_csv=pcsv,
             margin_usdt=float(args.margin_usdt),
             leverage=float(args.leverage),
-            force_flat_hours=float(args.force_flat_hours),
+            force_flat_hours=ffh,
             signal_interval=str(args.signal_interval),
         )
     else:
