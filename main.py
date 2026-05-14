@@ -22,12 +22,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 import time as time_module
 
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for server
-import matplotlib.pyplot as plt
-import time as time_module
 
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for server
+matplotlib.use("Agg")  # Non-interactive backend for server
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
