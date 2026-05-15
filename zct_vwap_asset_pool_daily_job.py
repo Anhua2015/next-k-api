@@ -10,10 +10,10 @@
   python zct_vwap_asset_pool_daily_job.py --once --hot-oi-plus-default-22
   python zct_vwap_asset_pool_daily_job.py --once --zct-default-22
   python zct_vwap_asset_pool_daily_job.py --daemon
-  （`--daemon` 默认：**Asia/Shanghai 每天 08:30**；可用 `--tz` / `--cron-hour` / `--cron-minute` 或环境变量覆盖）
+  （`--daemon` 默认：**Asia/Shanghai 每天 08:00**；可用 `--tz` / `--cron-hour` / `--cron-minute` 或环境变量覆盖）
 
 环境变量：`DATA_DIR`、`ZCT_TOUCH_POOL_TABLE`、`ZCT_TOUCH_POOL_RUNS_TABLE`、
-`ZCT_TOUCH_POOL_CRON_HOUR`（默认 8）、`ZCT_TOUCH_POOL_CRON_MINUTE`（默认 30）、
+`ZCT_TOUCH_POOL_CRON_HOUR`（默认 8）、`ZCT_TOUCH_POOL_CRON_MINUTE`（默认 0）、
 `ZCT_TOUCH_POOL_TZ`（默认 Asia/Shanghai）、`ZCT_TOUCH_POOL_SLEEP_SYMBOLS`（默认 0.25）。
 """
 
@@ -92,6 +92,8 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
         strict_greater_touch=bool(ns.strict_greater_touch),
         min_touch_win_rate=float(ns.min_touch_win_rate),
         strict_greater_rate=bool(ns.strict_greater_rate),
+        min_total_trades=int(ns.min_total_trades),
+        max_expired_ratio=float(ns.max_expired_ratio),
         quiet=True,
         symbols_source=sym_src,
     )
@@ -157,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--strict-greater-touch", action="store_true")
     ap.add_argument("--min-touch-win-rate", type=float, default=0.75)
     ap.add_argument("--strict-greater-rate", action="store_true")
+    ap.add_argument(
+        "--min-total-trades",
+        type=int,
+        default=30,
+        help="walk 内 n_trades 须 ≥ 该值（默认 30）",
+    )
+    ap.add_argument(
+        "--max-expired-ratio",
+        type=float,
+        default=0.3,
+        help="expired/n_trades 须严格小于该值（默认 0.3 即 <30%%）",
+    )
     ap.add_argument("--signal-interval", type=str, default="1m", choices=["1m", "5m"])
     ap.add_argument("--sleep-between-symbols", type=float, default=None)
     ap.add_argument("--json-out", type=str, default="")
@@ -209,9 +223,9 @@ def main() -> None:
         m = ns.cron_minute
         if m is None:
             try:
-                m = int(os.getenv("ZCT_TOUCH_POOL_CRON_MINUTE", "30").strip() or "30")
+                m = int(os.getenv("ZCT_TOUCH_POOL_CRON_MINUTE", "0").strip() or "0")
             except ValueError:
-                m = 30
+                m = 0
         m = max(0, min(59, m))
 
         tz_name = (ns.tz or os.getenv("ZCT_TOUCH_POOL_TZ", "Asia/Shanghai")).strip() or "Asia/Shanghai"

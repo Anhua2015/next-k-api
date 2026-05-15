@@ -6,7 +6,8 @@ ZCT VWAP 触轨资产池：walk-forward 近 N 天（默认 1.5 天 ≈ 36 小时
 - **触轨胜率** = 整个 walk 窗口内 win / (win + loss)，即 `win_rate_touch_sl_tp`（不按 UTC 日历日拆分）
 - **触轨样本** = win + loss
 
-默认：**触轨胜率 >= 75%** 且 **win+loss >= 1**（触轨样本数 > 0；与 50 笔下限解耦）。严格 **>** 用 `--strict-greater-rate` / `--strict-greater-touch`。
+默认：**触轨胜率 >= 75%**、**win+loss >= 1**、walk 窗口内 **总笔数 n_trades >= 30**（至少 30 笔）、**过期占比 expired/n_trades < 30%**。  
+触轨样本与胜率仍按 win/(win+loss)；过期占比为 walk 内该标的全部回测笔。严格 **>** 用 `--strict-greater-rate` / `--strict-greater-touch`。
 
 用法：
   cd next-k-api
@@ -63,8 +64,11 @@ def _window_touch_rows(summary: Dict[str, Any], symbols: List[str]) -> List[Dict
         row = per.get(su) or {}
         w = int(row.get("win") or 0)
         l_ = int(row.get("loss") or 0)
+        nt = int(row.get("n_trades") or 0)
+        ex = int(row.get("expired") or 0)
         wr = row.get("win_rate_touch_sl_tp")
         wr_f = float(wr) if wr is not None else None
+        exp_ratio = (float(ex) / float(nt)) if nt > 0 else None
         out.append(
             {
                 "symbol": su,
@@ -72,7 +76,9 @@ def _window_touch_rows(summary: Dict[str, Any], symbols: List[str]) -> List[Dict
                 "win": w,
                 "loss": l_,
                 "win_plus_loss": w + l_,
-                "expired": int(row.get("expired") or 0),
+                "n_trades": nt,
+                "expired": ex,
+                "expired_ratio": round(exp_ratio, 6) if exp_ratio is not None else None,
                 "unresolved": int(row.get("unresolved") or 0),
             }
         )
@@ -103,6 +109,8 @@ def _filter_pool(
     strict_greater_touch: bool,
     min_touch_win_rate: float,
     strict_greater_rate: bool,
+    min_total_trades: int,
+    max_expired_ratio: float,
 ) -> Dict[str, Any]:
     per = summary.get("per_symbol") or {}
     matched: List[Dict[str, Any]] = []
@@ -112,6 +120,9 @@ def _filter_pool(
         w = int(row.get("win", 0) or 0)
         l_ = int(row.get("loss", 0) or 0)
         touch = w + l_
+        n_tr = int(row.get("n_trades", 0) or 0)
+        ex = int(row.get("expired", 0) or 0)
+        exp_ratio = (float(ex) / float(n_tr)) if n_tr > 0 else float("inf")
         wr = row.get("win_rate_touch_sl_tp")
         wr_f = float(wr) if wr is not None else None
 
@@ -127,17 +138,21 @@ def _filter_pool(
                 if strict_greater_rate
                 else (wr_f >= min_touch_win_rate)
             )
+        ok_nt = n_tr >= int(min_total_trades)
+        ok_exp = exp_ratio < float(max_expired_ratio)
 
         rec: Dict[str, Any] = {
             "symbol": su,
             "win": w,
             "loss": l_,
             "win_plus_loss": touch,
-            "expired": int(row.get("expired", 0) or 0),
+            "n_trades": n_tr,
+            "expired": ex,
+            "expired_ratio": round(exp_ratio, 6) if n_tr > 0 else None,
             "unresolved": int(row.get("unresolved", 0) or 0),
             "win_rate_touch_sl_tp": wr_f,
         }
-        if ok_touch and ok_wr:
+        if ok_touch and ok_wr and ok_nt and ok_exp:
             matched.append(rec)
         else:
             rec["reject_reason"] = []
@@ -149,6 +164,17 @@ def _filter_pool(
                 )
             if not ok_wr:
                 rec["reject_reason"].append("touch_win_rate_below_threshold")
+            if not ok_nt:
+                rec["reject_reason"].append(
+                    f"n_trades_lt_{int(min_total_trades)}"
+                )
+            if not ok_exp:
+                if n_tr <= 0:
+                    rec["reject_reason"].append("expired_ratio_undefined_n_trades_0")
+                elif exp_ratio >= float(max_expired_ratio):
+                    rec["reject_reason"].append("expired_ratio_above_or_equal_max")
+                else:
+                    rec["reject_reason"].append("expired_ratio_invalid")
             rejected.append(rec)
 
     matched.sort(
@@ -168,6 +194,8 @@ def run_asset_pool_scan(
     strict_greater_touch: bool = False,
     min_touch_win_rate: float = 0.75,
     strict_greater_rate: bool = False,
+    min_total_trades: int = 30,
+    max_expired_ratio: float = 0.3,
     quiet: bool = True,
     symbols_source: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -193,6 +221,8 @@ def run_asset_pool_scan(
         strict_greater_touch=bool(strict_greater_touch),
         min_touch_win_rate=float(min_touch_win_rate),
         strict_greater_rate=bool(strict_greater_rate),
+        min_total_trades=int(min_total_trades),
+        max_expired_ratio=float(max_expired_ratio),
     )
 
     crit: Dict[str, Any] = {
@@ -202,6 +232,10 @@ def run_asset_pool_scan(
         "touch_rate_comparison": ">" if strict_greater_rate else ">=",
         "min_win_plus_loss": int(min_touch_trades),
         "win_plus_loss_comparison": ">" if strict_greater_touch else ">=",
+        "min_total_trades": int(min_total_trades),
+        "n_trades_rule": f"n_trades >= {int(min_total_trades)}",
+        "max_expired_ratio_exclusive": float(max_expired_ratio),
+        "expired_ratio_rule": f"expired / n_trades < {float(max_expired_ratio)}",
     }
     if symbols_source:
         crit["symbols_source"] = str(symbols_source)
@@ -240,6 +274,18 @@ def main() -> None:
     ap.add_argument("--strict-greater-touch", action="store_true")
     ap.add_argument("--min-touch-win-rate", type=float, default=0.75)
     ap.add_argument("--strict-greater-rate", action="store_true")
+    ap.add_argument(
+        "--min-total-trades",
+        type=int,
+        default=30,
+        help="walk 窗口内该标的总回测笔数 n_trades 须 **≥** 本值（默认 30）",
+    )
+    ap.add_argument(
+        "--max-expired-ratio",
+        type=float,
+        default=0.3,
+        help="过期占比 expired/n_trades 须 **严格小于** 本值（默认 0.3 即 <30%%）",
+    )
     ap.add_argument("--signal-interval", type=str, default="1m", choices=["1m", "5m"])
     ap.add_argument(
         "--json-out",
@@ -305,6 +351,8 @@ def main() -> None:
         strict_greater_touch=bool(args.strict_greater_touch),
         min_touch_win_rate=float(args.min_touch_win_rate),
         strict_greater_rate=bool(args.strict_greater_rate),
+        min_total_trades=int(args.min_total_trades),
+        max_expired_ratio=float(args.max_expired_ratio),
         quiet=True,
         symbols_source=sym_src,
     )
@@ -333,7 +381,8 @@ def main() -> None:
     cr = ">" if args.strict_greater_rate else ">="
     print(
         f"\n[pool] matched {len(out['matched_symbols'])}/{len(symbols)}  "
-        f"(win+loss {ct} {args.min_touch_trades}, touch_win_rate {cr} {args.min_touch_win_rate})",
+        f"(win+loss {ct} {args.min_touch_trades}, touch_win_rate {cr} {args.min_touch_win_rate}, "
+        f"n_trades >= {args.min_total_trades}, expired/n_trades < {args.max_expired_ratio})",
         flush=True,
     )
 

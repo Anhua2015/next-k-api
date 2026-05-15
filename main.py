@@ -594,6 +594,36 @@ def run_zct_vwap_resolve_only_task() -> None:
     _run_zct_vwap_resolve_only_subprocess()
 
 
+# ============== ZCT 触轨资产池每日入库（walk → 筛选 → zct_vwap_touch_pool） ==============
+
+_ZCT_TOUCH_POOL_DAILY_SCRIPT = (
+    Path(__file__).resolve().parent / "zct_vwap_asset_pool_daily_job.py"
+)
+
+
+def _run_zct_touch_pool_daily_subprocess() -> None:
+    """与 `POST /api/zct-vwap/touch-pool-scan` 生产默认标的同源：hot_oi ∪ default22。"""
+    logger.info("Starting zct_vwap_asset_pool_daily_job --once --hot-oi-plus-default-22")
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(_ZCT_TOUCH_POOL_DAILY_SCRIPT),
+                "--once",
+                "--hot-oi-plus-default-22",
+            ],
+            cwd=str(_ZCT_TOUCH_POOL_DAILY_SCRIPT.parent),
+            check=False,
+        )
+    except Exception as e:
+        logger.exception("zct_vwap_asset_pool_daily_job failed: %s", e)
+
+
+def run_zct_touch_pool_daily_task() -> None:
+    logger.info("开始执行 ZCT 触轨资产池每日入库...")
+    _run_zct_touch_pool_daily_subprocess()
+
+
 # ============== Lifespan ==============
 
 @asynccontextmanager
@@ -683,6 +713,13 @@ async def lifespan(app: FastAPI):
         minute=5,
         id="s2_oi_funding_rate_scanner",
     )
+    accumulation_scheduler.add_job(
+        run_zct_touch_pool_daily_task,
+        "cron",
+        hour=8,
+        minute=0,
+        id="zct_touch_pool_daily",
+    )
     if S6_FUTURES_ALPHA_SCHEDULER_ENABLED:
         accumulation_scheduler.add_job(
             run_s6_futures_alpha_task,
@@ -736,6 +773,7 @@ async def lifespan(app: FastAPI):
         "heat_watch 每小时 xx:07（现价/摘要 + 1h BPC）; "
         "oi 每小时 :30; "
         "s2_oi_funding_rate_scanner 每整点后 5 分 (xx:05); "
+        "zct_touch_pool 每日 08:00 Asia/Shanghai（hot_oi+default22 walk 入库）; "
         + s6_cron_log
         + "; "
         + zct_vwap_log
@@ -2961,6 +2999,18 @@ class ZctTouchPoolScanBody(BaseModel):
     min_touch_win_rate: float = Field(default=0.75, ge=0.0, le=1.0)
     strict_greater_touch: bool = Field(default=False)
     strict_greater_rate: bool = Field(default=False)
+    min_total_trades: int = Field(
+        default=30,
+        ge=0,
+        le=200_000,
+        description="n_trades 须 ≥ 该值（默认 30）",
+    )
+    max_expired_ratio: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="expired/n_trades 须严格小于该值（默认 0.3 即 <30%）",
+    )
     signal_interval: str = Field(default="1m", description="1m or 5m")
     sleep_between_symbols: float = Field(default=0.25, ge=0.0, le=10.0)
     persist_db: bool = Field(
@@ -3076,6 +3126,8 @@ async def post_zct_touch_pool_scan(body: ZctTouchPoolScanBody = Body(...)):
             strict_greater_touch=bool(body.strict_greater_touch),
             min_touch_win_rate=float(body.min_touch_win_rate),
             strict_greater_rate=bool(body.strict_greater_rate),
+            min_total_trades=int(body.min_total_trades),
+            max_expired_ratio=float(body.max_expired_ratio),
             quiet=True,
             symbols_source=scan_src,
         )
@@ -3283,7 +3335,7 @@ class TriggerCronBody(BaseModel):
 
     task: str = Field(
         ...,
-        description="pool | heat_watch | heat_zones | heat_bpc | oi | s2_funding | s6_alpha | zct_vwap | zct_vwap_resolve | zct_hot_oi（=zct_vwap）| zct_hot_oi_resolve（=zct_vwap_resolve）",
+        description="pool | heat_watch | heat_zones | heat_bpc | oi | s2_funding | touch_pool | s6_alpha | zct_vwap | zct_vwap_resolve | zct_hot_oi（=zct_vwap）| zct_hot_oi_resolve（=zct_vwap_resolve）",
     )
 
 
@@ -3294,6 +3346,7 @@ _CRON_TASK_FUNCS: Dict[str, Any] = {
     "heat_bpc": run_heat_watch_refresh_task,
     "oi": run_oi_task,
     "s2_funding": run_s2_oi_funding_task,
+    "touch_pool": run_zct_touch_pool_daily_task,
     "s6_alpha": run_s6_futures_alpha_task,
     "zct_vwap": run_zct_vwap_signal_task,
     "zct_vwap_resolve": run_zct_vwap_resolve_only_task,
@@ -3312,6 +3365,7 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
     - heat_zones / heat_bpc: 与 heat_watch 相同（兼容旧 task 名）
     - oi: accumulation_radar oi（定时每小时 :30）
     - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
+    - touch_pool: ZCT 触轨资产池 walk 入库（定时每日 08:00 Asia/Shanghai，与 zct_vwap_asset_pool_daily_job --once --hot-oi-plus-default-22 同源）
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
     - zct_vwap: ZCT VWAP 全量扫描（与定时同源子进程，间隔见 ZCT_VWAP_SCAN_INTERVAL_MINUTES）
     - zct_vwap_resolve: 仅纸面结算（--resolve-only，与定时 ZCT_VWAP_RESOLVE_INTERVAL_MINUTES 同源）
