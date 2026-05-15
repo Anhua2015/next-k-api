@@ -6,8 +6,8 @@ ZCT VWAP 触轨资产池：walk-forward 近 N 天（默认 1.5 天 ≈ 36 小时
 - **触轨胜率** = 整个 walk 窗口内 win / (win + loss)，即 `win_rate_touch_sl_tp`（不按 UTC 日历日拆分）
 - **触轨样本** = win + loss
 
-默认：**触轨胜率 >= 70%**、**win+loss >= 1**（`--min-touch-trades`）、**win+loss >= 20**（`--min-win-loss-abs`，≤0 关闭）、**(win+loss)/n_trades >= 35%**（`--min-touch-share`，≤0 关闭）、walk 窗口内 **总笔数 n_trades >= 30**、**过期占比 expired/n_trades < 50%**。  
-触轨样本与胜率仍按 win/(win+loss)；过期占比为 walk 内该标的全部回测笔。严格 **>** 用 `--strict-greater-rate` / `--strict-greater-touch`。
+默认：**触轨胜率 >= 72%（稳档）**、**win+loss >= 1**、**win+loss >= 20**、**(win+loss)/n_trades >= 35%**、**n_trades >= 30**、**过期占比 expired/n_trades < 40%（稳档）**。  
+候选宇宙（生产默认）：**值得关注七类 worth_watch_* ∪ 内置默认永续（`_DEFAULT_ZCT_SYMBOLS`，当前 33 个）**；`--worth-watch-plus-default-22` 中 **22 为历史 CLI 名**。旧 **hot_oi ∪ 内置** 仍可用 `--hot-oi-plus-default-22`。
 
 用法：
   cd next-k-api
@@ -39,13 +39,30 @@ import zct_vwap_signal_scanner as z
 
 def touch_pool_symbols_hot_oi_plus_default_22() -> List[str]:
     """
-    worth_watch_hot_oi（🔥⚡ 热度+OI）∪ 扫描器内置默认永续列表；顺序为内置默认在前，再追加 hot 表独有标的。
+    worth_watch_hot_oi ∪ 内置默认永续（`_DEFAULT_ZCT_SYMBOLS`，非「仅 22 个」）。
     """
     base = zct_default_22_symbols()
     hot = z.hot_oi_watchlist_symbols()
     seen = set(base)
     out = list(base)
     for s in hot:
+        su = str(s).strip().upper()
+        if su and su not in seen:
+            seen.add(su)
+            out.append(su)
+    return out
+
+
+def touch_pool_symbols_worth_watch_plus_default() -> List[str]:
+    """
+    值得关注七类 worth_watch_* ∪ 内置默认永续（`_DEFAULT_ZCT_SYMBOLS`，当前 33 个）。
+    顺序：内置默认在前，再按七类表顺序追加独有标的。
+    """
+    base = zct_default_22_symbols()
+    ww = z.worth_watch_all_category_symbols()
+    seen = set(base)
+    out = list(base)
+    for s in ww:
         su = str(s).strip().upper()
         if su and su not in seen:
             seen.add(su)
@@ -226,10 +243,10 @@ def run_asset_pool_scan(
     signal_interval: str = "1m",
     min_touch_trades: int = 1,
     strict_greater_touch: bool = False,
-    min_touch_win_rate: float = 0.7,
+    min_touch_win_rate: float = 0.72,
     strict_greater_rate: bool = False,
     min_total_trades: int = 30,
-    max_expired_ratio: float = 0.5,
+    max_expired_ratio: float = 0.4,
     min_win_loss_abs: int = 20,
     min_touch_share: float = 0.35,
     quiet: bool = True,
@@ -319,14 +336,19 @@ def main() -> None:
     ap.add_argument(
         "--hot-oi-plus-default-22",
         action="store_true",
-        help="worth_watch_hot_oi ∪ 扫描器内置默认永续（内置列表顺序在前）",
+        help="worth_watch_hot_oi ∪ 扫描器内置默认永续（旧候选池，较窄）",
+    )
+    ap.add_argument(
+        "--worth-watch-plus-default-22",
+        action="store_true",
+        help="值得关注七类 worth_watch_* ∪ 内置默认永续 _DEFAULT_ZCT_SYMBOLS（稳档默认大候选池；CLI 名 default22 为历史遗留）",
     )
     ap.add_argument("--use-env-symbols", action="store_true")
     ap.add_argument("--ignore-db-cooldown", action="store_true")
     ap.add_argument("--use-db-cooldown", action="store_true")
     ap.add_argument("--min-touch-trades", type=int, default=1)
     ap.add_argument("--strict-greater-touch", action="store_true")
-    ap.add_argument("--min-touch-win-rate", type=float, default=0.7)
+    ap.add_argument("--min-touch-win-rate", type=float, default=0.72)
     ap.add_argument("--strict-greater-rate", action="store_true")
     ap.add_argument(
         "--min-total-trades",
@@ -337,8 +359,8 @@ def main() -> None:
     ap.add_argument(
         "--max-expired-ratio",
         type=float,
-        default=0.5,
-        help="过期占比 expired/n_trades 须 **严格小于** 本值（默认 0.5 即 <50%%）",
+        default=0.4,
+        help="过期占比 expired/n_trades 须 **严格小于** 本值（稳档默认 0.4 即 <40%%）",
     )
     ap.add_argument(
         "--min-win-loss-abs",
@@ -370,6 +392,7 @@ def main() -> None:
     mode_n = sum(
         1
         for x in (
+            args.worth_watch_plus_default_22,
             args.hot_oi_plus_default_22,
             args.zct_default_22,
             args.use_env_symbols,
@@ -379,12 +402,15 @@ def main() -> None:
     )
     if mode_n > 1:
         ap.error(
-            "标的来源请只选一种：--hot-oi-plus-default-22 / --zct-default-22 / "
-            "--use-env-symbols / --symbols"
+            "标的来源请只选一种：--worth-watch-plus-default-22 / --hot-oi-plus-default-22 / "
+            "--zct-default-22 / --use-env-symbols / --symbols"
         )
 
     sym_src: Optional[str] = None
-    if args.hot_oi_plus_default_22:
+    if args.worth_watch_plus_default_22:
+        symbols = touch_pool_symbols_worth_watch_plus_default()
+        sym_src = "worth_watch_plus_default_22"
+    elif args.hot_oi_plus_default_22:
         symbols = touch_pool_symbols_hot_oi_plus_default_22()
         sym_src = "hot_oi_plus_default_22"
     elif args.zct_default_22:
@@ -397,8 +423,8 @@ def main() -> None:
         symbols = [x.strip().upper() for x in args.symbols.split(",") if x.strip()]
         sym_src = "cli_symbols"
     else:
-        symbols = _default_symbol_list()
-        sym_src = "default_symbol_list"
+        symbols = touch_pool_symbols_worth_watch_plus_default()
+        sym_src = "worth_watch_plus_default_22"
 
     if not symbols:
         print("[pool] no symbols", file=sys.stderr)

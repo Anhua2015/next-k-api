@@ -83,14 +83,27 @@ WORTH_MIN_COMBINED_TOTAL_DUAL = 72.0
 WORTH_MIN_AMBUSH_TOTAL = 40.0
 # 兼容旧逻辑命名：固定「至少保留」人数（动态模式下与 FALLBACK_MIN_K 一致）
 WORTH_CATEGORY_TOP_N = WORTH_CATEGORY_FALLBACK_MIN_K
-WORTH_HIGHLIGHT_RETENTION_DAYS = 2
-# 「🔥⚡ 热度+OI」worth_watch_hot_oi：按 generated_date 保留最近 N 个日历日（含当日）；可调环境变量。
+# 值得关注七张 worth_watch_* 表：按 generated_date 保留最近 N 个日历日（含当日）；七类统一默认 3 天。
 try:
-    WORTH_HOT_OI_RETENTION_DAYS = max(
-        1, int(os.getenv("WORTH_HOT_OI_RETENTION_DAYS", "7").strip() or "7")
+    WORTH_WATCH_RETENTION_DAYS = max(
+        1, int(os.getenv("WORTH_WATCH_RETENTION_DAYS", "3").strip() or "3")
     )
 except Exception:
-    WORTH_HOT_OI_RETENTION_DAYS = 7
+    WORTH_WATCH_RETENTION_DAYS = 3
+WORTH_HIGHLIGHT_RETENTION_DAYS = WORTH_WATCH_RETENTION_DAYS
+try:
+    WORTH_HOT_OI_RETENTION_DAYS = max(
+        1,
+        int(
+            os.getenv(
+                "WORTH_HOT_OI_RETENTION_DAYS",
+                str(WORTH_WATCH_RETENTION_DAYS),
+            ).strip()
+            or str(WORTH_WATCH_RETENTION_DAYS)
+        ),
+    )
+except Exception:
+    WORTH_HOT_OI_RETENTION_DAYS = WORTH_WATCH_RETENTION_DAYS
 WORTH_WATCH_TABLE_BY_CATEGORY: Dict[str, str] = {
     "heat_accum": "worth_watch_heat_accum",
     "patrick_core": "worth_watch_patrick_core",
@@ -1217,13 +1230,8 @@ def _worth_watch_cutoff_iso(now: datetime, retention_days: int) -> str:
 
 
 def _worth_watch_prune_all(conn: sqlite3.Connection, now: datetime) -> None:
-    for cat, tbl in WORTH_WATCH_TABLE_BY_CATEGORY.items():
-        days = (
-            WORTH_HOT_OI_RETENTION_DAYS
-            if cat == "hot_oi"
-            else WORTH_HIGHLIGHT_RETENTION_DAYS
-        )
-        cutoff_s = _worth_watch_cutoff_iso(now, days)
+    cutoff_s = _worth_watch_cutoff_iso(now, WORTH_WATCH_RETENTION_DAYS)
+    for _cat, tbl in WORTH_WATCH_TABLE_BY_CATEGORY.items():
         conn.execute(f"DELETE FROM {tbl} WHERE generated_date < ?", (cutoff_s,))
 
 
@@ -1319,7 +1327,7 @@ def _worth_watch_fetch_payload(
         "categories": categories,
         "tables": dict(WORTH_WATCH_TABLE_BY_CATEGORY),
         "updated_at_cst": updated_at,
-        "retention_days": WORTH_HIGHLIGHT_RETENTION_DAYS,
+        "retention_days": WORTH_WATCH_RETENTION_DAYS,
         "hot_oi_retention_days": WORTH_HOT_OI_RETENTION_DAYS,
         "storage": "sqlite",
         "bpc_interval": HEAT_ACCUM_BPC_INTERVAL,

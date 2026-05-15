@@ -263,8 +263,13 @@ def _default_symbol_list() -> List[str]:
 
 
 def zct_default_22_symbols() -> List[str]:
-    """内置默认 ZCT 永续列表（与 `_DEFAULT_ZCT_SYMBOLS` 一致；历史名「22」保留）。"""
+    """内置默认 ZCT 永续（`_DEFAULT_ZCT_SYMBOLS`；历史名 default22，实际为完整内置列表）。"""
     return [x.strip() for x in z._DEFAULT_ZCT_SYMBOLS.split(",") if x.strip()]
+
+
+def zct_default_builtin_symbols() -> List[str]:
+    """同 `zct_default_22_symbols()`（推荐新代码用此名）。"""
+    return zct_default_22_symbols()
 
 
 def _per_symbol_win_stats(

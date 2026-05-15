@@ -32,6 +32,7 @@ from zct_vwap_asset_pool import (
     _default_symbol_list,
     run_asset_pool_scan,
     touch_pool_symbols_hot_oi_plus_default_22,
+    touch_pool_symbols_worth_watch_plus_default,
     zct_default_22_symbols,
 )
 from zct_vwap_touch_pool_db import (
@@ -53,6 +54,8 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_symbols(ns: argparse.Namespace) -> List[str]:
+    if ns.worth_watch_plus_default_22:
+        return touch_pool_symbols_worth_watch_plus_default()
     if ns.hot_oi_plus_default_22:
         return touch_pool_symbols_hot_oi_plus_default_22()
     if ns.zct_default_22:
@@ -61,7 +64,7 @@ def resolve_symbols(ns: argparse.Namespace) -> List[str]:
         return z._symbols_from_env()
     if ns.symbols.strip():
         return [x.strip().upper() for x in ns.symbols.split(",") if x.strip()]
-    return _default_symbol_list()
+    return touch_pool_symbols_worth_watch_plus_default()
 
 
 def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
@@ -80,7 +83,18 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
         except ValueError:
             ns.sleep_between_symbols = 0.25
 
-    sym_src = "hot_oi_plus_default_22" if ns.hot_oi_plus_default_22 else None
+    if ns.worth_watch_plus_default_22:
+        sym_src = "worth_watch_plus_default_22"
+    elif ns.hot_oi_plus_default_22:
+        sym_src = "hot_oi_plus_default_22"
+    elif ns.zct_default_22:
+        sym_src = "zct_default_22"
+    elif ns.use_env_symbols:
+        sym_src = "env_symbols"
+    elif ns.symbols.strip():
+        sym_src = "cli_symbols"
+    else:
+        sym_src = "worth_watch_plus_default_22"
 
     out, _ = run_asset_pool_scan(
         days=float(ns.days),
@@ -152,14 +166,19 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--hot-oi-plus-default-22",
         action="store_true",
-        help="worth_watch_hot_oi ∪ 扫描器内置默认永续",
+        help="worth_watch_hot_oi ∪ 内置默认永续（旧候选，较窄）",
+    )
+    ap.add_argument(
+        "--worth-watch-plus-default-22",
+        action="store_true",
+        help="值得关注七类 worth_watch_* ∪ 内置默认永续（稳档默认；CLI 名 default22 为历史遗留）",
     )
     ap.add_argument("--use-env-symbols", action="store_true")
     ap.add_argument("--ignore-db-cooldown", action="store_true")
     ap.add_argument("--use-db-cooldown", action="store_true")
     ap.add_argument("--min-touch-trades", type=int, default=1)
     ap.add_argument("--strict-greater-touch", action="store_true")
-    ap.add_argument("--min-touch-win-rate", type=float, default=0.7)
+    ap.add_argument("--min-touch-win-rate", type=float, default=0.72)
     ap.add_argument("--strict-greater-rate", action="store_true")
     ap.add_argument(
         "--min-total-trades",
@@ -170,8 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--max-expired-ratio",
         type=float,
-        default=0.5,
-        help="expired/n_trades 须严格小于该值（默认 0.5 即 <50%%）",
+        default=0.4,
+        help="expired/n_trades 须严格小于该值（稳档默认 0.4 即 <40%%）",
     )
     ap.add_argument(
         "--min-win-loss-abs",
@@ -204,6 +223,7 @@ def main() -> None:
     mode_n = sum(
         1
         for x in (
+            ns.worth_watch_plus_default_22,
             ns.hot_oi_plus_default_22,
             ns.zct_default_22,
             ns.use_env_symbols,
@@ -213,8 +233,8 @@ def main() -> None:
     )
     if mode_n > 1:
         ap.error(
-            "标的来源请只选一种：--hot-oi-plus-default-22 / --zct-default-22 / "
-            "--use-env-symbols / --symbols"
+            "标的来源请只选一种：--worth-watch-plus-default-22 / --hot-oi-plus-default-22 / "
+            "--zct-default-22 / --use-env-symbols / --symbols"
         )
 
     if ns.once and ns.daemon:

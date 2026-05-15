@@ -250,6 +250,50 @@ def hot_oi_watchlist_symbols() -> List[str]:
     return _symbols_hot_oi_from_db()
 
 
+def worth_watch_all_category_symbols() -> List[str]:
+    """值得关注七张 worth_watch_* 表当前标的（去重、按类别顺序合并，币安 U 永续）。"""
+    from accumulation_radar import (
+        WORTH_HIGHLIGHT_CATEGORY_ORDER,
+        WORTH_WATCH_TABLE_BY_CATEGORY,
+        _worth_watch_prune_all,
+        init_db,
+    )
+    from datetime import datetime, timedelta, timezone
+
+    conn = init_db()
+    try:
+        now_cst = datetime.now(timezone(timedelta(hours=8)))
+        _worth_watch_prune_all(conn, now_cst)
+        conn.commit()
+        cur = conn.cursor()
+        raw: List[str] = []
+        for cat in WORTH_HIGHLIGHT_CATEGORY_ORDER:
+            tbl = WORTH_WATCH_TABLE_BY_CATEGORY[cat]
+            cur.execute(
+                f"""
+                SELECT symbol FROM {tbl}
+                ORDER BY COALESCE(rank_in_category, 999) ASC, symbol ASC
+                """
+            )
+            for row in cur.fetchall():
+                if row and row[0]:
+                    raw.append(str(row[0]).strip().upper())
+        if not raw:
+            return []
+        seen: Set[str] = set()
+        ordered: List[str] = []
+        for s in raw:
+            if s and s not in seen:
+                seen.add(s)
+                ordered.append(s)
+        return _filter_symbols_to_binance_usdt_perps(ordered)
+    except Exception as e:
+        print(f"[worth_watch] 七类 worth_watch_* 读取失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
 def _scan_title_short() -> str:
     if _touch_pool_universe_enabled():
         return "ZCT VWAP · 触轨资产池"

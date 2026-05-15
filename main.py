@@ -602,15 +602,17 @@ _ZCT_TOUCH_POOL_DAILY_SCRIPT = (
 
 
 def _run_zct_touch_pool_daily_subprocess() -> None:
-    """与 `POST /api/zct-vwap/touch-pool-scan` 生产默认标的同源：hot_oi ∪ default22。"""
-    logger.info("Starting zct_vwap_asset_pool_daily_job --once --hot-oi-plus-default-22")
+    """与 touch-pool-scan 生产默认同源：七类 worth_watch ∪ 内置默认永续（33 个）。"""
+    logger.info(
+        "Starting zct_vwap_asset_pool_daily_job --once --worth-watch-plus-default-22"
+    )
     try:
         subprocess.run(
             [
                 sys.executable,
                 str(_ZCT_TOUCH_POOL_DAILY_SCRIPT),
                 "--once",
-                "--hot-oi-plus-default-22",
+                "--worth-watch-plus-default-22",
             ],
             cwd=str(_ZCT_TOUCH_POOL_DAILY_SCRIPT.parent),
             check=False,
@@ -773,7 +775,7 @@ async def lifespan(app: FastAPI):
         "heat_watch 每小时 xx:07（现价/摘要 + 1h BPC）; "
         "oi 每小时 :30; "
         "s2_oi_funding_rate_scanner 每整点后 5 分 (xx:05); "
-        "zct_touch_pool 每日 08:00 Asia/Shanghai（hot_oi+default22 walk 入库）; "
+        "zct_touch_pool 每日 08:00 Asia/Shanghai（worth_watch 七类+内置33 walk 入库·稳档）; "
         + s6_cron_log
         + "; "
         + zct_vwap_log
@@ -2882,7 +2884,7 @@ async def get_patrick_core_watch():
 
 @app.get("/api/accumulation/worth-watch")
 async def get_worth_watch(category: Optional[str] = Query(None, description="可选：heat_accum / patrick_core / …")):
-    """值得关注七类归档：七张独立表 worth_watch_*；每类每轮动态门槛+至多 5 条入库；保留 2 日；各行含 bpc（每小时由定时任务写入）。响应含 tables / categories[].table、bpc_interval、bpc_snapshot_cst。可选 ?category=heat_accum。"""
+    """值得关注七类归档：七张独立表 worth_watch_*；每类每轮动态门槛+至多 5 条入库；保留 3 日（含当日，见 WORTH_WATCH_RETENTION_DAYS）；各行含 bpc。可选 ?category=heat_accum。"""
     try:
         from accumulation_radar import (
             WORTH_HIGHLIGHT_CATEGORY_ORDER,
@@ -2990,13 +2992,16 @@ class ZctTouchPoolScanBody(BaseModel):
         default="ZECUSDT,ONDOUSDT,1000SHIBUSDT",
         description="Comma-separated USDT perpetual symbols（仅 symbols_source=request 时使用）",
     )
-    symbols_source: Literal["request", "hot_oi_plus_default_22"] = Field(
-        default="hot_oi_plus_default_22",
-        description="hot_oi_plus_default_22=生产默认：worth_watch_hot_oi ∪ 扫描器内置默认永续；request=使用 symbols",
+    symbols_source: Literal[
+        "request", "worth_watch_plus_default_22", "hot_oi_plus_default_22"
+    ] = Field(
+        default="worth_watch_plus_default_22",
+        description="worth_watch_plus_default_22=稳档默认：七类 worth_watch ∪ 内置永续(33)；"
+        "hot_oi_plus_default_22=仅 hot_oi ∪ 内置(33)；request=使用 symbols",
     )
     days: float = Field(default=1.5, ge=0.25, le=30.0)
     min_touch_trades: int = Field(default=1, ge=0, le=200_000)
-    min_touch_win_rate: float = Field(default=0.7, ge=0.0, le=1.0)
+    min_touch_win_rate: float = Field(default=0.72, ge=0.0, le=1.0)
     strict_greater_touch: bool = Field(default=False)
     strict_greater_rate: bool = Field(default=False)
     min_total_trades: int = Field(
@@ -3006,10 +3011,10 @@ class ZctTouchPoolScanBody(BaseModel):
         description="n_trades 须 ≥ 该值（默认 30）",
     )
     max_expired_ratio: float = Field(
-        default=0.5,
+        default=0.4,
         ge=0.0,
         le=1.0,
-        description="expired/n_trades 须严格小于该值（默认 0.5 即 <50%）",
+        description="expired/n_trades 须严格小于该值（稳档默认 0.4 即 <40%）",
     )
     min_win_loss_abs: int = Field(
         default=20,
@@ -3105,11 +3110,16 @@ async def post_zct_touch_pool_scan(body: ZctTouchPoolScanBody = Body(...)):
     if iv not in ("1m", "5m"):
         raise HTTPException(status_code=400, detail="signal_interval must be 1m or 5m")
 
-    src = str(body.symbols_source or "hot_oi_plus_default_22").strip().lower()
-    if src not in ("request", "hot_oi_plus_default_22"):
+    src = str(body.symbols_source or "worth_watch_plus_default_22").strip().lower()
+    if src not in ("request", "worth_watch_plus_default_22", "hot_oi_plus_default_22"):
         raise HTTPException(status_code=400, detail="invalid_symbols_source")
 
-    if src == "hot_oi_plus_default_22":
+    if src == "worth_watch_plus_default_22":
+        from zct_vwap_asset_pool import touch_pool_symbols_worth_watch_plus_default
+
+        syms = touch_pool_symbols_worth_watch_plus_default()
+        scan_src = "worth_watch_plus_default_22"
+    elif src == "hot_oi_plus_default_22":
         from zct_vwap_asset_pool import touch_pool_symbols_hot_oi_plus_default_22
 
         syms = touch_pool_symbols_hot_oi_plus_default_22()
@@ -3379,7 +3389,7 @@ async def post_trigger_accumulation_cron(body: TriggerCronBody):
     - heat_zones / heat_bpc: 与 heat_watch 相同（兼容旧 task 名）
     - oi: accumulation_radar oi（定时每小时 :30）
     - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
-    - touch_pool: ZCT 触轨资产池 walk 入库（定时每日 08:00 Asia/Shanghai，与 zct_vwap_asset_pool_daily_job --once --hot-oi-plus-default-22 同源）
+    - touch_pool: ZCT 触轨资产池 walk 入库（定时每日 08:00 Asia/Shanghai，与 daily job --worth-watch-plus-default-22 同源·稳档）
     - s6_alpha: s6 期货 Alpha（定时每时 :25，与 S6_FUTURES_ALPHA_SCHEDULER_ENABLED 无关可手动跑）
     - zct_vwap: ZCT VWAP 全量扫描（与定时同源子进程，间隔见 ZCT_VWAP_SCAN_INTERVAL_MINUTES）
     - zct_vwap_resolve: 仅纸面结算（--resolve-only，与定时 ZCT_VWAP_RESOLVE_INTERVAL_MINUTES 同源）
