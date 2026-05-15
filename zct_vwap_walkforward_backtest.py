@@ -16,6 +16,7 @@ ZCT VWAP 信号扫描器 — walk-forward 回测（不经 DB、不推 TG）。
 
 **数据从哪来、结果存哪：**
 - K 线：运行时向币安 U 本位 `fapi.binance.com` 拉取（`fetch_klines_forward` / `api_get`），**不落盘原始 OHLCV**；只保留内存里的 DataFrame 直到进程结束。
+- **REST 优化**：每标的预拉信号周期 + `RefLevelResolver`（含 15m）；walk 内 Play03 动态 ATR 用 `RefLevelResolver.atr_pct_at`（复用预拉 15m），**不再逐根请求** `/fapi/v1/klines`；worth_watch 过滤缓存 `exchangeInfo`（`ZCT_PERP_SYMBOLS_CACHE_TTL_SEC`，默认 1h）。
 - 结果：**stdout** 仍会打印完整 JSON + per-symbol 表；默认另写 **`next-k-api/zct_vwap_walkforward_last.json`**（与脚本同目录，每跑覆盖）。
   改路径用 `--json-out PATH`；只要打印不要文件用 `--no-json-out`。
 - 逐笔明细：加 `--csv PATH` 才会写 CSV。
@@ -92,11 +93,14 @@ def analyze_symbol_pit(
     *,
     asof_open_ms: int,
     halt_daily_circuit: bool = False,
+    spike_atr_pct: Optional[float] = None,
+    spike_atr_from_memory: bool = False,
 ) -> Optional[z.SignalResult]:
     """
     对齐 `analyze_symbol` 在 classify 之后的闸门链；回测固定不拉 OI。
     `halt_daily_circuit` 与 `run_scan` 传入 `analyze_symbol` 的语义一致。
     `session_1m_raw`：UTC 当日起至 asof 的信号周期 K 线（与 `--signal-interval` 一致，列含 open_time/ts/OHLC）。
+    `spike_atr_pct`：由 `RefLevelResolver.atr_pct_at` 提供时，Play03 不再逐根 REST 拉 15m ATR。
     """
     sdf0 = session_1m_raw.copy()
     if sdf0.empty or len(sdf0) < 30:
@@ -108,6 +112,8 @@ def analyze_symbol_pit(
         sdf,
         levels,
         spike_klines_end_ms=int(asof_open_ms),
+        spike_atr_pct=spike_atr_pct,
+        spike_atr_from_memory=spike_atr_from_memory,
     )
     entry_ms = int(sdf.iloc[-1]["open_time"])
     sl, tp, ru = z.compute_sl_tp(res, sdf)
@@ -926,6 +932,8 @@ def run_portfolio_backtest(
                     lv,
                     asof_open_ms=t,
                     halt_daily_circuit=False,
+                    spike_atr_pct=rr.atr_pct_at(t),
+                    spike_atr_from_memory=True,
                 )
                 if res is None:
                     continue
@@ -1213,6 +1221,8 @@ def run_backtest(
                     lv,
                     asof_open_ms=t,
                     halt_daily_circuit=False,
+                    spike_atr_pct=rr.atr_pct_at(t),
+                    spike_atr_from_memory=True,
                 )
 
                 if res is None:

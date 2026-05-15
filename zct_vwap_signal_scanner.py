@@ -9,7 +9,7 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
 - **Play 01/02**：价在锚一侧 + **陡斜率 + 宽轨** → 顺势（突破多 / 破位空）；**Play 03**：**平斜率 + 窄轨** → 贴轨做均值回归，目标收回 VWAP。
 - **Setup level 1–3**：三信号与模板的一致程度；海报 **「use level 3+」** 对应本脚本 `setup_level==3`（严格模板：PLAY01_BREAKOUT / PLAY02_BREAKDOWN / PLAY03_REV）。默认 **`ZCT_ENFORCE_SETUP_LEVEL` 开启** 且 **`ZCT_MIN_SETUP_LEVEL=3`**，仅该档保留带 SL/TP 的方向单；可关 enforce 或降为 2 以放宽。
 - ZCT 关键位参考：前日高/低 + 4H/1H/15m 前一根完整 K 的高/低（辅助，非海报核心三信号）。
-- **实盘与 walk-forward 对齐**：以最后一根 1m 的 `open_time` 为 **asof**；当日 UTC 0 点起 forward 拉 1m、**`session_slice_utc_day`** 切会话、**`RefLevelResolver`** 给关键位；Play03 的 SPIKE ATR 经 **`classify_and_signal(..., spike_klines_end_ms=asof)`** 截断，避免多看未来外周期。
+- **实盘与 walk-forward 对齐**：以最后一根 1m 的 `open_time` 为 **asof**；当日 UTC 0 点起 forward 拉 1m、**`session_slice_utc_day`** 切会话、**`RefLevelResolver`** 给关键位；Play03 SPIKE ATR 默认复用预拉 15m（`RefLevelResolver.atr_pct_at` / `spike_atr_pct`），walk 不逐根 REST。
 - **近端 recycled 否决（默认关）**：设 `ZCT_RECYCLED_NEAR_VETO_ENABLED=1` 时，PLAY01/02 若头顶最近结构阻力（或脚下最近结构支撑）在距离阈值内且 `_level_freshness_row` 为 `recycled`，则改为 NO_TRADE（ZCT S/R：烂墙附近少追顺势）。见 `ZCT_RECYCLED_NEAR_VETO_*`。
 
 用法：
@@ -181,6 +181,25 @@ def _touch_pool_universe_enabled() -> bool:
     )
 
 
+def _binance_usdt_perp_symbol_set() -> Set[str]:
+    global _PERP_SYMBOLS_CACHE
+    now = time.time()
+    if _PERP_SYMBOLS_CACHE is not None:
+        ts, allowed = _PERP_SYMBOLS_CACHE
+        if now - ts < _PERP_SYMBOLS_CACHE_TTL_SEC:
+            return allowed
+    try:
+        from accumulation_radar import get_all_perp_symbols
+
+        allowed = set(get_all_perp_symbols())
+    except Exception:
+        if _PERP_SYMBOLS_CACHE is not None:
+            return _PERP_SYMBOLS_CACHE[1]
+        raise
+    _PERP_SYMBOLS_CACHE = (now, allowed)
+    return allowed
+
+
 def _filter_symbols_to_binance_usdt_perps(raw: List[str]) -> List[str]:
     """
     worth_watch 里可能出现非 U 本位永续、已下架或格式不一致的 symbol。
@@ -189,9 +208,7 @@ def _filter_symbols_to_binance_usdt_perps(raw: List[str]) -> List[str]:
     if not raw:
         return []
     try:
-        from accumulation_radar import get_all_perp_symbols
-
-        allowed = set(get_all_perp_symbols())
+        allowed = _binance_usdt_perp_symbol_set()
     except Exception as e:
         print(f"[hot_oi] get_all_perp_symbols 失败，沿用原始列表（可能含无效合约）: {e}")
         return [s.strip().upper() for s in raw if s and str(s).strip()]
@@ -708,13 +725,24 @@ def klines_to_df(rows: List[List[Any]]) -> pd.DataFrame:
     return df
 
 
-# K 线周期时长（ms），多周期关键位 RefLevelResolver 用
+# K 线周期时长（ms）：关键位 RefLevelResolver、Play03 SPIKE ATR 共用
 ZCT_REF_BAR_DUR_MS: Dict[str, int] = {
-    "1d": 86_400_000,
-    "4h": 14_400_000,
-    "1h": 3_600_000,
+    "1m": 60_000,
+    "3m": 180_000,
+    "5m": 300_000,
     "15m": 900_000,
+    "30m": 1_800_000,
+    "1h": 3_600_000,
+    "2h": 7_200_000,
+    "4h": 14_400_000,
+    "1d": 86_400_000,
 }
+
+# 币安 U 永续列表缓存（worth_watch 过滤等），减轻触轨池批量回测时重复 exchangeInfo
+_PERP_SYMBOLS_CACHE: Optional[Tuple[float, Set[str]]] = None
+_PERP_SYMBOLS_CACHE_TTL_SEC = max(
+    60, int(os.getenv("ZCT_PERP_SYMBOLS_CACHE_TTL_SEC", "3600").strip() or "3600")
+)
 
 
 def utc_day_floor_ms(ms: int) -> int:
@@ -750,6 +778,26 @@ class RefLevelResolver:
         self._h4 = _preload_ref_klines(self.symbol, "4h", s0, e0)
         self._h1 = _preload_ref_klines(self.symbol, "1h", s0, e0)
         self._m15 = _preload_ref_klines(self.symbol, "15m", s0, e0)
+        spike_iv = SPIKE_ATR_INTERVAL.strip().lower()
+        if spike_iv != "15m":
+            self._spike_atr_df = _preload_ref_klines(self.symbol, spike_iv, s0, e0)
+        else:
+            self._spike_atr_df = None
+
+    def atr_pct_at(self, asof_open_ms: int) -> Optional[float]:
+        """Play03 动态 ATR%（预拉 K 线切片，walk 回测零额外 REST）。"""
+        if not SPIKE_USE_ATR_15M:
+            return None
+        spike_iv = SPIKE_ATR_INTERVAL.strip().lower()
+        df = self._m15 if spike_iv == "15m" else self._spike_atr_df
+        if df is None or df.empty:
+            return None
+        return _atr_pct_from_kline_df(
+            df,
+            asof_open_ms=int(asof_open_ms),
+            bar_dur_ms=_spike_bar_dur_ms(spike_iv),
+            period=SPIKE_ATR_PERIOD,
+        )
 
     def levels(self, asof_open_ms: int) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -816,11 +864,10 @@ def build_classify_inputs_at_asof(
     symbol: str,
     *,
     end_ms: Optional[int] = None,
-) -> Tuple[pd.DataFrame, Dict[str, float], int]:
+) -> Tuple[pd.DataFrame, Dict[str, float], int, Optional["RefLevelResolver"]]:
     """以最后一根已返回 1m 的 open_time 为 asof：UTC 当日 0 点 forward 拉线 → 会话切片 → 关键位 → VWAP 轨。
 
-    与 walk-forward 共用 `session_slice_utc_day` / `RefLevelResolver`；`classify_and_signal` 需再传
-    `spike_klines_end_ms=asof` 对齐 Play03 ATR。
+    与 walk-forward 共用 `session_slice_utc_day` / `RefLevelResolver`；Play03 ATR 用 resolver.atr_pct_at(asof)。
     """
     su = str(symbol).strip().upper()
     end_ms = int(time.time() * 1000) if end_ms is None else int(end_ms)
@@ -828,15 +875,16 @@ def build_classify_inputs_at_asof(
     rows = fetch_klines_forward(su, "1m", day0_ms, end_ms)
     df = klines_to_df(rows)
     if df.empty:
-        return df, {}, end_ms
+        return df, {}, end_ms, None
     asof_ms = int(df.iloc[-1]["open_time"])
     sdf0 = session_slice_utc_day(df, asof_ms)
     if sdf0.empty or len(sdf0) < 30:
-        return pd.DataFrame(), {}, asof_ms
+        return pd.DataFrame(), {}, asof_ms, None
     pad_anchor = utc_day_floor_ms(asof_ms)
-    levels = RefLevelResolver(su, pad_anchor, asof_ms).levels(asof_ms)
+    resolver = RefLevelResolver(su, pad_anchor, asof_ms)
+    levels = resolver.levels(asof_ms)
     sdf = compute_vwap_bands_session(sdf0, BAND_SIGMA)
-    return sdf, levels, asof_ms
+    return sdf, levels, asof_ms, resolver
 
 
 def count_vwap_crosses(close: np.ndarray, vwap: np.ndarray) -> int:
@@ -1073,6 +1121,33 @@ def _wilder_atr_last_pct(
     return last_atr / last_c
 
 
+def _spike_bar_dur_ms(interval: Optional[str] = None) -> int:
+    iv = (interval or SPIKE_ATR_INTERVAL).strip().lower()
+    return int(ZCT_REF_BAR_DUR_MS.get(iv, 900_000))
+
+
+def _atr_pct_from_kline_df(
+    df: pd.DataFrame,
+    *,
+    asof_open_ms: int,
+    bar_dur_ms: int,
+    period: int = SPIKE_ATR_PERIOD,
+) -> Optional[float]:
+    """已收盘 K 线子集上算 Wilder ATR/close（walk 用预拉表，无 REST）。"""
+    if df is None or df.empty or "open_time" not in df.columns:
+        return None
+    need = max(int(period) + 5, 32)
+    ot = df["open_time"].astype("int64")
+    closed = df.loc[ot + int(bar_dur_ms) <= int(asof_open_ms)]
+    if len(closed) < need:
+        return None
+    tail = closed.tail(max(need + 10, min(SPIKE_ATR_KLINE_LIMIT, 256)))
+    h = tail["high"].to_numpy(dtype=float)
+    l = tail["low"].to_numpy(dtype=float)
+    c = tail["close"].to_numpy(dtype=float)
+    return _wilder_atr_last_pct(h, l, c, int(period))
+
+
 def _fetch_last_atr_pct(
     symbol: str, *, end_time_ms: Optional[int] = None
 ) -> Optional[float]:
@@ -1085,24 +1160,31 @@ def _fetch_last_atr_pct(
     if not rows or len(rows) < need:
         return None
     df = klines_to_df(rows)
-    if df.empty or len(df) < need:
+    if df.empty:
         return None
-    h = df["high"].to_numpy(dtype=float)
-    l = df["low"].to_numpy(dtype=float)
-    c = df["close"].to_numpy(dtype=float)
-    return _wilder_atr_last_pct(h, l, c, SPIKE_ATR_PERIOD)
+    t = int(end_time_ms) if end_time_ms is not None else int(time.time() * 1000)
+    return _atr_pct_from_kline_df(
+        df, asof_open_ms=t, bar_dur_ms=_spike_bar_dur_ms(), period=SPIKE_ATR_PERIOD
+    )
 
 
 def _resolve_spike_range_ratio(
-    symbol: str, *, end_time_ms: Optional[int] = None
+    symbol: str,
+    *,
+    end_time_ms: Optional[int] = None,
+    spike_atr_pct: Optional[float] = None,
+    spike_atr_from_memory: bool = False,
 ) -> Tuple[float, str]:
     """
     Play03 刺穿阈值：优先用 15m ATR%×倍数并夹在 floor/cap；否则回退 SPIKE_RANGE_RATIO。
     高波动山寨 ATR% 大 → 阈值抬高，减少「0.4% 一碰就过」的无效反转单。
+    `spike_atr_from_memory=True`：已由预拉 K 线算过（含 None），不再 REST 回退。
     """
     if not SPIKE_USE_ATR_15M:
         return SPIKE_RANGE_RATIO, f"固定 {SPIKE_RANGE_RATIO*100:.3f}%（ZCT_SPIKE_RANGE_RATIO）"
-    atrp = _fetch_last_atr_pct(symbol, end_time_ms=end_time_ms)
+    atrp = spike_atr_pct
+    if atrp is None and not spike_atr_from_memory:
+        atrp = _fetch_last_atr_pct(symbol, end_time_ms=end_time_ms)
     if atrp is None or atrp <= 0:
         return SPIKE_RANGE_RATIO, (
             f"ATR 不可用→回退固定 {SPIKE_RANGE_RATIO*100:.3f}%（{SPIKE_ATR_INTERVAL}）"
@@ -1538,6 +1620,8 @@ def classify_and_signal(
     levels: Dict[str, float],
     *,
     spike_klines_end_ms: Optional[int] = None,
+    spike_atr_pct: Optional[float] = None,
+    spike_atr_from_memory: bool = False,
 ) -> SignalResult:
     last = sdf.iloc[-1]
     price = float(last["close"])
@@ -1654,7 +1738,10 @@ def classify_and_signal(
             spike_src = f"固定 {SPIKE_RANGE_RATIO*100:.3f}%（未评 Play03）"
             if play in ("PLAY03_REV_LONG", "PLAY03_REV_SHORT"):
                 spike_rr, spike_src = _resolve_spike_range_ratio(
-                    symbol, end_time_ms=spike_klines_end_ms
+                    symbol,
+                    end_time_ms=spike_klines_end_ms,
+                    spike_atr_pct=spike_atr_pct,
+                    spike_atr_from_memory=spike_atr_from_memory,
                 )
                 is_spike = _is_spike_window(sdf, SPIKE_LOOKBACK, spike_rr)
                 reasons.append(
@@ -1902,7 +1989,7 @@ def analyze_symbol(
     *,
     halt_daily_circuit: bool = False,
 ) -> Optional[SignalResult]:
-    sdf, levels, asof_ms = build_classify_inputs_at_asof(symbol)
+    sdf, levels, asof_ms, resolver = build_classify_inputs_at_asof(symbol)
     if sdf.empty or len(sdf) < 30:
         return None
     liq = (
@@ -1910,7 +1997,15 @@ def analyze_symbol(
         if LIQUIDITY_OI_FILTER_ENABLED
         else {"ok": False, "disabled": True}
     )
-    res = classify_and_signal(symbol, sdf, levels, spike_klines_end_ms=asof_ms)
+    spike_atr = resolver.atr_pct_at(asof_ms) if resolver is not None else None
+    res = classify_and_signal(
+        symbol,
+        sdf,
+        levels,
+        spike_klines_end_ms=asof_ms,
+        spike_atr_pct=spike_atr,
+        spike_atr_from_memory=resolver is not None,
+    )
     if LIQUIDITY_OI_FILTER_ENABLED and _liquidity_oi_suppresses_direction(res, liq):
         res = replace(
             res,
