@@ -50,6 +50,8 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
   同标的「持仓中」保护：若已有未平仓 LONG/SHORT（与看板一致），默认**跳过**入库以免洗掉 SL/TP。
                         **例外**：与持仓**方向相反**时先按扫描价纸面平仓（supersede）再写入快照。
                         观望(FLAT)是否也平仓：见代码常量 SCAN_SUPERSEDE_ON_FLAT（默认 False=仅反向平仓，FLAT 保留仓至 resolve）。
+  ZCT_MAX_OPEN_POSITIONS  全账户未平仓方向单上限（与看板「持仓中」计数一致），默认 **6**；已达上限时**不再新开其它标的**；
+                        **同标的**仍走反向 supersede / 同向跳过；设为 **0** 关闭上限。
   TG_BOT_TOKEN / TG_CHAT_ID  与 accumulation 雷达相同；配置后即推送 Telegram
   ZCT_VWAP_TG_PUSH_MODE  扫描推送：summary（默认，每轮一条简报）| actionable（仅当有方向+SL/TP）
                         | all（每轮全文明细）| off（不推扫描，平仓推送仍受 NOTIFY_RESOLVE 控制）
@@ -472,6 +474,10 @@ USE_RISK_SIZED_NOTIONAL = os.getenv("ZCT_USE_RISK_SIZED_NOTIONAL", "").strip().l
 )
 MAX_NOTIONAL_CAP_USDT = float(os.getenv("ZCT_MAX_NOTIONAL_CAP_USDT", "0") or 0)
 MAX_DAILY_LOSS_PCT = float(os.getenv("ZCT_MAX_DAILY_LOSS_PCT", "0.05"))
+try:
+    MAX_OPEN_POSITIONS = max(0, int(os.getenv("ZCT_MAX_OPEN_POSITIONS", "6").strip() or "6"))
+except ValueError:
+    MAX_OPEN_POSITIONS = 6
 
 # --- P2：平仓后冷却（毫秒，代码常量；非环境变量）+ 极端带宽跳过 ---
 COOLDOWN_AFTER_LOSS_MS = 30 * 60 * 1000  # 止损后
@@ -2092,6 +2098,31 @@ def analyze_symbol(
             entry_bar_open_ms=None,
             paper_notional_usdt=None,
         )
+    if res.side in ("LONG", "SHORT") and MAX_OPEN_POSITIONS > 0:
+        from accumulation_radar import init_db
+
+        _cap_conn = init_db()
+        try:
+            cap_block = _open_position_cap_blocks_new_symbol(_cap_conn.cursor(), symbol)
+        finally:
+            _cap_conn.close()
+        if cap_block:
+            res = replace(
+                res,
+                side="FLAT",
+                play="NO_TRADE",
+                confidence="low",
+                reasons=res.reasons
+                + [
+                    f"P2 持仓上限：未平仓已达 {MAX_OPEN_POSITIONS} 笔，跳过新开仓"
+                    f"（同标的反向仍可在入库时 supersede）",
+                ],
+                sl_price=None,
+                tp_price=None,
+                r_unit=None,
+                entry_bar_open_ms=None,
+                paper_notional_usdt=None,
+            )
     if halt_daily_circuit and res.side in ("LONG", "SHORT"):
         res = replace(
             res,
@@ -2223,6 +2254,48 @@ def _fetch_symbols_with_open_positions(cur) -> Set[str]:
     return {str(row[0]) for row in cur.fetchall() if row and row[0]}
 
 
+def _count_open_positions(cur) -> int:
+    """与 zct_vwap_api summary「持仓中」一致：未结且含 SL 的 LONG/SHORT 行数。"""
+    cur.execute(
+        f"""
+        SELECT COUNT(*) FROM {ZCT_DB_SIGNALS_TABLE}
+        WHERE outcome IS NULL
+          AND sl_price IS NOT NULL
+          AND side IN ('LONG', 'SHORT')
+        """
+    )
+    row = cur.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _symbol_has_open_position(cur, symbol: str) -> bool:
+    su = str(symbol).strip().upper()
+    if not su:
+        return False
+    cur.execute(
+        f"""
+        SELECT 1 FROM {ZCT_DB_SIGNALS_TABLE}
+        WHERE symbol = ? AND outcome IS NULL
+          AND sl_price IS NOT NULL
+          AND side IN ('LONG', 'SHORT')
+        LIMIT 1
+        """,
+        (su,),
+    )
+    return cur.fetchone() is not None
+
+
+def _open_position_cap_blocks_new_symbol(cur, symbol: str) -> bool:
+    """
+    持仓数已达上限时禁止「新开其它标的」；该 symbol 已有未平仓则 False（交给同标的 supersede/跳过）。
+    """
+    if MAX_OPEN_POSITIONS <= 0:
+        return False
+    if _symbol_has_open_position(cur, symbol):
+        return False
+    return _count_open_positions(cur) >= MAX_OPEN_POSITIONS
+
+
 def _scan_supersedes_open_hold(db_side: str, r: SignalResult) -> bool:
     """是否应用扫描价 supersede：反向一定触发；FLAT 仅当 SCAN_SUPERSEDE_ON_FLAT 为 True。"""
     if r.side in ("LONG", "SHORT") and db_side in ("LONG", "SHORT"):
@@ -2298,9 +2371,11 @@ def _persist_results_db(
     try:
         cur = conn.cursor()
         open_syms = _fetch_symbols_with_open_positions(cur)
+        open_position_count = _count_open_positions(cur)
         params_json = json.dumps(scan_params, ensure_ascii=False)
         written = 0
         skipped_open = 0
+        skipped_open_cap = 0
         sig_tbl = ZCT_DB_SIGNALS_TABLE
         upsert = f"""
             INSERT INTO {sig_tbl} (
@@ -2366,6 +2441,8 @@ def _persist_results_db(
                 notes = {sig_tbl}.notes
         """
         for r in rows:
+            had_hold = False
+            superseded = False
             # 必须先于 FLAT 删除：否则未平仓行会被 DB_SKIP_FLAT 删掉，或被 FLAT upsert 清空 sl/tp，resolve 永远选不中
             if r.symbol in open_syms:
                 cur.execute(
@@ -2382,8 +2459,10 @@ def _persist_results_db(
                 if not hold:
                     open_syms.discard(r.symbol)
                 else:
+                    had_hold = True
                     db_side = str(hold[2])
                     if _scan_supersedes_open_hold(db_side, r):
+                        superseded = True
                         _settle_open_for_scan_supersede(
                             cur,
                             settled_at_utc=recorded_at_utc,
@@ -2404,6 +2483,19 @@ def _persist_results_db(
                             f"[db] skip {r.symbol}: 已有未平仓记录（持仓中），保留该行（不覆盖、不删除）"
                         )
                         continue
+            if (
+                _is_open_hold_row(r)
+                and not superseded
+                and not had_hold
+                and MAX_OPEN_POSITIONS > 0
+                and open_position_count >= MAX_OPEN_POSITIONS
+            ):
+                skipped_open_cap += 1
+                print(
+                    f"[db] skip {r.symbol}: 未平仓已达 {open_position_count}>="
+                    f"{MAX_OPEN_POSITIONS}，不再新开仓（同标的反向 supersede 不受限）"
+                )
+                continue
             if DB_SKIP_FLAT and r.side == "FLAT":
                 cur.execute(
                     f"DELETE FROM {ZCT_DB_SIGNALS_TABLE} WHERE symbol = ?",
@@ -2453,9 +2545,13 @@ def _persist_results_db(
             written += 1
             if _is_open_hold_row(r):
                 open_syms.add(r.symbol)
+                if not had_hold:
+                    open_position_count += 1
         conn.commit()
         if skipped_open:
             print(f"[db] skipped_open_hold={skipped_open}")
+        if skipped_open_cap:
+            print(f"[db] skipped_open_position_cap={skipped_open_cap}")
         return written, str(DB_PATH)
     finally:
         conn.close()
@@ -2869,6 +2965,7 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
         "risk_pct_per_trade": RISK_PCT_PER_TRADE,
         "use_risk_sized_notional": USE_RISK_SIZED_NOTIONAL,
         "max_daily_loss_pct": MAX_DAILY_LOSS_PCT,
+        "max_open_positions": MAX_OPEN_POSITIONS,
         "max_band_width_pct": MAX_BAND_WIDTH_PCT,
         "cooldown_after_loss_ms": COOLDOWN_AFTER_LOSS_MS,
         "cooldown_after_win_ms": COOLDOWN_AFTER_WIN_MS,

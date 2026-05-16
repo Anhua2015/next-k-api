@@ -11,6 +11,7 @@ ZCT VWAP 信号扫描器 — walk-forward 回测（不经 DB、不推 TG）。
 **与实盘扫描的差异（回测默认）**：
 - **冷却**：**默认不读** `zct_symbol_cooldown`（`z._cooldown_blocks` 恒为假），避免历史 walk-forward 依赖「当前 DB 里的冷却行」；与实盘完全一致时请加 **`--use-db-cooldown`**。`--ignore-db-cooldown` 仍保留，与默认等价，勿与 `--use-db-cooldown` 同开。
 - **日损熔断**：walk-forward / portfolio 回测**不启用**（`halt_daily_circuit` 恒为 `False`），不重放「运行当日 UTC 结算触发的 P1 熔断」对历史逐根 classify 的影响；与 `run_scan` 实盘路径不同。
+- **持仓上限 `ZCT_MAX_OPEN_POSITIONS`**：仅 `run_scan` → `analyze_symbol` / `_persist_results_db`；walk 用 `analyze_symbol_pit`，**不读 DB、不限制笔数**（触轨池筛选仍按全量 walk 统计）。
 
 **与扫描器同源**：`z.session_slice_utc_day`、`z.RefLevelResolver`、`z.classify_and_signal(..., spike_klines_end_ms=asof)` 与实盘/walk 对齐；`analyze_symbol_pit` 仅复制 **`analyze_symbol` 在 classify 之后的闸门链**（回测固定不拉 OI）；`halt_daily_circuit` 恒为 `False`（不走日损分支）。
 
@@ -98,6 +99,7 @@ def analyze_symbol_pit(
 ) -> Optional[z.SignalResult]:
     """
     对齐 `analyze_symbol` 在 classify 之后的闸门链；回测固定不拉 OI。
+    不含实盘 `ZCT_MAX_OPEN_POSITIONS`（六单上限仅扫描入库路径）。
     `halt_daily_circuit` 与 `run_scan` 传入 `analyze_symbol` 的语义一致。
     `session_1m_raw`：UTC 当日起至 asof 的信号周期 K 线（与 `--signal-interval` 一致，列含 open_time/ts/OHLC）。
     `spike_atr_pct`：由 `RefLevelResolver.atr_pct_at` 提供时，Play03 不再逐根 REST 拉 15m ATR。
