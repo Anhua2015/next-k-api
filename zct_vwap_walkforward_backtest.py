@@ -79,9 +79,11 @@ def _default_force_flat_hours() -> float:
     return ms / 3_600_000.0
 
 
-def _resolve_max_bars_effective(bar_step_ms: int) -> int:
-    """使「根数上限」与 1m 下 RESOLVE_MAX_BARS 的墙上时间等价（5m 根数按步长缩放，与 ZCT_RESOLVE_MAX_HOLD_MS 同时长）。"""
-    base = int(z.RESOLVE_MAX_BARS)
+def _resolve_max_bars_effective(
+    bar_step_ms: int, play: Optional[str] = None
+) -> int:
+    """使「根数上限」与 resolve_max_bars(play) 的墙上时间等价（5m 按步长缩放）。"""
+    base = int(z.resolve_max_bars(play))
     if bar_step_ms <= 60_000:
         return base
     return max(1, int(round(base * 60_000 / float(bar_step_ms))))
@@ -592,18 +594,16 @@ def resolve_forward(
     tp: float,
     hist_end_ms: int,
     bar_step_ms: int,
+    play: Optional[str] = None,
 ) -> Tuple[Optional[str], float, str, int, Optional[int]]:
     """对齐 resolve_open_signals_from_db 的逐根推进；首根为 entry 的下一根；返回 exit_bar_open_ms 为触轨/过期所在根 open_time。"""
     step = int(bar_step_ms)
     start_ms = int(entry_bar_open_ms) + step
-    max_bars = _resolve_max_bars_effective(step)
+    max_bars = _resolve_max_bars_effective(step, play)
     if start_ms > hist_end_ms:
         return None, float(entry), "start_after_hist_end", 0, None
-    deadline_ms = (
-        int(entry_bar_open_ms) + int(z.RESOLVE_MAX_HOLD_MS)
-        if z.RESOLVE_MAX_HOLD_MS > 0
-        else None
-    )
+    hold_ms = int(z.resolve_max_hold_ms(play))
+    deadline_ms = int(entry_bar_open_ms) + hold_ms if hold_ms > 0 else None
     outcome: Optional[str] = None
     exit_px = float(entry)
     note = "resolved:auto"
@@ -636,10 +636,14 @@ def resolve_forward(
         if deadline_ms is not None and bo >= deadline_ms:
             outcome = "expired"
             exit_px = c
-            note = "resolved:auto_expired_wall_clock"
+            note = (
+                "resolved:auto_expired_wall_clock_play02"
+                if z._play_uses_short_resolve_hold(play)
+                else "resolved:auto_expired_wall_clock"
+            )
             exit_bar_open_ms = bo
             break
-        if bars_seen >= max_bars:
+        if max_bars > 0 and bars_seen >= max_bars:
             outcome = "expired"
             exit_px = c
             note = f"resolved:auto_expired_after_{max_bars}_bars"
@@ -708,10 +712,11 @@ def _portfolio_advance(
     fills: List[Dict[str, Any]] = []
     cur = int(pos["resume_from_open_ms"])
     entry_bo = int(pos["entry_bar_open_ms"])
-    deadline_bo = entry_bo + int(time_stop_ms)
+    pos_hold_ms = int(pos.get("time_stop_ms") or time_stop_ms)
+    deadline_bo = entry_bo + pos_hold_ms if pos_hold_ms > 0 else entry_bo + int(time_stop_ms)
     until_bo = min(int(until_bo_inclusive), int(hist_end_ms))
     step = int(bar_step_ms)
-    max_bars = int(resolve_max_bars_effective)
+    max_bars = int(pos.get("resolve_max_bars_effective") or resolve_max_bars_effective)
 
     sub = df_kline[
         (df_kline["open_time"] >= cur)
@@ -797,10 +802,13 @@ def _portfolio_open_from_signal(
 ) -> Dict[str, Any]:
     eb = int(res.entry_bar_open_ms or signal_open_ms)
     step = int(bar_step_ms)
+    play = getattr(res, "play", None)
+    hold_ms = int(z.resolve_max_hold_ms(play))
+    max_bars_eff = _resolve_max_bars_effective(step, play)
     return {
         "symbol": sym,
         "side": str(res.side),
-        "play": res.play,
+        "play": play,
         "signal_open_ms": int(signal_open_ms),
         "entry_bar_open_ms": eb,
         "entry": float(res.price),
@@ -808,6 +816,8 @@ def _portfolio_open_from_signal(
         "tp": float(res.tp_price or 0.0),
         "resume_from_open_ms": eb + step,
         "bars_held": 0,
+        "time_stop_ms": hold_ms,
+        "resolve_max_bars_effective": max_bars_eff,
         "margin_usdt": float(margin_usdt),
         "leverage": float(leverage),
         "notional_usdt": float(notional_usdt),
@@ -1255,6 +1265,7 @@ def run_backtest(
                     tp=float(res.tp_price),
                     hist_end_ms=hist_end_sym,
                     bar_step_ms=bar_step_ms,
+                    play=res.play,
                 )
                 notion = float(res.paper_notional_usdt or z.VIRTUAL_NOTIONAL_USDT)
                 eb_ms = int(res.entry_bar_open_ms)

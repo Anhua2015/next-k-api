@@ -50,8 +50,11 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
   同标的「持仓中」保护：若已有未平仓 LONG/SHORT（与看板一致），默认**跳过**入库以免洗掉 SL/TP。
                         **例外**：与持仓**方向相反**时先按扫描价纸面平仓（supersede）再写入快照。
                         观望(FLAT)是否也平仓：见代码常量 SCAN_SUPERSEDE_ON_FLAT（默认 False=仅反向平仓，FLAT 保留仓至 resolve）。
-  ZCT_MAX_OPEN_POSITIONS  全账户未平仓方向单上限（与看板「持仓中」计数一致），默认 **6**；已达上限时**不再新开其它标的**；
+  ZCT_MAX_OPEN_POSITIONS  全账户未平仓方向单上限（与看板「持仓中」计数一致），默认 **8**；已达上限时**不再新开其它标的**；
                         **同标的**仍走反向 supersede / 同向跳过；设为 **0** 关闭上限。
+  ZCT_MAX_OPEN_PLAY02     全账户 PLAY02_* 未平仓上限，默认 **6**；0=不单独限制。
+  ZCT_RESOLVE_MAX_HOLD_HOURS_PLAY02  PLAY02 最长持仓（小时，仅 resolve），默认 **4**；0=与全局 8h 相同。
+  ZCT_RESOLVE_MAX_HOLD_MS_PLAY02     可选，毫秒覆盖上一项小时配置。
   TG_BOT_TOKEN / TG_CHAT_ID  与 accumulation 雷达相同；配置后即推送 Telegram
   ZCT_VWAP_TG_PUSH_MODE  扫描推送：summary（默认，每轮一条简报）| actionable（仅当有方向+SL/TP）
                         | all（每轮全文明细）| off（不推扫描，平仓推送仍受 NOTIFY_RESOLVE 控制）
@@ -62,7 +65,7 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
   ZCT_GRIND_MAX_NET_MOVE_PCT / ZCT_LEVEL_TOUCH_LOOKBACK_BARS / ZCT_LEVEL_FRESH_MIN_BARS /
   ZCT_LEVEL_RECYCLE_TOUCH_MIN  用于 nearest_levels / fresh 判定（触碰≥此值标 recycled）；**分类决策**见下「近端 recycled 否决」
   ZCT_LEVEL_FRESH_MIN_HOURS  与 Koroush S/R「约 6–8h 未触碰」对齐：>0 时 fresh 判定优先用墙上时钟（小时），0=仅用根数 ZCT_LEVEL_FRESH_MIN_BARS
-  ZCT_RECYCLED_NEAR_VETO_ENABLED  默认 **0（关）**；设为 **1|true|yes|on** 开启（只要不是 `0|false|no|off|disabled` 即视为开）：上方/下方最近结构位（pdh/h4/h1/m15 高或低）距现价 ≤ `ZCT_RECYCLED_NEAR_MAX_DIST_PCT` 且新鲜度为 **recycled** 时，否决 **PLAY01_BREAKOUT_LONG** / **PLAY02_BREAKDOWN_SHORT**
+  ZCT_RECYCLED_NEAR_VETO_ENABLED  默认 **1（开）**；设为 **0|false|off** 关闭：上方/下方最近结构位距现价 ≤ `ZCT_RECYCLED_NEAR_MAX_DIST_PCT` 且新鲜度为 **recycled** 时，否决 **PLAY01_BREAKOUT_LONG** / **PLAY02_BREAKDOWN_SHORT**
   ZCT_RECYCLED_NEAR_MAX_DIST_PCT  否决用距离上限（占现价 **%**），默认 **0.2**；≤0 时回退为 0.2
   ZCT_PLAY03_TP_MODE  PLAY03 止盈：vwap（默认，回锚）| 1r（与 My Reversal Lesson4 一致：与 SL 等距 1:1）
   ZCT_KOROUSH_MIN_STOP_DISTANCE_PCT  止损距进场最小占价比（默认 **0.01=1%**）；不足时扩大摆动窗寻更远极值（Koroush SL）；设为 **0** 关闭扩止损（仅保留 ZCT_MIN_SL_PCT）
@@ -435,8 +438,8 @@ try:
 except ValueError:
     BREAKOUT_MAX_MA_CROSSES = 0
 
-# --- ZCT S/R：近端 recycled 结构位否决顺势 PLAY01/02（默认关）---
-_RECYCLED_VETO_RAW = os.getenv("ZCT_RECYCLED_NEAR_VETO_ENABLED", "0").strip().lower()
+# --- ZCT S/R：近端 recycled 结构位否决顺势 PLAY01/02（默认开）---
+_RECYCLED_VETO_RAW = os.getenv("ZCT_RECYCLED_NEAR_VETO_ENABLED", "1").strip().lower()
 RECYCLED_NEAR_VETO_ENABLED = _RECYCLED_VETO_RAW not in (
     "0",
     "false",
@@ -475,9 +478,13 @@ USE_RISK_SIZED_NOTIONAL = os.getenv("ZCT_USE_RISK_SIZED_NOTIONAL", "").strip().l
 MAX_NOTIONAL_CAP_USDT = float(os.getenv("ZCT_MAX_NOTIONAL_CAP_USDT", "0") or 0)
 MAX_DAILY_LOSS_PCT = float(os.getenv("ZCT_MAX_DAILY_LOSS_PCT", "0.05"))
 try:
-    MAX_OPEN_POSITIONS = max(0, int(os.getenv("ZCT_MAX_OPEN_POSITIONS", "6").strip() or "6"))
+    MAX_OPEN_POSITIONS = max(0, int(os.getenv("ZCT_MAX_OPEN_POSITIONS", "8").strip() or "8"))
 except ValueError:
-    MAX_OPEN_POSITIONS = 6
+    MAX_OPEN_POSITIONS = 8
+try:
+    MAX_OPEN_PLAY02 = max(0, int(os.getenv("ZCT_MAX_OPEN_PLAY02", "6").strip() or "6"))
+except ValueError:
+    MAX_OPEN_PLAY02 = 6
 
 # --- P2：平仓后冷却（毫秒，代码常量；非环境变量）+ 极端带宽跳过 ---
 COOLDOWN_AFTER_LOSS_MS = 30 * 60 * 1000  # 止损后
@@ -511,6 +518,49 @@ try:
         RESOLVE_MAX_HOLD_MS = max(0, int(float(str(_RESOLVE_HOLD_RAW).strip())))
 except ValueError:
     RESOLVE_MAX_HOLD_MS = _DEFAULT_RESOLVE_MAX_HOLD_MS
+_DEFAULT_RESOLVE_HOLD_HOURS_PLAY02 = 4.0
+try:
+    _PLAY02_HOLD_H = float(
+        os.getenv("ZCT_RESOLVE_MAX_HOLD_HOURS_PLAY02", "4").strip() or "4"
+    )
+except ValueError:
+    _PLAY02_HOLD_H = _DEFAULT_RESOLVE_HOLD_HOURS_PLAY02
+_PLAY02_MS_RAW = os.getenv("ZCT_RESOLVE_MAX_HOLD_MS_PLAY02", "").strip()
+if _PLAY02_MS_RAW:
+    try:
+        RESOLVE_MAX_HOLD_MS_PLAY02 = max(0, int(float(_PLAY02_MS_RAW)))
+    except ValueError:
+        RESOLVE_MAX_HOLD_MS_PLAY02 = int(_DEFAULT_RESOLVE_HOLD_HOURS_PLAY02 * 3_600_000)
+elif _PLAY02_HOLD_H <= 0:
+    RESOLVE_MAX_HOLD_MS_PLAY02 = 0
+else:
+    RESOLVE_MAX_HOLD_MS_PLAY02 = int(_PLAY02_HOLD_H * 3_600_000)
+if RESOLVE_MAX_HOLD_MS_PLAY02 > 0:
+    RESOLVE_MAX_BARS_PLAY02 = max(1, int(round(RESOLVE_MAX_HOLD_MS_PLAY02 / 60_000.0)))
+else:
+    RESOLVE_MAX_BARS_PLAY02 = 0
+
+
+def _play_uses_short_resolve_hold(play: Optional[str]) -> bool:
+    if not play:
+        return False
+    return str(play).strip().upper().startswith("PLAY02_")
+
+
+def resolve_max_hold_ms(play: Optional[str] = None) -> int:
+    """未平仓最长墙上时钟（毫秒）；PLAY02 默认 4h，其它 play 用全局 RESOLVE_MAX_HOLD_MS。"""
+    if _play_uses_short_resolve_hold(play) and RESOLVE_MAX_HOLD_MS_PLAY02 > 0:
+        return int(RESOLVE_MAX_HOLD_MS_PLAY02)
+    return int(RESOLVE_MAX_HOLD_MS)
+
+
+def resolve_max_bars(play: Optional[str] = None) -> int:
+    """未触轨根数上限（1m 根数）；与 resolve_max_hold_ms 同源配置。"""
+    if _play_uses_short_resolve_hold(play) and RESOLVE_MAX_BARS_PLAY02 > 0:
+        return int(RESOLVE_MAX_BARS_PLAY02)
+    return int(RESOLVE_MAX_BARS)
+
+
 # 结算循环里「上一标的 → 下一标的」之间的休眠（秒），减轻 /fapi/v1/klines 频率；0=不休眠
 RESOLVE_INTER_SYMBOL_SLEEP_SEC = float(
     os.getenv("ZCT_RESOLVE_INTER_SYMBOL_SLEEP_SEC", "0") or 0
@@ -2123,6 +2173,32 @@ def analyze_symbol(
                 entry_bar_open_ms=None,
                 paper_notional_usdt=None,
             )
+    if res.side in ("LONG", "SHORT") and MAX_OPEN_PLAY02 > 0:
+        from accumulation_radar import init_db
+
+        _p2_conn = init_db()
+        try:
+            p2_block = _open_play02_cap_blocks_new_symbol(
+                _p2_conn.cursor(), symbol, res.play
+            )
+        finally:
+            _p2_conn.close()
+        if p2_block:
+            res = replace(
+                res,
+                side="FLAT",
+                play="NO_TRADE",
+                confidence="low",
+                reasons=res.reasons
+                + [
+                    f"P2 PLAY02 上限：未平仓 PLAY02 已达 {MAX_OPEN_PLAY02} 笔，跳过新开"
+                ],
+                sl_price=None,
+                tp_price=None,
+                r_unit=None,
+                entry_bar_open_ms=None,
+                paper_notional_usdt=None,
+            )
     if halt_daily_circuit and res.side in ("LONG", "SHORT"):
         res = replace(
             res,
@@ -2296,6 +2372,29 @@ def _open_position_cap_blocks_new_symbol(cur, symbol: str) -> bool:
     return _count_open_positions(cur) >= MAX_OPEN_POSITIONS
 
 
+def _count_open_play02(cur) -> int:
+    cur.execute(
+        f"""
+        SELECT COUNT(*) FROM {ZCT_DB_SIGNALS_TABLE}
+        WHERE outcome IS NULL
+          AND sl_price IS NOT NULL
+          AND side IN ('LONG', 'SHORT')
+          AND play LIKE 'PLAY02%'
+        """
+    )
+    row = cur.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _open_play02_cap_blocks_new_symbol(cur, symbol: str, play: Optional[str]) -> bool:
+    """PLAY02 未平仓数达上限时禁止其它标的新开 PLAY02（同标的走 supersede/跳过）。"""
+    if MAX_OPEN_PLAY02 <= 0 or not _play_uses_short_resolve_hold(play):
+        return False
+    if _symbol_has_open_position(cur, symbol):
+        return False
+    return _count_open_play02(cur) >= MAX_OPEN_PLAY02
+
+
 def _scan_supersedes_open_hold(db_side: str, r: SignalResult) -> bool:
     """是否应用扫描价 supersede：反向一定触发；FLAT 仅当 SCAN_SUPERSEDE_ON_FLAT 为 True。"""
     if r.side in ("LONG", "SHORT") and db_side in ("LONG", "SHORT"):
@@ -2372,10 +2471,12 @@ def _persist_results_db(
         cur = conn.cursor()
         open_syms = _fetch_symbols_with_open_positions(cur)
         open_position_count = _count_open_positions(cur)
+        open_play02_count = _count_open_play02(cur)
         params_json = json.dumps(scan_params, ensure_ascii=False)
         written = 0
         skipped_open = 0
         skipped_open_cap = 0
+        skipped_play02_cap = 0
         sig_tbl = ZCT_DB_SIGNALS_TABLE
         upsert = f"""
             INSERT INTO {sig_tbl} (
@@ -2496,6 +2597,20 @@ def _persist_results_db(
                     f"{MAX_OPEN_POSITIONS}，不再新开仓（同标的反向 supersede 不受限）"
                 )
                 continue
+            if (
+                _is_open_hold_row(r)
+                and not superseded
+                and not had_hold
+                and MAX_OPEN_PLAY02 > 0
+                and _play_uses_short_resolve_hold(r.play)
+                and open_play02_count >= MAX_OPEN_PLAY02
+            ):
+                skipped_play02_cap += 1
+                print(
+                    f"[db] skip {r.symbol}: PLAY02 未平仓已达 {open_play02_count}>="
+                    f"{MAX_OPEN_PLAY02}，不再新开 PLAY02"
+                )
+                continue
             if DB_SKIP_FLAT and r.side == "FLAT":
                 cur.execute(
                     f"DELETE FROM {ZCT_DB_SIGNALS_TABLE} WHERE symbol = ?",
@@ -2547,11 +2662,15 @@ def _persist_results_db(
                 open_syms.add(r.symbol)
                 if not had_hold:
                     open_position_count += 1
+                    if _play_uses_short_resolve_hold(r.play):
+                        open_play02_count += 1
         conn.commit()
         if skipped_open:
             print(f"[db] skipped_open_hold={skipped_open}")
         if skipped_open_cap:
             print(f"[db] skipped_open_position_cap={skipped_open_cap}")
+        if skipped_play02_cap:
+            print(f"[db] skipped_open_play02_cap={skipped_play02_cap}")
         return written, str(DB_PATH)
     finally:
         conn.close()
@@ -2627,7 +2746,7 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
     返回 stats + resolved_events（供 Telegram 平仓推送）。
 
     当前实现：每个待结算标的各请求一次 REST /fapi/v1/klines；间隔休眠见 RESOLVE_INTER_SYMBOL_SLEEP_SEC。
-    过期：优先按墙上时钟（从 entry_bar_open_ms 起 RESOLVE_MAX_HOLD_MS），再辅以根数上限 RESOLVE_MAX_BARS（未单独设环境变量时二者同源：默认 _DEFAULT_RESOLVE_HOLD_HOURS 小时 @1m）。
+    过期：优先按墙上时钟（PLAY02 默认 4h，其它 play 默认 8h），再辅以根数上限（与对应 hold 同源 @1m）。见 resolve_max_hold_ms / resolve_max_bars。
     若将来需要更高频判定且权重吃紧，可在进程内维护 K 线 WebSocket，REST 仅作补偿。
     """
     from accumulation_radar import DB_PATH, init_db
@@ -2686,9 +2805,9 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
             exit_px: float = entry
             note = "resolved:auto"
             bars_seen = 0
-            deadline_ms = (
-                int(bar_open) + RESOLVE_MAX_HOLD_MS if RESOLVE_MAX_HOLD_MS > 0 else None
-            )
+            hold_ms = resolve_max_hold_ms(play)
+            max_bars_eff = resolve_max_bars(play)
+            deadline_ms = int(bar_open) + hold_ms if hold_ms > 0 else None
             for k in kl:
                 if int(k[0]) < start_ms:
                     continue
@@ -2710,12 +2829,16 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
                 if deadline_ms is not None and bo >= deadline_ms:
                     outcome = "expired"
                     exit_px = c
-                    note = "resolved:auto_expired_wall_clock"
+                    note = (
+                        "resolved:auto_expired_wall_clock_play02"
+                        if _play_uses_short_resolve_hold(play)
+                        else "resolved:auto_expired_wall_clock"
+                    )
                     break
-                if bars_seen >= RESOLVE_MAX_BARS:
+                if max_bars_eff > 0 and bars_seen >= max_bars_eff:
                     outcome = "expired"
                     exit_px = c
-                    note = f"resolved:auto_expired_after_{RESOLVE_MAX_BARS}_bars"
+                    note = f"resolved:auto_expired_after_{max_bars_eff}_bars"
                     break
             if outcome is None:
                 stats["skipped"] += 1
@@ -2954,6 +3077,11 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
         "min_sl_pct": MIN_SL_PCT,
         "resolve_max_bars": RESOLVE_MAX_BARS,
         "resolve_max_hold_ms": RESOLVE_MAX_HOLD_MS,
+        "resolve_max_hold_ms_play02": RESOLVE_MAX_HOLD_MS_PLAY02,
+        "resolve_max_bars_play02": RESOLVE_MAX_BARS_PLAY02,
+        "recycled_near_veto_enabled": RECYCLED_NEAR_VETO_ENABLED,
+        "recycled_near_max_dist_pct": RECYCLED_NEAR_MAX_DIST_PCT,
+        "max_open_play02": MAX_OPEN_PLAY02,
         "same_bar_rule": SAME_BAR_RULE,
         "zct_margin_usdt": _ZCT_MARGIN_USDT,
         "zct_leverage": ZCT_LEVERAGE,
