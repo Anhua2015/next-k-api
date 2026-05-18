@@ -152,6 +152,25 @@ def touch_pool_prune_signals_for_current_pool(conn: sqlite3.Connection) -> int:
     return touch_pool_prune_signals_vs_allowlist(conn, touch_pool_list_symbols(conn))
 
 
+def touch_pool_remove_symbols(conn: sqlite3.Connection, symbols: List[str]) -> int:
+    """从触轨池删除指定标的（日内淘汰）；不删 signals 行。单事务 commit。"""
+    syms = sorted({str(s).strip().upper() for s in symbols if str(s).strip()})
+    if not syms:
+        return 0
+    pt = _pool_table()
+    cur = conn.cursor()
+    cur.execute("BEGIN IMMEDIATE")
+    try:
+        ph = ",".join("?" * len(syms))
+        cur.execute(f"DELETE FROM {pt} WHERE symbol IN ({ph})", syms)
+        n = int(cur.rowcount or 0)
+        conn.commit()
+        return n
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def touch_pool_write_db(conn: sqlite3.Connection, out: Dict[str, Any]) -> int:
     """
     先清空 `zct_vwap_touch_pool` 全表，再写入本轮 matched；最后追加一条 runs 审计。

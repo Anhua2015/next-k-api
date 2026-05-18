@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """
-ZCT VWAP 触轨资产池：walk-forward 近 N 天（默认 1.5 天 ≈ 36 小时）→ 按触轨胜率与 win+loss 筛选。
+ZCT VWAP 触轨资产池：walk-forward（默认近 24h）→ 按触轨胜率、扣摩擦 PF 等筛选。
 
 口径（与 `zct_vwap_walkforward_backtest` 的 `per_symbol` 一致）：
 - **触轨胜率** = 整个 walk 窗口内 win / (win + loss)，即 `win_rate_touch_sl_tp`（不按 UTC 日历日拆分）
 - **触轨样本** = win + loss
 
-默认：**触轨胜率 >= 72%（稳档）**、**win+loss >= 1**、**win+loss >= 20**、**(win+loss)/n_trades >= 35%**、**n_trades >= 30**、**过期占比 expired/n_trades < 40%（稳档）**。  
-候选宇宙（生产默认）：**值得关注七类 worth_watch_* ∪ 内置默认永续（`_DEFAULT_ZCT_SYMBOLS`，当前 33 个）**；`--worth-watch-plus-default-22` 中 **22 为历史 CLI 名**。旧 **hot_oi ∪ 内置** 仍可用 `--hot-oi-plus-default-22`。
+**每日主筛（Phase 1，默认）**：上海 **08:05** 跑 **严格 24h** walk-forward（`days=1`），入库须同时满足：
+
+- **n_trades >= 20**（1m 活跃度）
+- **触轨胜率 >= 72%**（win/(win+loss)）
+- **profit_factor > 1.25**（扣双边 Taker 4bps + 滑点 1.5bps 后）
+- **周期末连续亏损 < 3**（`consecutive_losses_at_end`）
+
+可选稳档附加：`max_expired_ratio`、`min_touch_share`（默认主筛关闭，见 CLI）。
+
+候选宇宙（生产默认）：**值得关注七类 worth_watch_* ∪ 内置默认永续**。
+
+**日内淘汰（Phase 2）**：见 `zct_touch_pool_intraday_prune.py`（每 4h，池内标的连续 3 笔实盘止损则 DELETE）。
 
 用法：
   cd next-k-api
-  python zct_vwap_asset_pool.py --days 1.5 --zct-default-22
-  python zct_vwap_asset_pool.py --days 1.5 --hot-oi-plus-default-22
+  python zct_vwap_asset_pool.py --days 1 --worth-watch-plus-default-22
+  python zct_vwap_asset_pool.py --days 1 --hot-oi-plus-default-22
 
 定时 + 写入 accumulation.db 见 **`zct_vwap_asset_pool_daily_job.py`**（`--once` / `--daemon`）。
 """
@@ -23,11 +33,18 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from zct_touch_pool_metrics import (
+    enrich_per_symbol_stats,
+    friction_bps_per_side,
+    slippage_bps_per_side,
+    taker_bps_per_side,
+)
 from zct_vwap_walkforward_backtest import (
     _default_symbol_list,
     run_backtest,
@@ -140,6 +157,18 @@ def _format_pool_scan_aggregate_lines(
     )
 
 
+def _profit_factor_value(row: Dict[str, Any]) -> float:
+    raw = row.get("profit_factor_net")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    if row.get("profit_factor_net_display") == "inf":
+        return float("inf")
+    return 0.0
+
+
 def _filter_pool(
     summary: Dict[str, Any],
     *,
@@ -151,6 +180,8 @@ def _filter_pool(
     max_expired_ratio: float,
     min_win_loss_abs: int = 20,
     min_touch_share: float = 0.35,
+    min_profit_factor: float = 1.25,
+    max_consecutive_losses_at_end: int = 2,
 ) -> Dict[str, Any]:
     per = summary.get("per_symbol") or {}
     matched: List[Dict[str, Any]] = []
@@ -188,6 +219,11 @@ def _filter_pool(
         else:
             ok_share = n_tr > 0 and (float(touch) / float(n_tr)) >= share_min
 
+        pf_f = _profit_factor_value(row)
+        ok_pf = pf_f > float(min_profit_factor)
+        consec = int(row.get("consecutive_losses_at_end") or 0)
+        ok_consec = consec <= int(max_consecutive_losses_at_end)
+
         rec: Dict[str, Any] = {
             "symbol": su,
             "win": w,
@@ -198,8 +234,22 @@ def _filter_pool(
             "expired_ratio": round(exp_ratio, 6) if n_tr > 0 else None,
             "unresolved": int(row.get("unresolved", 0) or 0),
             "win_rate_touch_sl_tp": wr_f,
+            "profit_factor_net": row.get("profit_factor_net"),
+            "profit_factor_net_display": row.get("profit_factor_net_display"),
+            "consecutive_losses_at_end": consec,
+            "gross_profit_net_usdt": row.get("gross_profit_net_usdt"),
+            "gross_loss_net_usdt": row.get("gross_loss_net_usdt"),
         }
-        if ok_touch and ok_wr and ok_nt and ok_exp and ok_wl_abs and ok_share:
+        if (
+            ok_touch
+            and ok_wr
+            and ok_nt
+            and ok_exp
+            and ok_wl_abs
+            and ok_share
+            and ok_pf
+            and ok_consec
+        ):
             matched.append(rec)
         else:
             rec["reject_reason"] = []
@@ -226,17 +276,43 @@ def _filter_pool(
                 rec["reject_reason"].append("touch_trades_below_min")
             if not ok_share and share_min > 0.0:
                 rec["reject_reason"].append("touch_share_below_min")
+            if not ok_pf:
+                rec["reject_reason"].append("profit_factor_below_threshold")
+            if not ok_consec:
+                rec["reject_reason"].append("consecutive_losses_at_end_too_high")
             rejected.append(rec)
 
     matched.sort(
-        key=lambda r: (-(r["win_rate_touch_sl_tp"] or 0.0), -r["win_plus_loss"])
+        key=lambda r: (
+            -(r["win_rate_touch_sl_tp"] or 0.0),
+            -(_profit_factor_value(r) if _profit_factor_value(r) != float("inf") else 999.0),
+            -r["win_plus_loss"],
+        )
     )
     return {"matched": matched, "rejected": rejected}
 
 
+def notify_touch_pool_empty_if_needed(matched_count: int, *, criteria: Dict[str, Any]) -> None:
+    """主筛零入选时 TG 观望播报（不抛异常）。"""
+    if matched_count > 0:
+        return
+    off = os.getenv("ZCT_TOUCH_POOL_EMPTY_TG", "1").strip().lower()
+    if off in ("0", "false", "no", "off"):
+        return
+    try:
+        wr = criteria.get("min_touch_win_rate", 0.72)
+        msg = (
+            "【ZCT 触轨池】今日无标的满足主筛条件，系统进入观望模式。\n"
+            f"条件：24h 回测 | 触轨胜率>={wr:.0%} | PF>1.25(扣摩擦) | 末段连亏<3 | n_trades>=20"
+        )
+        z.send_telegram(msg)
+    except Exception as e:
+        print(f"[pool] empty-pool TG notify failed: {e}", flush=True)
+
+
 def run_asset_pool_scan(
     *,
-    days: float = 1.5,
+    days: float = 1.0,
     symbols: List[str],
     ignore_db_cooldown: bool = True,
     sleep_between_symbols: float = 0.0,
@@ -245,10 +321,12 @@ def run_asset_pool_scan(
     strict_greater_touch: bool = False,
     min_touch_win_rate: float = 0.72,
     strict_greater_rate: bool = False,
-    min_total_trades: int = 30,
-    max_expired_ratio: float = 0.4,
-    min_win_loss_abs: int = 20,
-    min_touch_share: float = 0.35,
+    min_total_trades: int = 20,
+    max_expired_ratio: float = 1.0,
+    min_win_loss_abs: int = 0,
+    min_touch_share: float = 0.0,
+    min_profit_factor: float = 1.25,
+    max_consecutive_losses_at_end: int = 2,
     quiet: bool = True,
     symbols_source: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -266,6 +344,14 @@ def run_asset_pool_scan(
             emit_text_report=False,
         )
 
+    trades = list(summary.get("trades") or [])
+    per = dict(summary.get("per_symbol") or {})
+    summary["per_symbol"] = enrich_per_symbol_stats(
+        per,
+        trades,
+        default_notional=float(z.VIRTUAL_NOTIONAL_USDT),
+    )
+
     touch_rows = _window_touch_rows(summary, symbols)
     print(_format_window_touch_line(touch_rows, float(days)), flush=True)
     filt = _filter_pool(
@@ -278,6 +364,8 @@ def run_asset_pool_scan(
         max_expired_ratio=float(max_expired_ratio),
         min_win_loss_abs=int(min_win_loss_abs),
         min_touch_share=float(min_touch_share),
+        min_profit_factor=float(min_profit_factor),
+        max_consecutive_losses_at_end=int(max_consecutive_losses_at_end),
     )
     print(
         _format_pool_scan_aggregate_lines(summary, touch_rows, filt["matched"]),
@@ -307,6 +395,17 @@ def run_asset_pool_scan(
             if float(min_touch_share) <= 0.0
             else f"(win+loss)/n_trades >= {float(min_touch_share)}"
         ),
+        "min_profit_factor_exclusive": float(min_profit_factor),
+        "profit_factor_rule": f"PF_after_friction > {float(min_profit_factor)}",
+        "friction_taker_bps_per_side": taker_bps_per_side(),
+        "friction_slippage_bps_per_side": slippage_bps_per_side(),
+        "friction_round_trip_bps": friction_bps_per_side() * 2.0,
+        "friction_note": "PF = sum(net_win) / sum(|net_loss|); net = raw_pnl - notional×2×(taker+slip)/1e4",
+        "play03_tp_mode": os.getenv("ZCT_PLAY03_TP_MODE", "vwap").strip().lower(),
+        "tp_mode_note": "PLAY01/02=1R；PLAY03 默认 vwap（ZCT_PLAY03_TP_MODE）",
+        "max_consecutive_losses_at_end": int(max_consecutive_losses_at_end),
+        "consecutive_losses_rule": f"end_streak <= {int(max_consecutive_losses_at_end)} (<3)",
+        "scan_phase": "daily_master",
     }
     if symbols_source:
         crit["symbols_source"] = str(symbols_source)
@@ -330,7 +429,7 @@ def run_asset_pool_scan(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="ZCT VWAP 触轨资产池筛选")
-    ap.add_argument("--days", type=float, default=1.5)
+    ap.add_argument("--days", type=float, default=1.0, help="回测窗口天数；主筛默认 1=严格 24h")
     ap.add_argument("--symbols", type=str, default="")
     ap.add_argument("--zct-default-22", action="store_true")
     ap.add_argument(
@@ -353,26 +452,38 @@ def main() -> None:
     ap.add_argument(
         "--min-total-trades",
         type=int,
-        default=30,
-        help="walk 窗口内该标的总回测笔数 n_trades 须 **≥** 本值（默认 30）",
+        default=20,
+        help="walk 窗口内 n_trades 须 ≥ 本值（主筛默认 20）",
     )
     ap.add_argument(
         "--max-expired-ratio",
         type=float,
-        default=0.4,
-        help="过期占比 expired/n_trades 须 **严格小于** 本值（稳档默认 0.4 即 <40%%）",
+        default=1.0,
+        help="expired/n_trades 须 < 本值（主筛默认 1=关闭；稳档可设 0.4）",
     )
     ap.add_argument(
         "--min-win-loss-abs",
         type=int,
-        default=20,
-        help="触轨绝对样本 win+loss 须 ≥ 本值（默认 20；0=关闭）",
+        default=0,
+        help="win+loss 须 ≥ 本值（0=关闭）",
     )
     ap.add_argument(
         "--min-touch-share",
         type=float,
-        default=0.35,
-        help="触轨占比 (win+loss)/n_trades 须 ≥ 本值（默认 0.35；0=关闭）",
+        default=0.0,
+        help="(win+loss)/n_trades 须 ≥ 本值（0=关闭）",
+    )
+    ap.add_argument(
+        "--min-profit-factor",
+        type=float,
+        default=1.25,
+        help="扣摩擦后 profit factor 须严格大于该值",
+    )
+    ap.add_argument(
+        "--max-consecutive-losses-at-end",
+        type=int,
+        default=2,
+        help="周期末连续亏损笔数上限（默认 2 即 <3）",
     )
     ap.add_argument("--signal-interval", type=str, default="1m", choices=["1m", "5m"])
     ap.add_argument(
@@ -447,8 +558,14 @@ def main() -> None:
         max_expired_ratio=float(args.max_expired_ratio),
         min_win_loss_abs=int(args.min_win_loss_abs),
         min_touch_share=float(args.min_touch_share),
+        min_profit_factor=float(args.min_profit_factor),
+        max_consecutive_losses_at_end=int(args.max_consecutive_losses_at_end),
         quiet=True,
         symbols_source=sym_src,
+    )
+    notify_touch_pool_empty_if_needed(
+        len(out.get("matched_symbols") or []),
+        criteria=out.get("criteria") or {},
     )
 
     if args.write_db:

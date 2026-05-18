@@ -68,7 +68,7 @@ ZCT 风格 VWAP + 关键位 量化信号扫描（币安 U 本位永续）
   ZCT_LEVEL_FRESH_MIN_HOURS  与 Koroush S/R「约 6–8h 未触碰」对齐：>0 时 fresh 判定优先用墙上时钟（小时），0=仅用根数 ZCT_LEVEL_FRESH_MIN_BARS
   ZCT_RECYCLED_NEAR_VETO_ENABLED  默认 **1（开）**；设为 **0|false|off** 关闭：上方/下方最近结构位距现价 ≤ `ZCT_RECYCLED_NEAR_MAX_DIST_PCT` 且新鲜度为 **recycled** 时，否决 **PLAY01_BREAKOUT_LONG** / **PLAY02_BREAKDOWN_SHORT**
   ZCT_RECYCLED_NEAR_MAX_DIST_PCT  否决用距离上限（占现价 **%**），默认 **0.2**；≤0 时回退为 0.2
-  ZCT_PLAY03_TP_MODE  PLAY03 止盈：vwap（默认，回锚）| 1r（与 My Reversal Lesson4 一致：与 SL 等距 1:1）
+  ZCT_PLAY03_TP_MODE  PLAY03 止盈：vwap（默认，回锚）| 1r（与 SL 等距 1:1）
   ZCT_KOROUSH_MIN_STOP_DISTANCE_PCT  止损距进场最小占价比（默认 **0.01=1%**）；不足时扩大摆动窗寻更远极值（Koroush SL）；设为 **0** 关闭扩止损（仅保留 ZCT_MIN_SL_PCT）
   ZCT_PSYCH_LEVELS  设为 1 时将大整数心理位并入 nearest_levels 距离排序（ZCT S/R 文 bonus）
   ZCT_BREAKOUT_MAX_MA_CROSSES  顺势突破/破位：近窗 MA30 交叉数超过则观望（0=关闭，对齐 Breakout 文「minimal crossovers」）
@@ -502,17 +502,18 @@ def _paper_notional_for_signal(res: SignalResult) -> float:
 
 def api_get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
     url = f"{FAPI}{endpoint}"
-    for attempt in range(3):
+    backoff = (0.8, 1.5, 3.0, 6.0, 12.0)
+    for attempt, delay in enumerate(backoff):
         try:
-            r = requests.get(url, params=params or {}, timeout=15)
+            r = requests.get(url, params=params or {}, timeout=20)
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 429:
-                time.sleep(1.5)
-            else:
-                return None
+                time.sleep(delay)
+                continue
+            return None
         except Exception:
-            time.sleep(0.8)
+            time.sleep(delay)
     return None
 
 
