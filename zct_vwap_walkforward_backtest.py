@@ -5,11 +5,10 @@ ZCT VWAP 信号扫描器 — walk-forward 回测（不经 DB、不推 TG）。
 **与 `run_scan` / `analyze_symbol` 默认尽量一致**，仅以下两项在回测中**固定关闭**（不跟环境）：
 - **流动性 / OI**：恒关（不拉 `openInterestHist`），与当前扫描器默认 `LIQUIDITY_OI_FILTER_ENABLED=False` 一致；
   若你将来在环境打开 OI，本回测仍**强制**不关 OI（与「价量回测」一致）。
-- **BTC 宏观红绿灯**：回测全程将 `z.BTC_MACRO_FILTER_ENABLED=False`（恢复运行前原值），
-  不先跑 BTC 刷新状态、标的顺序也不按「宏观开启」重排。
+- **BTC 宏观红绿灯**：回测通过 `StrategyConfig.for_backtest(btc_macro_filter_enabled=False)` 注入，**不再** monkey-patch 模块全局变量。
 
 **与实盘扫描的差异（回测默认）**：
-- **冷却**：**默认不读** `zct_symbol_cooldown`（`z._cooldown_blocks` 恒为假），避免历史 walk-forward 依赖「当前 DB 里的冷却行」；与实盘完全一致时请加 **`--use-db-cooldown`**。`--ignore-db-cooldown` 仍保留，与默认等价，勿与 `--use-db-cooldown` 同开。
+- **冷却**：**默认不读** `zct_symbol_cooldown`（`StrategyConfig.use_db_cooldown=False`）；与实盘一致时加 **`--use-db-cooldown`**。`--ignore-db-cooldown` 仍保留，与默认等价，勿与 `--use-db-cooldown` 同开。
 - **日损熔断**：walk-forward / portfolio 回测**不启用**（`halt_daily_circuit` 恒为 `False`），不重放「运行当日 UTC 结算触发的 P1 熔断」对历史逐根 classify 的影响；与 `run_scan` 实盘路径不同。
 - **持仓上限 `ZCT_MAX_OPEN_POSITIONS`**：仅 `run_scan` → `analyze_symbol` / `_persist_results_db`；walk 用 `analyze_symbol_pit`，**不读 DB、不限制笔数**（触轨池筛选仍按全量 walk 统计）。
 
@@ -98,19 +97,20 @@ def analyze_symbol_pit(
     halt_daily_circuit: bool = False,
     spike_atr_pct: Optional[float] = None,
     spike_atr_from_memory: bool = False,
+    config: Optional[z.StrategyConfig] = None,
 ) -> Optional[z.SignalResult]:
     """
     对齐 `analyze_symbol` 在 classify 之后的闸门链；回测固定不拉 OI。
     不含实盘 `ZCT_MAX_OPEN_POSITIONS`（六单上限仅扫描入库路径）。
-    `halt_daily_circuit` 与 `run_scan` 传入 `analyze_symbol` 的语义一致。
-    `session_1m_raw`：UTC 当日起至 asof 的信号周期 K 线（与 `--signal-interval` 一致，列含 open_time/ts/OHLC）。
-    `spike_atr_pct`：由 `RefLevelResolver.atr_pct_at` 提供时，Play03 不再逐根 REST 拉 15m ATR。
+    `config` 默认 `StrategyConfig.for_backtest()`（BTC 宏观关、冷却由 CLI 控制）。
     """
+    c = config or z.StrategyConfig.for_backtest(
+        use_db_cooldown=False, btc_macro_filter_enabled=False
+    )
     sdf0 = session_1m_raw.copy()
     if sdf0.empty or len(sdf0) < 30:
         return None
-    sdf = z.compute_vwap_bands_session(sdf0, z.BAND_SIGMA)
-    # 回测不含 OI / 流动性分支（不拉 openInterestHist；与扫描器 analyze_symbol 的 liq 段 intentionally 省略）
+    sdf = z.compute_vwap_bands_session(sdf0, c.band_sigma)
     res = z.classify_and_signal(
         symbol,
         sdf,
@@ -118,144 +118,16 @@ def analyze_symbol_pit(
         spike_klines_end_ms=int(asof_open_ms),
         spike_atr_pct=spike_atr_pct,
         spike_atr_from_memory=spike_atr_from_memory,
+        config=c,
     )
-    entry_ms = int(sdf.iloc[-1]["open_time"])
-    sl, tp, ru = z.compute_sl_tp(res, sdf)
-    if res.side in ("LONG", "SHORT"):
-        res = replace(
-            res,
-            entry_bar_open_ms=entry_ms,
-            sl_price=sl,
-            tp_price=tp,
-            r_unit=ru,
-        )
-    else:
-        res = replace(
-            res,
-            entry_bar_open_ms=None,
-            sl_price=None,
-            tp_price=None,
-            r_unit=None,
-        )
-    if (
-        z.ENFORCE_SETUP_LEVEL
-        and res.side in ("LONG", "SHORT")
-        and res.setup_level < z.MIN_SETUP_LEVEL_FOR_SIDE
-    ):
-        res = replace(
-            res,
-            side="FLAT",
-            play="NO_TRADE",
-            confidence="low",
-            reasons=res.reasons
-            + [
-                f"已应用 ZCT_ENFORCE_SETUP_LEVEL：setup_level={res.setup_level} < {z.MIN_SETUP_LEVEL_FOR_SIDE}"
-                f"{'（海报 level 3+ 档）' if z.MIN_SETUP_LEVEL_FOR_SIDE >= 3 else ''}，方向单已抑制",
-            ],
-            sl_price=None,
-            tp_price=None,
-            r_unit=None,
-            entry_bar_open_ms=None,
-            paper_notional_usdt=None,
-        )
-    if (
-        res.side in ("LONG", "SHORT")
-        and z.MAX_BAND_WIDTH_PCT > 0
-        and res.band_width_pct > z.MAX_BAND_WIDTH_PCT
-    ):
-        res = replace(
-            res,
-            side="FLAT",
-            play="NO_TRADE",
-            confidence="low",
-            reasons=res.reasons
-            + [
-                f"P2 波动过滤：band_width_pct={res.band_width_pct:.4f} > MAX_BAND_WIDTH_PCT={z.MAX_BAND_WIDTH_PCT}",
-            ],
-            sl_price=None,
-            tp_price=None,
-            r_unit=None,
-            entry_bar_open_ms=None,
-            paper_notional_usdt=None,
-        )
-    if res.side in ("LONG", "SHORT") and z._cooldown_blocks(symbol):
-        res = replace(
-            res,
-            side="FLAT",
-            play="NO_TRADE",
-            confidence="low",
-            reasons=res.reasons
-            + ["P2 止损冷却：该标的仍在冷却窗口内，跳过新开方向单"],
-            sl_price=None,
-            tp_price=None,
-            r_unit=None,
-            entry_bar_open_ms=None,
-            paper_notional_usdt=None,
-        )
-    if halt_daily_circuit and res.side in ("LONG", "SHORT"):
-        res = replace(
-            res,
-            side="FLAT",
-            play="NO_TRADE",
-            confidence="low",
-            reasons=res.reasons
-            + [
-                f"P1 日损熔断：当日已实现盈亏已达 -{z.MAX_DAILY_LOSS_PCT:.1%}×权益 上限，暂停新开仓",
-            ],
-            sl_price=None,
-            tp_price=None,
-            r_unit=None,
-            entry_bar_open_ms=None,
-            paper_notional_usdt=None,
-        )
-    if z.BTC_MACRO_FILTER_ENABLED:
-        if symbol == "BTCUSDT":
-            z._BTC_MACRO_STATE["slope_bps"] = float(res.slope_bps or 0.0)
-            z._BTC_MACRO_STATE["chop"] = str(res.chop_score or "high") or "high"
-        elif res.side in ("LONG", "SHORT"):
-            ok, mreason = z.check_btc_macro_permission(
-                float(res.slope_bps or 0.0),
-                float(z._BTC_MACRO_STATE["slope_bps"]),
-                str(z._BTC_MACRO_STATE.get("chop") or "high"),
-                res.side,
-                slope_threshold=z.BTC_MACRO_SLOPE_THRESHOLD_BPS,
-                rs_min_ratio=z.BTC_MACRO_RS_MIN_RATIO,
-                long_fuse_slope_bps=z.BTC_MACRO_LONG_FUSE_SLOPE_BPS,
-            )
-            if not ok:
-                res = replace(
-                    res,
-                    side="FLAT",
-                    play="NO_TRADE",
-                    confidence="low",
-                    reasons=res.reasons + [mreason],
-                    sl_price=None,
-                    tp_price=None,
-                    r_unit=None,
-                    entry_bar_open_ms=None,
-                    paper_notional_usdt=None,
-                    suggested_limit_entry=None,
-                )
-    if res.side in ("LONG", "SHORT"):
-        lim_hint: Optional[float] = None
-        if res.play == "PLAY01_BREAKOUT_LONG" and len(sdf) >= 2:
-            lim_hint = float(sdf.iloc[-2]["vwap_upper"])
-        elif res.play == "PLAY02_BREAKDOWN_SHORT" and len(sdf) >= 2:
-            lim_hint = float(sdf.iloc[-2]["vwap_lower"])
-        new_reasons = list(res.reasons)
-        if lim_hint is not None:
-            new_reasons.append(
-                f"执行提示（Koroush Breakout）：第二根确认后可于参考轨挂限价回踩 ≈ {lim_hint:g}"
-            )
-        res = replace(
-            res,
-            paper_notional_usdt=z._paper_notional_for_signal(res),
-            suggested_limit_entry=lim_hint,
-            reasons=new_reasons,
-        )
-    else:
-        res = replace(res, paper_notional_usdt=None, suggested_limit_entry=None)
-    return res
+    return z.apply_post_classify_gates(
+        symbol,
+        res,
+        sdf,
+        config=c,
+        halt_daily_circuit=halt_daily_circuit,
+        apply_position_caps=False,
+    )
 
 
 def _default_symbol_list() -> List[str]:
@@ -854,13 +726,11 @@ def run_portfolio_backtest(
     time_stop_ms = int(float(force_flat_hours) * 3_600_000)
     notional_usdt = float(margin_usdt) * float(leverage)
 
-    _orig_btc_macro = z.BTC_MACRO_FILTER_ENABLED
-    _orig_cooldown = z._cooldown_blocks
+    bt_cfg = z.StrategyConfig.for_backtest(
+        use_db_cooldown=not ignore_db_cooldown,
+        btc_macro_filter_enabled=False,
+    )
     try:
-        z.BTC_MACRO_FILTER_ENABLED = False
-        if ignore_db_cooldown:
-            z._cooldown_blocks = lambda _sym: False  # type: ignore[method-assign]
-
         dfs: Dict[str, pd.DataFrame] = {}
         resolvers: Dict[str, z.RefLevelResolver] = {}
         syms = [s.strip().upper() for s in symbols if s.strip()]
@@ -946,6 +816,7 @@ def run_portfolio_backtest(
                     halt_daily_circuit=False,
                     spike_atr_pct=rr.atr_pct_at(t),
                     spike_atr_from_memory=True,
+                    config=bt_cfg,
                 )
                 if res is None:
                     continue
@@ -1123,8 +994,7 @@ def run_portfolio_backtest(
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return summary
     finally:
-        z.BTC_MACRO_FILTER_ENABLED = _orig_btc_macro
-        z._cooldown_blocks = _orig_cooldown  # type: ignore[method-assign]
+        pass
 
 
 def _utc_day_floor_ms(ms: int) -> int:
@@ -1156,13 +1026,11 @@ def run_backtest(
     resolve_max_bars_effective = _resolve_max_bars_effective(bar_step_ms)
     fetch_start_ms = _padded_1m_fetch_start_ms(start_ms, end_ms)
 
-    _orig_btc_macro = z.BTC_MACRO_FILTER_ENABLED
-    _orig_cooldown = z._cooldown_blocks
+    bt_cfg = z.StrategyConfig.for_backtest(
+        use_db_cooldown=not ignore_db_cooldown,
+        btc_macro_filter_enabled=False,
+    )
     try:
-        z.BTC_MACRO_FILTER_ENABLED = False
-        if ignore_db_cooldown:
-            z._cooldown_blocks = lambda _sym: False  # type: ignore[method-assign]
-
         dfs: Dict[str, pd.DataFrame] = {}
         resolvers: Dict[str, z.RefLevelResolver] = {}
         syms = [s.strip().upper() for s in symbols if s.strip()]
@@ -1174,8 +1042,8 @@ def run_backtest(
                 flush=True,
             )
             print(
-                "[bt] policy: liquidity_oi=off | btc_macro=forced_off (env was "
-                f"{_orig_btc_macro}) | cooldown_db="
+                "[bt] policy: liquidity_oi=off | btc_macro=forced_off (env default was "
+                f"{z.DEFAULT_STRATEGY_CONFIG.btc_macro_filter_enabled}) | cooldown_db="
                 f"{'off' if ignore_db_cooldown else 'on'} | daily_halt=off "
                 "(walk-forward: 不启用日损熔断)",
                 flush=True,
@@ -1235,6 +1103,7 @@ def run_backtest(
                     halt_daily_circuit=False,
                     spike_atr_pct=rr.atr_pct_at(t),
                     spike_atr_from_memory=True,
+                    config=bt_cfg,
                 )
 
                 if res is None:
@@ -1366,7 +1235,7 @@ def run_backtest(
             "backtest_assumptions": {
                 "liquidity_oi_filter": False,
                 "btc_macro_forced_off": True,
-                "btc_macro_env_before_run": _orig_btc_macro,
+                "btc_macro_env_before_run": z.DEFAULT_STRATEGY_CONFIG.btc_macro_filter_enabled,
                 "cooldown_uses_db": not ignore_db_cooldown,
                 "daily_loss_halt_per_run": False,
                 "daily_loss_halt_note": "walk-forward：不启用日损熔断（halt_daily_circuit 恒为 False）",
@@ -1510,8 +1379,7 @@ def run_backtest(
             )
         return summary
     finally:
-        z.BTC_MACRO_FILTER_ENABLED = _orig_btc_macro
-        z._cooldown_blocks = _orig_cooldown  # type: ignore[method-assign]
+        pass
 
 
 def main() -> None:

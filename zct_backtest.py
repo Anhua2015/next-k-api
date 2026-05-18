@@ -38,6 +38,7 @@ if _env_oi.is_file():
                 os.environ.setdefault(_k.strip(), _v.strip())
 
 from zct_vwap_signal_scanner import (  # noqa: E402
+    DEFAULT_STRATEGY_CONFIG,
     BAND_SIGMA,
     VIRTUAL_NOTIONAL_USDT,
     resolve_max_bars,
@@ -213,9 +214,9 @@ def run_backtest(
         sdf = compute_vwap_bands_session(sdf0, BAND_SIGMA)
         levels = resolver.levels(asof)
         res = classify_and_signal(
-            symbol, sdf, levels, spike_klines_end_ms=asof
+            symbol, sdf, levels, spike_klines_end_ms=asof, config=DEFAULT_STRATEGY_CONFIG
         )
-        sl, tp, _ru = compute_sl_tp(res, sdf)
+        sl, tp, _ru = compute_sl_tp(res, sdf, config=DEFAULT_STRATEGY_CONFIG)
         res = replace(res, sl_price=sl, tp_price=tp, r_unit=_ru, price=float(sdf.iloc[-1]["close"]))
 
         tr_done: Optional[SimTrade] = None

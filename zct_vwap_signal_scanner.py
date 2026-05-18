@@ -356,194 +356,10 @@ def _symbols_from_env() -> List[str]:
     return parts or [x.strip() for x in _DEFAULT_ZCT_SYMBOLS.split(",") if x.strip()]
 
 
-BAND_SIGMA = float(os.getenv("ZCT_VWAP_BAND_SIGMA", "1.0"))
-# 斜率：最近 VWAP_SLOPE_BARS 根 1m K 上 VWAP 变化（基点）
-VWAP_SLOPE_BARS = int(os.getenv("ZCT_VWAP_SLOPE_BARS", "20"))
-SLOPE_STEEP_BPS = float(os.getenv("ZCT_SLOPE_STEEP_BPS", "2.5"))   # >= 视为陡
-SLOPE_FLAT_BPS = float(os.getenv("ZCT_SLOPE_FLAT_BPS", "0.8"))    # <= 视为平
-# 带宽：相对本会话带宽序列的中位数
-WIDE_BAND_MULT = float(os.getenv("ZCT_WIDE_BAND_MULT", "1.15"))
-TIGHT_BAND_MULT = float(os.getenv("ZCT_TIGHT_BAND_MULT", "0.88"))
-# chop：会话内 VWAP 交叉次数
-CHOPPY_CROSS_MIN = int(os.getenv("ZCT_CHOPPY_CROSS_MIN", "7"))
-# MA30 交叉（近 MA_LOOKBACK 根）
-MA_PERIOD = int(os.getenv("ZCT_MA_PERIOD", "30"))
-MA_CHOPPY_CROSS_MIN = int(os.getenv("ZCT_MA_CHOPPY_CROSS_MIN", "10"))
-MA_LOOKBACK = int(os.getenv("ZCT_MA_LOOKBACK", "120"))
-# 触碰 σ 带判定：收盘距上下轨 within this fraction of band width
-BAND_TOUCH_FRAC = float(os.getenv("ZCT_BAND_TOUCH_FRAC", "0.35"))
-DB_SKIP_FLAT = os.getenv("ZCT_VWAP_DB_SKIP_FLAT", "").strip().lower() in ("1", "true", "yes", "on")
+from zct_strategy_config import StrategyConfig, export_strategy_module_aliases
 
-# --- BTC 大盘红绿灯（山寨逆势宏观熔断；判定逻辑见 check_btc_macro_permission）---
-_BTC_MACRO_RAW = os.getenv("ZCT_BTC_MACRO_FILTER_ENABLED", "1").strip().lower()
-BTC_MACRO_FILTER_ENABLED = _BTC_MACRO_RAW not in ("0", "false", "no", "off", "disabled")
-BTC_MACRO_SLOPE_THRESHOLD_BPS = float(os.getenv("ZCT_BTC_MACRO_SLOPE_THRESHOLD_BPS", "3.0"))
-try:
-    BTC_MACRO_RS_MIN_RATIO = float(os.getenv("ZCT_BTC_MACRO_RS_MIN_RATIO", "0.5"))
-except ValueError:
-    BTC_MACRO_RS_MIN_RATIO = 0.5
-BTC_MACRO_RS_MIN_RATIO = max(0.0, BTC_MACRO_RS_MIN_RATIO)
-try:
-    BTC_MACRO_LONG_FUSE_SLOPE_BPS = float(os.getenv("ZCT_BTC_MACRO_LONG_FUSE_SLOPE_BPS", "8.0"))
-except ValueError:
-    BTC_MACRO_LONG_FUSE_SLOPE_BPS = 8.0
-_BTC_MACRO_STATE: Dict[str, Any] = {"slope_bps": 0.0, "chop": "high"}
-
-# --- A 级 PA 过滤（教程：收盘确认 / 量 / 刺穿速度 / 关键位新鲜度）---
-_STRICT_PA_RAW = os.getenv("ZCT_STRICT_PA_FILTERS", "1").strip().lower()
-STRICT_PA_FILTERS = _STRICT_PA_RAW not in ("0", "false", "no", "off", "disabled")
-VOL_MA_PERIOD = int(os.getenv("ZCT_VOL_MA_PERIOD", "10"))
-SPIKE_LOOKBACK = int(os.getenv("ZCT_SPIKE_LOOKBACK", "5"))
-# 近 SPIKE_LOOKBACK 根内 max((H-L)/mid) ≥ 阈值视为「刺穿」（Play03）；默认阈值由 15m ATR% 动态生成，失败时回退本固定比例
-SPIKE_RANGE_RATIO = float(os.getenv("ZCT_SPIKE_RANGE_RATIO", "0.004"))
-_SPIKE_ATR_USE_RAW = os.getenv("ZCT_SPIKE_USE_ATR_15M", "1").strip().lower()
-SPIKE_USE_ATR_15M = _SPIKE_ATR_USE_RAW not in ("0", "false", "no", "off", "disabled")
-SPIKE_ATR_INTERVAL = os.getenv("ZCT_SPIKE_ATR_INTERVAL", "15m").strip() or "15m"
-SPIKE_ATR_PERIOD = int(os.getenv("ZCT_SPIKE_ATR_PERIOD", "14"))
-SPIKE_ATR_MULT = float(os.getenv("ZCT_SPIKE_ATR_MULT", "1.25"))
-# 动态阈值 = clamp(mult * ATR/close, floor, cap)；低波动币不低于 floor，极端行情不超过 cap
-SPIKE_ATR_RATIO_FLOOR = float(os.getenv("ZCT_SPIKE_ATR_RATIO_FLOOR", "0.0009"))
-SPIKE_ATR_RATIO_CAP = float(os.getenv("ZCT_SPIKE_ATR_RATIO_CAP", "0.025"))
-SPIKE_ATR_KLINE_LIMIT = int(os.getenv("ZCT_SPIKE_ATR_KLINE_LIMIT", "64"))
-GRIND_LOOKBACK = int(os.getenv("ZCT_GRIND_LOOKBACK", "6"))
-# 顺势突破：近 GRIND_LOOKBACK 根净位移占价比上限（「慢磨台阶」）
-GRIND_MAX_NET_MOVE_PCT = float(os.getenv("ZCT_GRIND_MAX_NET_MOVE_PCT", "0.0035"))
-LEVEL_TOUCH_LOOKBACK_BARS = int(os.getenv("ZCT_LEVEL_TOUCH_LOOKBACK_BARS", "480"))  # ~8h 1m
-LEVEL_FRESH_MIN_BARS = int(os.getenv("ZCT_LEVEL_FRESH_MIN_BARS", "360"))  # ~6h 未再测
-LEVEL_RECYCLE_TOUCH_MIN = int(os.getenv("ZCT_LEVEL_RECYCLE_TOUCH_MIN", "3"))
-try:
-    _lfh = os.getenv("ZCT_LEVEL_FRESH_MIN_HOURS", "0").strip()
-    LEVEL_FRESH_MIN_HOURS = float(_lfh) if _lfh else 0.0
-except ValueError:
-    LEVEL_FRESH_MIN_HOURS = 0.0
-
-# PLAY03 止盈：vwap=回锚（默认）；1r=与 Koroush Reversal Lesson4 一致的 1:1 机械目标
-_PLAY03_TP_RAW = os.getenv("ZCT_PLAY03_TP_MODE", "vwap").strip().lower()
-PLAY03_TP_1R = _PLAY03_TP_RAW in ("1r", "one_r", "risk1")
-
-try:
-    _kms = os.getenv("ZCT_KOROUSH_MIN_STOP_DISTANCE_PCT", "0.01").strip()
-    if _kms == "":
-        KOROUSH_MIN_STOP_DISTANCE_PCT = 0.01
-    else:
-        KOROUSH_MIN_STOP_DISTANCE_PCT = float(_kms)
-except ValueError:
-    KOROUSH_MIN_STOP_DISTANCE_PCT = 0.01
-
-_PSYCH_RAW = os.getenv("ZCT_PSYCH_LEVELS", "0").strip().lower()
-PSYCH_LEVELS_ENABLED = _PSYCH_RAW in ("1", "true", "yes", "on")
-
-try:
-    _bma = os.getenv("ZCT_BREAKOUT_MAX_MA_CROSSES", "0").strip()
-    BREAKOUT_MAX_MA_CROSSES = int(_bma) if _bma else 0
-except ValueError:
-    BREAKOUT_MAX_MA_CROSSES = 0
-
-# --- ZCT S/R：近端 recycled 结构位否决顺势 PLAY01/02（默认开）---
-_RECYCLED_VETO_RAW = os.getenv("ZCT_RECYCLED_NEAR_VETO_ENABLED", "1").strip().lower()
-RECYCLED_NEAR_VETO_ENABLED = _RECYCLED_VETO_RAW not in (
-    "0",
-    "false",
-    "no",
-    "off",
-    "disabled",
-)
-try:
-    _rdm = os.getenv("ZCT_RECYCLED_NEAR_MAX_DIST_PCT", "0.2").strip()
-    RECYCLED_NEAR_MAX_DIST_PCT = float(_rdm) if _rdm else 0.2
-except ValueError:
-    RECYCLED_NEAR_MAX_DIST_PCT = 0.2
-if RECYCLED_NEAR_MAX_DIST_PCT <= 0:
-    RECYCLED_NEAR_MAX_DIST_PCT = 0.2
-
-# 海报：会话内 VWAP 交叉刻度 0–3 / 4–6 / 7+
-VWAP_CROSS_MAX_LOW = int(os.getenv("ZCT_VWAP_CROSS_MAX_LOW", "3"))
-VWAP_CROSS_MAX_MID = int(os.getenv("ZCT_VWAP_CROSS_MAX_MID", "6"))
-# 海报「use level 3+」：setup_level 与 ZCT_MIN_SETUP_LEVEL 比较；默认 enforce 开、min=3
-_ENFORCE_SETUP_RAW = os.getenv("ZCT_ENFORCE_SETUP_LEVEL", "1").strip().lower()
-ENFORCE_SETUP_LEVEL = _ENFORCE_SETUP_RAW not in ("0", "false", "no", "off", "disabled")
-try:
-    MIN_SETUP_LEVEL_FOR_SIDE = int(os.getenv("ZCT_MIN_SETUP_LEVEL", "3"))
-except ValueError:
-    MIN_SETUP_LEVEL_FOR_SIDE = 3
-
-# --- P1：固定风险名义 + 日损熔断（账户为纸面权益基准）---
-ACCOUNT_EQUITY_USDT = float(os.getenv("ZCT_ACCOUNT_EQUITY_USDT", "10000"))
-RISK_PCT_PER_TRADE = float(os.getenv("ZCT_RISK_PCT_PER_TRADE", "0.005"))
-USE_RISK_SIZED_NOTIONAL = os.getenv("ZCT_USE_RISK_SIZED_NOTIONAL", "").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-MAX_NOTIONAL_CAP_USDT = float(os.getenv("ZCT_MAX_NOTIONAL_CAP_USDT", "0") or 0)
-MAX_DAILY_LOSS_PCT = float(os.getenv("ZCT_MAX_DAILY_LOSS_PCT", "0.05"))
-try:
-    MAX_OPEN_POSITIONS = max(0, int(os.getenv("ZCT_MAX_OPEN_POSITIONS", "8").strip() or "8"))
-except ValueError:
-    MAX_OPEN_POSITIONS = 8
-try:
-    MAX_OPEN_PLAY01 = max(0, int(os.getenv("ZCT_MAX_OPEN_PLAY01", "5").strip() or "5"))
-except ValueError:
-    MAX_OPEN_PLAY01 = 5
-try:
-    MAX_OPEN_PLAY02 = max(0, int(os.getenv("ZCT_MAX_OPEN_PLAY02", "5").strip() or "5"))
-except ValueError:
-    MAX_OPEN_PLAY02 = 5
-
-# --- P2：平仓后冷却（毫秒，代码常量；非环境变量）+ 极端带宽跳过 ---
-COOLDOWN_AFTER_LOSS_MS = 30 * 60 * 1000  # 止损后
-COOLDOWN_AFTER_WIN_MS = 30 * 60 * 1000  # 止盈后
-COOLDOWN_AFTER_CLOSE_MS = 0  # 任意平仓额外间隔；0=关闭
-_DEFAULT_MAX_BAND_WIDTH_PCT = 15.0
-MAX_BAND_WIDTH_PCT = float(
-    os.getenv("ZCT_MAX_BAND_WIDTH_PCT", str(_DEFAULT_MAX_BAND_WIDTH_PCT))
-    or _DEFAULT_MAX_BAND_WIDTH_PCT
-)
-
-SWING_LOOKBACK = int(os.getenv("ZCT_SWING_LOOKBACK", "20"))
-MIN_SL_PCT = float(os.getenv("ZCT_MIN_SL_PCT", "0.003"))
-SL_BUFFER_BPS = float(os.getenv("ZCT_SL_BUFFER_BPS", "2"))
-# 默认「时间强平」与「1m 根数上限」同源：小时数 ×60 根；5m 回测见 walkforward `_resolve_max_bars_effective`
-_DEFAULT_RESOLVE_HOLD_HOURS = 8
-_DEFAULT_RESOLVE_MAX_HOLD_MS = int(_DEFAULT_RESOLVE_HOLD_HOURS * 60 * 60 * 1000)
-_RESOLVE_BARS_RAW = os.getenv("ZCT_RESOLVE_MAX_BARS")
-try:
-    if _RESOLVE_BARS_RAW is None or str(_RESOLVE_BARS_RAW).strip() == "":
-        RESOLVE_MAX_BARS = int(_DEFAULT_RESOLVE_HOLD_HOURS * 60)
-    else:
-        RESOLVE_MAX_BARS = int(float(str(_RESOLVE_BARS_RAW).strip()))
-except ValueError:
-    RESOLVE_MAX_BARS = int(_DEFAULT_RESOLVE_HOLD_HOURS * 60)
-_RESOLVE_HOLD_RAW = os.getenv("ZCT_RESOLVE_MAX_HOLD_MS")
-try:
-    if _RESOLVE_HOLD_RAW is None or str(_RESOLVE_HOLD_RAW).strip() == "":
-        RESOLVE_MAX_HOLD_MS = _DEFAULT_RESOLVE_MAX_HOLD_MS
-    else:
-        RESOLVE_MAX_HOLD_MS = max(0, int(float(str(_RESOLVE_HOLD_RAW).strip())))
-except ValueError:
-    RESOLVE_MAX_HOLD_MS = _DEFAULT_RESOLVE_MAX_HOLD_MS
-_DEFAULT_RESOLVE_HOLD_HOURS_PLAY02 = 4.0
-try:
-    _PLAY02_HOLD_H = float(
-        os.getenv("ZCT_RESOLVE_MAX_HOLD_HOURS_PLAY02", "4").strip() or "4"
-    )
-except ValueError:
-    _PLAY02_HOLD_H = _DEFAULT_RESOLVE_HOLD_HOURS_PLAY02
-_PLAY02_MS_RAW = os.getenv("ZCT_RESOLVE_MAX_HOLD_MS_PLAY02", "").strip()
-if _PLAY02_MS_RAW:
-    try:
-        RESOLVE_MAX_HOLD_MS_PLAY02 = max(0, int(float(_PLAY02_MS_RAW)))
-    except ValueError:
-        RESOLVE_MAX_HOLD_MS_PLAY02 = int(_DEFAULT_RESOLVE_HOLD_HOURS_PLAY02 * 3_600_000)
-elif _PLAY02_HOLD_H <= 0:
-    RESOLVE_MAX_HOLD_MS_PLAY02 = 0
-else:
-    RESOLVE_MAX_HOLD_MS_PLAY02 = int(_PLAY02_HOLD_H * 3_600_000)
-if RESOLVE_MAX_HOLD_MS_PLAY02 > 0:
-    RESOLVE_MAX_BARS_PLAY02 = max(1, int(round(RESOLVE_MAX_HOLD_MS_PLAY02 / 60_000.0)))
-else:
-    RESOLVE_MAX_BARS_PLAY02 = 0
+DEFAULT_STRATEGY_CONFIG = StrategyConfig.from_env()
+export_strategy_module_aliases(globals(), DEFAULT_STRATEGY_CONFIG)
 
 
 def _play_uses_short_resolve_hold(play: Optional[str]) -> bool:
@@ -581,13 +397,8 @@ RESOLVE_INTER_SYMBOL_SLEEP_SEC = float(
     os.getenv("ZCT_RESOLVE_INTER_SYMBOL_SLEEP_SEC", "0") or 0
 )
 SAME_BAR_RULE = os.getenv("ZCT_SAME_BAR_RULE", "pessimistic").strip().lower()
-# 虚拟仓位：保证金 × 杠杆 = 名义敞口 USDT，用于纸面 pnl_usdt（与 s6 默认 10x 对齐）
-_ZCT_MARGIN_USDT = float(os.getenv("ZCT_VIRTUAL_NOTIONAL_USDT", "100"))
-ZCT_LEVERAGE = float(os.getenv("ZCT_LEVERAGE", "10"))
-VIRTUAL_NOTIONAL_USDT = _ZCT_MARGIN_USDT * ZCT_LEVERAGE
-
 # 流动性（仅 OI）：False 时不请求接口、不挡单（暂时屏蔽用）
-LIQUIDITY_OI_FILTER_ENABLED = False
+LIQUIDITY_OI_FILTER_ENABLED = DEFAULT_STRATEGY_CONFIG.liquidity_oi_filter_enabled
 # 币安 U 本位 openInterestHist
 LIQUIDITY_OI_PERIOD = "15m"  # 5m / 15m / 30m / 1h / 2h / 4h / 6h / 12h / 1d
 # 顺势单：OI 环比 ≤ 该阈值则由 analyze_symbol 硬抑制方向单（小数；LONG 默认须为正增长）。
@@ -602,76 +413,44 @@ LIQUIDITY_OI_COMPARE_MODE = "prev_vs_prev2"
 SCAN_SUPERSEDE_ON_FLAT = False
 
 
-def _circuit_breaker_halted() -> bool:
+def _circuit_breaker_halted(
+    config: Optional[StrategyConfig] = None,
+) -> bool:
     """P1：当日已实现盈亏累计 ≤ -账户×MAX_DAILY_LOSS_PCT 则暂停新开方向单。"""
-    if MAX_DAILY_LOSS_PCT <= 0:
+    c = config or DEFAULT_STRATEGY_CONFIG
+    if c.max_daily_loss_pct <= 0:
         return False
     from accumulation_radar import init_db
+    from zct_db_repositories import SignalRepository
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     start_iso = f"{today}T00:00:00"
     conn = init_db()
     try:
-        cur = conn.cursor()
-        cur.execute(
-            f"""
-            SELECT COALESCE(SUM(pnl_usdt), 0)
-            FROM {ZCT_DB_SETTLEMENTS_TABLE}
-            WHERE settled_at_utc >= ?
-            """,
-            (start_iso,),
-        )
-        pnl_sum = float(cur.fetchone()[0] or 0)
-        limit_neg = ACCOUNT_EQUITY_USDT * MAX_DAILY_LOSS_PCT
+        repo = SignalRepository(conn)
+        pnl_sum = repo.daily_pnl_sum(conn.cursor(), start_iso)
+        limit_neg = c.account_equity_usdt * c.max_daily_loss_pct
         return pnl_sum <= -limit_neg
     finally:
         conn.close()
 
 
-def _cooldown_blocks(symbol: str) -> bool:
+def _cooldown_blocks(
+    symbol: str,
+    *,
+    config: Optional[StrategyConfig] = None,
+    repo: Any = None,
+) -> bool:
     """P2：该标的仍在任意冷却窗口内（止盈/止损/通用平仓间隔）。"""
-    if (
-        COOLDOWN_AFTER_LOSS_MS <= 0
-        and COOLDOWN_AFTER_WIN_MS <= 0
-        and COOLDOWN_AFTER_CLOSE_MS <= 0
-    ):
-        return False
-    from accumulation_radar import init_db
-
-    sym = symbol.strip().upper()
-    now_ms = int(time.time() * 1000)
-    conn = init_db()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT cooldown_until_ms FROM zct_symbol_cooldown WHERE symbol = ?",
-            (sym,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return False
-        return int(row[0]) > now_ms
-    finally:
-        conn.close()
+    c = config or DEFAULT_STRATEGY_CONFIG
+    return c.cooldown_blocks(symbol, repo=repo)
 
 
 def _merge_symbol_cooldown(cur, symbol: str, until_ms: int) -> None:
     """将标的冷却截止时间设为 max(已有行, until_ms)，避免短窗口覆盖长窗口。"""
-    sym = str(symbol).strip().upper()
-    cur.execute(
-        "SELECT cooldown_until_ms FROM zct_symbol_cooldown WHERE symbol = ?",
-        (sym,),
-    )
-    row = cur.fetchone()
-    prev = int(row[0]) if row else 0
-    final = max(prev, int(until_ms))
-    cur.execute(
-        """
-        INSERT OR REPLACE INTO zct_symbol_cooldown (symbol, cooldown_until_ms)
-        VALUES (?, ?)
-        """,
-        (sym, final),
-    )
+    from zct_db_repositories import CooldownRepository
+
+    CooldownRepository(cur).merge_cooldown(cur, symbol, until_ms)
 
 
 def _apply_settlement_cooldowns(
@@ -1113,21 +892,37 @@ def _widen_sl_min_risk_long(
     sdf: pd.DataFrame,
     buf: float,
     clamp_long_sl,
-) -> float:
+    *,
+    config: Optional[StrategyConfig] = None,
+) -> Optional[float]:
     """Koroush：止损距进场若不足最小占价比，则扩大摆动窗取更远摆动低（多单）。"""
-    need = max(MIN_SL_PCT, KOROUSH_MIN_STOP_DISTANCE_PCT) if KOROUSH_MIN_STOP_DISTANCE_PCT > 0 else MIN_SL_PCT
+    c = config or DEFAULT_STRATEGY_CONFIG
+    need = (
+        max(c.min_sl_pct, c.koroush_min_stop_distance_pct)
+        if c.koroush_min_stop_distance_pct > 0
+        else c.min_sl_pct
+    )
     lows = sdf["low"].astype(float)
     best = clamp_long_sl(sl_init)
     if entry <= 0 or (entry - best) / entry >= need - 1e-15:
+        if c.max_sl_widen_pct > 0 and (entry - best) / entry > c.max_sl_widen_pct + 1e-15:
+            return None
         return best
     for mult in range(1, 14):
-        win = min(max(SWING_LOOKBACK, 1) * mult, len(sdf), 720)
+        win = min(max(c.swing_lookback, 1) * mult, len(sdf), 720)
         cand_raw = float(lows.iloc[-win:].min()) * (1.0 - buf)
         cand = clamp_long_sl(cand_raw)
+        if entry > 0 and c.max_sl_widen_pct > 0:
+            if (entry - cand) / entry > c.max_sl_widen_pct + 1e-15:
+                return None
         if entry - cand >= entry * need - 1e-15:
             return cand
         if cand < best - 1e-15:
             best = cand
+    if entry > 0 and (entry - best) / entry < need - 1e-15:
+        return None
+    if entry > 0 and c.max_sl_widen_pct > 0 and (entry - best) / entry > c.max_sl_widen_pct + 1e-15:
+        return None
     return best
 
 
@@ -1137,20 +932,36 @@ def _widen_sl_min_risk_short(
     sdf: pd.DataFrame,
     buf: float,
     clamp_short_sl,
-) -> float:
-    need = max(MIN_SL_PCT, KOROUSH_MIN_STOP_DISTANCE_PCT) if KOROUSH_MIN_STOP_DISTANCE_PCT > 0 else MIN_SL_PCT
+    *,
+    config: Optional[StrategyConfig] = None,
+) -> Optional[float]:
+    c = config or DEFAULT_STRATEGY_CONFIG
+    need = (
+        max(c.min_sl_pct, c.koroush_min_stop_distance_pct)
+        if c.koroush_min_stop_distance_pct > 0
+        else c.min_sl_pct
+    )
     highs = sdf["high"].astype(float)
     best = clamp_short_sl(sl_init)
     if entry <= 0 or (best - entry) / entry >= need - 1e-15:
+        if c.max_sl_widen_pct > 0 and (best - entry) / entry > c.max_sl_widen_pct + 1e-15:
+            return None
         return best
     for mult in range(1, 14):
-        win = min(max(SWING_LOOKBACK, 1) * mult, len(sdf), 720)
+        win = min(max(c.swing_lookback, 1) * mult, len(sdf), 720)
         cand_raw = float(highs.iloc[-win:].max()) * (1.0 + buf)
         cand = clamp_short_sl(cand_raw)
+        if entry > 0 and c.max_sl_widen_pct > 0:
+            if (cand - entry) / entry > c.max_sl_widen_pct + 1e-15:
+                return None
         if cand - entry >= entry * need - 1e-15:
             return cand
         if cand > best + 1e-15:
             best = cand
+    if entry > 0 and (best - entry) / entry < need - 1e-15:
+        return None
+    if entry > 0 and c.max_sl_widen_pct > 0 and (best - entry) / entry > c.max_sl_widen_pct + 1e-15:
+        return None
     return best
 
 
@@ -1562,16 +1373,23 @@ class SignalResult:
     suggested_limit_entry: Optional[float] = None
 
 
-def compute_sl_tp(r: SignalResult, sdf: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def compute_sl_tp(
+    r: SignalResult,
+    sdf: pd.DataFrame,
+    *,
+    config: Optional[StrategyConfig] = None,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     止损 / 止盈 / 风险单位（1R 的价位距离）。
     - 均值回归 PLAY03：默认止盈锚定 VWAP；ZCT_PLAY03_TP_MODE=1r 时为与 SL 等距的 1R（Koroush Reversal Lesson4）。
     - 顺势 / 过渡偏置：1R 目标；止损在 VWAP 与近端摆动极值「错误侧」之外。
     - Koroush SL：默认 ZCT_KOROUSH_MIN_STOP_DISTANCE_PCT=1%；若止损距进场仍不足则扩大摆动窗寻更远极值；环境变量设为 0 可关闭。
+    - 扩止损超过 ZCT_MAX_SL_WIDEN_PCT 或无法满足最小止损距 → 返回 (None, None, None)。
     """
+    c = config or DEFAULT_STRATEGY_CONFIG
     if r.side == "FLAT" or sdf is None or sdf.empty:
         return None, None, None
-    n = min(SWING_LOOKBACK, len(sdf))
+    n = min(c.swing_lookback, len(sdf))
     lo = float(sdf["low"].iloc[-n:].min())
     hi = float(sdf["high"].iloc[-n:].max())
     buf = SL_BUFFER_BPS / 10000.0
@@ -1595,15 +1413,21 @@ def compute_sl_tp(r: SignalResult, sdf: pd.DataFrame) -> Tuple[Optional[float], 
     if r.side == "LONG":
         if r.play == "PLAY03_REV_LONG":
             sl_raw = min(lo, vl) * (1 - buf)
-            sl = _widen_sl_min_risk_long(entry, sl_raw, sdf, buf, clamp_long_sl)
+            sl = _widen_sl_min_risk_long(
+                entry, sl_raw, sdf, buf, clamp_long_sl, config=c
+            )
+            if sl is None:
+                return None, None, None
             ru = entry - sl
-            if PLAY03_TP_1R:
+            if c.play03_tp_1r:
                 tp = entry + ru
             else:
                 tp = vw
             return round(sl, 8), round(tp, 8), round(ru, 8)
         sl_raw = min(vw, lo) * (1 - buf)
-        sl = _widen_sl_min_risk_long(entry, sl_raw, sdf, buf, clamp_long_sl)
+        sl = _widen_sl_min_risk_long(entry, sl_raw, sdf, buf, clamp_long_sl, config=c)
+        if sl is None:
+            return None, None, None
         ru = entry - sl
         tp = entry + ru
         return round(sl, 8), round(tp, 8), round(ru, 8)
@@ -1611,15 +1435,21 @@ def compute_sl_tp(r: SignalResult, sdf: pd.DataFrame) -> Tuple[Optional[float], 
     if r.side == "SHORT":
         if r.play == "PLAY03_REV_SHORT":
             sl_raw = max(hi, vu) * (1 + buf)
-            sl = _widen_sl_min_risk_short(entry, sl_raw, sdf, buf, clamp_short_sl)
+            sl = _widen_sl_min_risk_short(
+                entry, sl_raw, sdf, buf, clamp_short_sl, config=c
+            )
+            if sl is None:
+                return None, None, None
             ru = sl - entry
-            if PLAY03_TP_1R:
+            if c.play03_tp_1r:
                 tp = entry - ru
             else:
                 tp = vw
             return round(sl, 8), round(tp, 8), round(ru, 8)
         sl_raw = max(vw, hi) * (1 + buf)
-        sl = _widen_sl_min_risk_short(entry, sl_raw, sdf, buf, clamp_short_sl)
+        sl = _widen_sl_min_risk_short(entry, sl_raw, sdf, buf, clamp_short_sl, config=c)
+        if sl is None:
+            return None, None, None
         ru = sl - entry
         tp = entry - ru
         return round(sl, 8), round(tp, 8), round(ru, 8)
@@ -1693,7 +1523,31 @@ def classify_and_signal(
     spike_klines_end_ms: Optional[int] = None,
     spike_atr_pct: Optional[float] = None,
     spike_atr_from_memory: bool = False,
+    config: Optional[StrategyConfig] = None,
 ) -> SignalResult:
+    c = config or DEFAULT_STRATEGY_CONFIG
+    WIDE_BAND_MULT = c.wide_band_mult
+    TIGHT_BAND_MULT = c.tight_band_mult
+    VWAP_SLOPE_BARS = c.vwap_slope_bars
+    SLOPE_STEEP_BPS = c.slope_steep_bps
+    SLOPE_FLAT_BPS = c.slope_flat_bps
+    MA_PERIOD = c.ma_period
+    MA_LOOKBACK = c.ma_lookback
+    CHOPPY_CROSS_MIN = c.choppy_cross_min
+    MA_CHOPPY_CROSS_MIN = c.ma_choppy_cross_min
+    BAND_TOUCH_FRAC = c.band_touch_frac
+    STRICT_PA_FILTERS = c.strict_pa_filters
+    VOL_MA_PERIOD = c.vol_ma_period
+    SPIKE_LOOKBACK = c.spike_lookback
+    SPIKE_RANGE_RATIO = c.spike_range_ratio
+    GRIND_LOOKBACK = c.grind_lookback
+    GRIND_MAX_NET_MOVE_PCT = c.grind_max_net_move_pct
+    BREAKOUT_MAX_MA_CROSSES = c.breakout_max_ma_crosses
+    RECYCLED_NEAR_VETO_ENABLED = c.recycled_near_veto_enabled
+    RECYCLED_NEAR_MAX_DIST_PCT = c.recycled_near_max_dist_pct
+    LEVEL_TOUCH_LOOKBACK_BARS = c.level_touch_lookback_bars
+    PSYCH_LEVELS_ENABLED = c.psych_levels_enabled
+
     last = sdf.iloc[-1]
     price = float(last["close"])
     vw = float(last["vwap"])
@@ -1990,10 +1844,12 @@ def classify_and_signal(
     )
 
 
-def _btc_macro_reset_for_scan() -> None:
+def _btc_macro_reset_for_scan(config: Optional[StrategyConfig] = None) -> None:
     """每轮扫描开始重置缓存；本轮无 BTC 或未开启过滤时由调用方决定是否调用。"""
+    c = config or DEFAULT_STRATEGY_CONFIG
+    c.reset_btc_macro_state()
     global _BTC_MACRO_STATE
-    _BTC_MACRO_STATE = {"slope_bps": 0.0, "chop": "high"}
+    _BTC_MACRO_STATE = c.btc_macro_state
 
 
 def check_btc_macro_permission(
@@ -2055,44 +1911,38 @@ def check_btc_macro_permission(
     return True, ""
 
 
-def analyze_symbol(
+def apply_post_classify_gates(
     symbol: str,
+    res: SignalResult,
+    sdf: pd.DataFrame,
     *,
+    config: Optional[StrategyConfig] = None,
     halt_daily_circuit: bool = False,
-) -> Optional[SignalResult]:
-    sdf, levels, asof_ms, resolver = build_classify_inputs_at_asof(symbol)
-    if sdf.empty or len(sdf) < 30:
-        return None
-    liq = (
-        fetch_liquidity_data(symbol)
-        if LIQUIDITY_OI_FILTER_ENABLED
-        else {"ok": False, "disabled": True}
-    )
-    spike_atr = resolver.atr_pct_at(asof_ms) if resolver is not None else None
-    res = classify_and_signal(
-        symbol,
-        sdf,
-        levels,
-        spike_klines_end_ms=asof_ms,
-        spike_atr_pct=spike_atr,
-        spike_atr_from_memory=resolver is not None,
-    )
-    if LIQUIDITY_OI_FILTER_ENABLED and _liquidity_oi_suppresses_direction(res, liq):
+    cooldown_repo: Any = None,
+    cooldown_blocked: Optional[bool] = None,
+    apply_position_caps: bool = True,
+) -> SignalResult:
+    """classify 之后的 SL/TP 与 P1/P2/BTC 宏观闸门（walk-forward 与实盘共用）。"""
+    c = config or DEFAULT_STRATEGY_CONFIG
+    entry_ms = int(sdf.iloc[-1]["open_time"])
+    sl, tp, ru = compute_sl_tp(res, sdf, config=c)
+    if res.side in ("LONG", "SHORT") and sl is None:
         res = replace(
             res,
             side="FLAT",
             play="NO_TRADE",
             confidence="low",
-            reasons=res.reasons + [_liquidity_oi_suppress_reason(res, liq)],
+            reasons=res.reasons
+            + [
+                "Koroush 止损：扩窗后仍无法满足最小止损距或超过 ZCT_MAX_SL_WIDEN_PCT，盈亏比结构失效"
+            ],
             sl_price=None,
             tp_price=None,
             r_unit=None,
             entry_bar_open_ms=None,
             paper_notional_usdt=None,
         )
-    entry_ms = int(sdf.iloc[-1]["open_time"])
-    sl, tp, ru = compute_sl_tp(res, sdf)
-    if res.side in ("LONG", "SHORT"):
+    elif res.side in ("LONG", "SHORT"):
         res = replace(
             res,
             entry_bar_open_ms=entry_ms,
@@ -2109,9 +1959,9 @@ def analyze_symbol(
             r_unit=None,
         )
     if (
-        ENFORCE_SETUP_LEVEL
+        c.enforce_setup_level
         and res.side in ("LONG", "SHORT")
-        and res.setup_level < MIN_SETUP_LEVEL_FOR_SIDE
+        and res.setup_level < c.min_setup_level_for_side
     ):
         res = replace(
             res,
@@ -2120,8 +1970,8 @@ def analyze_symbol(
             confidence="low",
             reasons=res.reasons
             + [
-                f"已应用 ZCT_ENFORCE_SETUP_LEVEL：setup_level={res.setup_level} < {MIN_SETUP_LEVEL_FOR_SIDE}"
-                f"{'（海报 level 3+ 档）' if MIN_SETUP_LEVEL_FOR_SIDE >= 3 else ''}，方向单已抑制",
+                f"已应用 ZCT_ENFORCE_SETUP_LEVEL：setup_level={res.setup_level} < {c.min_setup_level_for_side}"
+                f"{'（海报 level 3+ 档）' if c.min_setup_level_for_side >= 3 else ''}，方向单已抑制",
             ],
             sl_price=None,
             tp_price=None,
@@ -2131,8 +1981,8 @@ def analyze_symbol(
         )
     if (
         res.side in ("LONG", "SHORT")
-        and MAX_BAND_WIDTH_PCT > 0
-        and res.band_width_pct > MAX_BAND_WIDTH_PCT
+        and c.max_band_width_pct > 0
+        and res.band_width_pct > c.max_band_width_pct
     ):
         res = replace(
             res,
@@ -2141,7 +1991,7 @@ def analyze_symbol(
             confidence="low",
             reasons=res.reasons
             + [
-                f"P2 波动过滤：band_width_pct={res.band_width_pct:.4f} > MAX_BAND_WIDTH_PCT={MAX_BAND_WIDTH_PCT}",
+                f"P2 波动过滤：band_width_pct={res.band_width_pct:.4f} > MAX_BAND_WIDTH_PCT={c.max_band_width_pct}",
             ],
             sl_price=None,
             tp_price=None,
@@ -2149,7 +1999,11 @@ def analyze_symbol(
             entry_bar_open_ms=None,
             paper_notional_usdt=None,
         )
-    if res.side in ("LONG", "SHORT") and _cooldown_blocks(symbol):
+    if res.side in ("LONG", "SHORT") and (
+        cooldown_blocked
+        if cooldown_blocked is not None
+        else _cooldown_blocks(symbol, config=c, repo=cooldown_repo)
+    ):
         res = replace(
             res,
             side="FLAT",
@@ -2163,7 +2017,7 @@ def analyze_symbol(
             entry_bar_open_ms=None,
             paper_notional_usdt=None,
         )
-    if res.side in ("LONG", "SHORT") and MAX_OPEN_POSITIONS > 0:
+    if apply_position_caps and res.side in ("LONG", "SHORT") and c.max_open_positions > 0:
         from accumulation_radar import init_db
 
         _cap_conn = init_db()
@@ -2179,7 +2033,7 @@ def analyze_symbol(
                 confidence="low",
                 reasons=res.reasons
                 + [
-                    f"P2 持仓上限：未平仓已达 {MAX_OPEN_POSITIONS} 笔，跳过新开仓"
+                    f"P2 持仓上限：未平仓已达 {c.max_open_positions} 笔，跳过新开仓"
                     f"（同标的反向仍可在入库时 supersede）",
                 ],
                 sl_price=None,
@@ -2188,8 +2042,8 @@ def analyze_symbol(
                 entry_bar_open_ms=None,
                 paper_notional_usdt=None,
             )
-    if res.side in ("LONG", "SHORT") and (
-        MAX_OPEN_PLAY01 > 0 or MAX_OPEN_PLAY02 > 0
+    if apply_position_caps and res.side in ("LONG", "SHORT") and (
+        c.max_open_play01 > 0 or c.max_open_play02 > 0
     ):
         from accumulation_radar import init_db
 
@@ -2198,12 +2052,12 @@ def analyze_symbol(
             _cap_cur = _cap_conn.cursor()
             p1_block = (
                 _open_play01_cap_blocks_new_symbol(_cap_cur, symbol, res.play)
-                if MAX_OPEN_PLAY01 > 0
+                if c.max_open_play01 > 0
                 else False
             )
             p2_block = (
                 _open_play02_cap_blocks_new_symbol(_cap_cur, symbol, res.play)
-                if MAX_OPEN_PLAY02 > 0
+                if c.max_open_play02 > 0
                 else False
             )
         finally:
@@ -2216,7 +2070,7 @@ def analyze_symbol(
                 confidence="low",
                 reasons=res.reasons
                 + [
-                    f"P2 PLAY01 上限：未平仓 PLAY01 已达 {MAX_OPEN_PLAY01} 笔，跳过新开"
+                    f"P2 PLAY01 上限：未平仓 PLAY01 已达 {c.max_open_play01} 笔，跳过新开"
                 ],
                 sl_price=None,
                 tp_price=None,
@@ -2232,7 +2086,7 @@ def analyze_symbol(
                 confidence="low",
                 reasons=res.reasons
                 + [
-                    f"P2 PLAY02 上限：未平仓 PLAY02 已达 {MAX_OPEN_PLAY02} 笔，跳过新开"
+                    f"P2 PLAY02 上限：未平仓 PLAY02 已达 {c.max_open_play02} 笔，跳过新开"
                 ],
                 sl_price=None,
                 tp_price=None,
@@ -2248,7 +2102,7 @@ def analyze_symbol(
             confidence="low",
             reasons=res.reasons
             + [
-                f"P1 日损熔断：当日已实现盈亏已达 -{MAX_DAILY_LOSS_PCT:.1%}×权益 上限，暂停新开仓",
+                f"P1 日损熔断：当日已实现盈亏已达 -{c.max_daily_loss_pct:.1%}×权益 上限，暂停新开仓",
             ],
             sl_price=None,
             tp_price=None,
@@ -2256,19 +2110,21 @@ def analyze_symbol(
             entry_bar_open_ms=None,
             paper_notional_usdt=None,
         )
-    if BTC_MACRO_FILTER_ENABLED:
+    if c.btc_macro_filter_enabled:
         if symbol == "BTCUSDT":
-            _BTC_MACRO_STATE["slope_bps"] = float(res.slope_bps or 0.0)
-            _BTC_MACRO_STATE["chop"] = str(res.chop_score or "high") or "high"
+            c.btc_macro_state["slope_bps"] = float(res.slope_bps or 0.0)
+            c.btc_macro_state["chop"] = str(res.chop_score or "high") or "high"
+            global _BTC_MACRO_STATE
+            _BTC_MACRO_STATE = c.btc_macro_state
         elif res.side in ("LONG", "SHORT"):
             ok, mreason = check_btc_macro_permission(
                 float(res.slope_bps or 0.0),
-                float(_BTC_MACRO_STATE["slope_bps"]),
-                str(_BTC_MACRO_STATE.get("chop") or "high"),
+                float(c.btc_macro_state["slope_bps"]),
+                str(c.btc_macro_state.get("chop") or "high"),
                 res.side,
-                slope_threshold=BTC_MACRO_SLOPE_THRESHOLD_BPS,
-                rs_min_ratio=BTC_MACRO_RS_MIN_RATIO,
-                long_fuse_slope_bps=BTC_MACRO_LONG_FUSE_SLOPE_BPS,
+                slope_threshold=c.btc_macro_slope_threshold_bps,
+                rs_min_ratio=c.btc_macro_rs_min_ratio,
+                long_fuse_slope_bps=c.btc_macro_long_fuse_slope_bps,
             )
             if not ok:
                 res = replace(
@@ -2304,6 +2160,58 @@ def analyze_symbol(
     else:
         res = replace(res, paper_notional_usdt=None, suggested_limit_entry=None)
     return res
+
+
+def analyze_symbol(
+    symbol: str,
+    *,
+    halt_daily_circuit: bool = False,
+    config: Optional[StrategyConfig] = None,
+    cooldown_repo: Any = None,
+    cooldown_blocked: Optional[bool] = None,
+) -> Optional[SignalResult]:
+    c = config if config is not None else DEFAULT_STRATEGY_CONFIG.copy_for_scan()
+    sdf, levels, asof_ms, resolver = build_classify_inputs_at_asof(symbol)
+    if sdf.empty or len(sdf) < 30:
+        return None
+    liq = (
+        fetch_liquidity_data(symbol)
+        if c.liquidity_oi_filter_enabled
+        else {"ok": False, "disabled": True}
+    )
+    spike_atr = resolver.atr_pct_at(asof_ms) if resolver is not None else None
+    res = classify_and_signal(
+        symbol,
+        sdf,
+        levels,
+        spike_klines_end_ms=asof_ms,
+        spike_atr_pct=spike_atr,
+        spike_atr_from_memory=resolver is not None,
+        config=c,
+    )
+    if c.liquidity_oi_filter_enabled and _liquidity_oi_suppresses_direction(res, liq):
+        res = replace(
+            res,
+            side="FLAT",
+            play="NO_TRADE",
+            confidence="low",
+            reasons=res.reasons + [_liquidity_oi_suppress_reason(res, liq)],
+            sl_price=None,
+            tp_price=None,
+            r_unit=None,
+            entry_bar_open_ms=None,
+            paper_notional_usdt=None,
+        )
+    return apply_post_classify_gates(
+        symbol,
+        res,
+        sdf,
+        config=c,
+        halt_daily_circuit=halt_daily_circuit,
+        cooldown_repo=cooldown_repo,
+        cooldown_blocked=cooldown_blocked,
+        apply_position_caps=True,
+    )
 
 
 def send_telegram(text: str) -> None:
@@ -2358,48 +2266,28 @@ def _is_open_hold_row(r: SignalResult) -> bool:
     return r.side in ("LONG", "SHORT") and r.sl_price is not None
 
 
+def _signals_repo(conn=None) -> Any:
+    from zct_db_repositories import SignalRepository
+
+    return SignalRepository(
+        conn,
+        signals_table=ZCT_DB_SIGNALS_TABLE,
+        settlements_table=ZCT_DB_SETTLEMENTS_TABLE,
+    )
+
+
 def _fetch_symbols_with_open_positions(cur) -> Set[str]:
     """已平仓(outcome 非空)之前，同一标的不再新开方向单。"""
-    cur.execute(
-        f"""
-        SELECT DISTINCT symbol FROM {ZCT_DB_SIGNALS_TABLE}
-        WHERE outcome IS NULL
-          AND sl_price IS NOT NULL
-          AND side IN ('LONG', 'SHORT')
-        """
-    )
-    return {str(row[0]) for row in cur.fetchall() if row and row[0]}
+    return _signals_repo().fetch_symbols_with_open_positions(cur)
 
 
 def _count_open_positions(cur) -> int:
     """与 zct_vwap_api summary「持仓中」一致：未结且含 SL 的 LONG/SHORT 行数。"""
-    cur.execute(
-        f"""
-        SELECT COUNT(*) FROM {ZCT_DB_SIGNALS_TABLE}
-        WHERE outcome IS NULL
-          AND sl_price IS NOT NULL
-          AND side IN ('LONG', 'SHORT')
-        """
-    )
-    row = cur.fetchone()
-    return int(row[0] or 0) if row else 0
+    return _signals_repo().count_open_positions(cur)
 
 
 def _symbol_has_open_position(cur, symbol: str) -> bool:
-    su = str(symbol).strip().upper()
-    if not su:
-        return False
-    cur.execute(
-        f"""
-        SELECT 1 FROM {ZCT_DB_SIGNALS_TABLE}
-        WHERE symbol = ? AND outcome IS NULL
-          AND sl_price IS NOT NULL
-          AND side IN ('LONG', 'SHORT')
-        LIMIT 1
-        """,
-        (su,),
-    )
-    return cur.fetchone() is not None
+    return _signals_repo().symbol_has_open_position(cur, symbol)
 
 
 def _open_position_cap_blocks_new_symbol(cur, symbol: str) -> bool:
@@ -2414,21 +2302,7 @@ def _open_position_cap_blocks_new_symbol(cur, symbol: str) -> bool:
 
 
 def _count_open_play_family(cur, family: str) -> int:
-    prefix = str(family).strip().upper()
-    if not prefix.startswith("PLAY") or len(prefix) < 6:
-        return 0
-    cur.execute(
-        f"""
-        SELECT COUNT(*) FROM {ZCT_DB_SIGNALS_TABLE}
-        WHERE outcome IS NULL
-          AND sl_price IS NOT NULL
-          AND side IN ('LONG', 'SHORT')
-          AND play LIKE ?
-        """,
-        (f"{prefix}%",),
-    )
-    row = cur.fetchone()
-    return int(row[0] or 0) if row else 0
+    return _signals_repo().count_open_play_family(cur, family)
 
 
 def _count_open_play01(cur) -> int:
@@ -2511,26 +2385,19 @@ def _settle_open_for_scan_supersede(
     pnl = _pnl_r(side, en, sx, float(sl), tp_f)
     pnl_u = _pnl_usdt(side, en, sx, float(notion))
     outcome = "supersede"
-    cur.execute(
-        f"""
-        INSERT INTO {ZCT_DB_SETTLEMENTS_TABLE} (
-            settled_at_utc, signal_id, symbol, side, play, outcome,
-            entry_price, exit_price, pnl_r, pnl_usdt, virtual_notional_usdt
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            settled_at_utc,
-            sid,
-            sym,
-            side,
-            play,
-            outcome,
-            en,
-            sx,
-            round(pnl, 6),
-            round(pnl_u, 4),
-            float(notion),
-        ),
+    _signals_repo().insert_settlement(
+        cur,
+        settled_at_utc=settled_at_utc,
+        signal_id=sid,
+        symbol=sym,
+        side=side,
+        play=play,
+        outcome=outcome,
+        entry_price=en,
+        exit_price=sx,
+        pnl_r=round(pnl, 6),
+        pnl_usdt=round(pnl_u, 4),
+        virtual_notional_usdt=float(notion),
     )
     _apply_settlement_cooldowns(
         cur, symbol=str(sym).upper(), outcome="supersede", pnl_usdt=float(pnl_u)
@@ -2548,233 +2415,48 @@ def _persist_results_db(
 ) -> Tuple[int, str]:
     """UPSERT：每 symbol 一行当前快照；返回 (写入条数, db 路径)。"""
     from accumulation_radar import DB_PATH, init_db
+    from zct_db_repositories import PersistScanCallbacks, PersistScanLimits
+
+    def _settle_cb(cur, hold: Tuple[Any, ...], r: SignalResult, at_utc: str) -> None:
+        _settle_open_for_scan_supersede(
+            cur,
+            settled_at_utc=at_utc,
+            sid=int(hold[0]),
+            sym=str(hold[1]),
+            side=str(hold[2]),
+            play=hold[3],
+            entry=float(hold[4]),
+            sl=float(hold[5]),
+            tp=hold[6],
+            notion=float(hold[7]),
+            exit_px=float(r.price),
+        )
 
     conn = init_db()
     try:
-        cur = conn.cursor()
-        open_syms = _fetch_symbols_with_open_positions(cur)
-        open_position_count = _count_open_positions(cur)
-        open_play01_count = _count_open_play01(cur)
-        open_play02_count = _count_open_play02(cur)
-        params_json = json.dumps(scan_params, ensure_ascii=False)
-        written = 0
-        skipped_open = 0
-        skipped_open_cap = 0
-        skipped_play01_cap = 0
-        skipped_play02_cap = 0
-        sig_tbl = ZCT_DB_SIGNALS_TABLE
-        upsert = f"""
-            INSERT INTO {sig_tbl} (
-                recorded_at_utc, symbol, play, side, confidence, regime,
-                entry_price, entry_bar_open_ms, sl_price, tp_price, r_unit,
-                virtual_notional_usdt,
-                vwap, vwap_upper, vwap_lower,
-                slope_bps, band_width_pct, vwap_crosses, ma_crosses, chop_score,
-                bands_wide, bands_tight, slope_steep, slope_flat,
-                ref_levels_json, nearest_levels_json, reasons_json, scan_params_json,
-                setup_level, vwap_cross_bucket, position_vs_vwap,
-                outcome, outcome_at_utc, exit_price, pnl_r, pnl_usdt
-            ) VALUES (
-                ?,?,?,?,?,?,
-                ?,?,?,?,?,
-                ?,
-                ?,?,?,
-                ?,?,?,?,?,
-                ?,?,?,?,
-                ?,?,?,?,
-                ?,?,?,
-                NULL, NULL, NULL, NULL, NULL
-            )
-            ON CONFLICT(symbol) DO UPDATE SET
-                recorded_at_utc = excluded.recorded_at_utc,
-                play = excluded.play,
-                side = excluded.side,
-                confidence = excluded.confidence,
-                regime = excluded.regime,
-                entry_price = excluded.entry_price,
-                entry_bar_open_ms = excluded.entry_bar_open_ms,
-                sl_price = excluded.sl_price,
-                tp_price = excluded.tp_price,
-                r_unit = excluded.r_unit,
-                virtual_notional_usdt = excluded.virtual_notional_usdt,
-                vwap = excluded.vwap,
-                vwap_upper = excluded.vwap_upper,
-                vwap_lower = excluded.vwap_lower,
-                slope_bps = excluded.slope_bps,
-                band_width_pct = excluded.band_width_pct,
-                vwap_crosses = excluded.vwap_crosses,
-                ma_crosses = excluded.ma_crosses,
-                chop_score = excluded.chop_score,
-                bands_wide = excluded.bands_wide,
-                bands_tight = excluded.bands_tight,
-                slope_steep = excluded.slope_steep,
-                slope_flat = excluded.slope_flat,
-                ref_levels_json = excluded.ref_levels_json,
-                nearest_levels_json = excluded.nearest_levels_json,
-                reasons_json = excluded.reasons_json,
-                scan_params_json = excluded.scan_params_json,
-                setup_level = excluded.setup_level,
-                vwap_cross_bucket = excluded.vwap_cross_bucket,
-                position_vs_vwap = excluded.position_vs_vwap,
-                outcome = excluded.outcome,
-                outcome_at_utc = excluded.outcome_at_utc,
-                exit_price = excluded.exit_price,
-                pnl_r = excluded.pnl_r,
-                pnl_usdt = excluded.pnl_usdt,
-                manual_entry_price = {sig_tbl}.manual_entry_price,
-                manual_exit_price = {sig_tbl}.manual_exit_price,
-                manual_notes = {sig_tbl}.manual_notes,
-                notes = {sig_tbl}.notes
-        """
-        for r in rows:
-            had_hold = False
-            superseded = False
-            # 必须先于 FLAT 删除：否则未平仓行会被 DB_SKIP_FLAT 删掉，或被 FLAT upsert 清空 sl/tp，resolve 永远选不中
-            if r.symbol in open_syms:
-                cur.execute(
-                    f"""
-                    SELECT id, symbol, side, play, entry_price, sl_price, tp_price,
-                           COALESCE(virtual_notional_usdt, ?)
-                    FROM {ZCT_DB_SIGNALS_TABLE}
-                    WHERE symbol = ? AND outcome IS NULL
-                      AND sl_price IS NOT NULL AND side IN ('LONG','SHORT')
-                    """,
-                    (VIRTUAL_NOTIONAL_USDT, r.symbol),
-                )
-                hold = cur.fetchone()
-                if not hold:
-                    open_syms.discard(r.symbol)
-                else:
-                    had_hold = True
-                    db_side = str(hold[2])
-                    if _scan_supersedes_open_hold(db_side, r):
-                        superseded = True
-                        _settle_open_for_scan_supersede(
-                            cur,
-                            settled_at_utc=recorded_at_utc,
-                            sid=int(hold[0]),
-                            sym=str(hold[1]),
-                            side=str(hold[2]),
-                            play=hold[3],
-                            entry=float(hold[4]),
-                            sl=float(hold[5]),
-                            tp=hold[6],
-                            notion=float(hold[7]),
-                            exit_px=float(r.price),
-                        )
-                        open_syms.discard(r.symbol)
-                    else:
-                        skipped_open += 1
-                        print(
-                            f"[db] skip {r.symbol}: 已有未平仓记录（持仓中），保留该行（不覆盖、不删除）"
-                        )
-                        continue
-            if (
-                _is_open_hold_row(r)
-                and not superseded
-                and not had_hold
-                and MAX_OPEN_POSITIONS > 0
-                and open_position_count >= MAX_OPEN_POSITIONS
-            ):
-                skipped_open_cap += 1
-                print(
-                    f"[db] skip {r.symbol}: 未平仓已达 {open_position_count}>="
-                    f"{MAX_OPEN_POSITIONS}，不再新开仓（同标的反向 supersede 不受限）"
-                )
-                continue
-            if (
-                _is_open_hold_row(r)
-                and not superseded
-                and not had_hold
-                and MAX_OPEN_PLAY01 > 0
-                and _play_is_play01_family(r.play)
-                and open_play01_count >= MAX_OPEN_PLAY01
-            ):
-                skipped_play01_cap += 1
-                print(
-                    f"[db] skip {r.symbol}: PLAY01 未平仓已达 {open_play01_count}>="
-                    f"{MAX_OPEN_PLAY01}，不再新开 PLAY01"
-                )
-                continue
-            if (
-                _is_open_hold_row(r)
-                and not superseded
-                and not had_hold
-                and MAX_OPEN_PLAY02 > 0
-                and _play_is_play02_family(r.play)
-                and open_play02_count >= MAX_OPEN_PLAY02
-            ):
-                skipped_play02_cap += 1
-                print(
-                    f"[db] skip {r.symbol}: PLAY02 未平仓已达 {open_play02_count}>="
-                    f"{MAX_OPEN_PLAY02}，不再新开 PLAY02"
-                )
-                continue
-            if DB_SKIP_FLAT and r.side == "FLAT":
-                cur.execute(
-                    f"DELETE FROM {ZCT_DB_SIGNALS_TABLE} WHERE symbol = ?",
-                    (r.symbol,),
-                )
-                continue
-            cur.execute(
-                upsert,
-                (
-                    recorded_at_utc,
-                    r.symbol,
-                    r.play,
-                    r.side,
-                    r.confidence,
-                    r.regime,
-                    r.price,
-                    r.entry_bar_open_ms,
-                    r.sl_price,
-                    r.tp_price,
-                    r.r_unit,
-                    (
-                        r.paper_notional_usdt
-                        if r.paper_notional_usdt is not None
-                        else VIRTUAL_NOTIONAL_USDT
-                    ),
-                    r.vwap,
-                    r.vwap_upper,
-                    r.vwap_lower,
-                    r.slope_bps,
-                    r.band_width_pct,
-                    r.vwap_crosses,
-                    r.ma_crosses,
-                    r.chop_score,
-                    int(bool(r.bands_wide)),
-                    int(bool(r.bands_tight)),
-                    int(bool(r.slope_steep)),
-                    int(bool(r.slope_flat)),
-                    json.dumps(r.ref_levels, ensure_ascii=False),
-                    json.dumps(r.nearest_levels, ensure_ascii=False),
-                    json.dumps(r.reasons, ensure_ascii=False),
-                    params_json,
-                    r.setup_level,
-                    r.vwap_cross_bucket,
-                    r.position_vs_vwap,
-                ),
-            )
-            written += 1
-            if _is_open_hold_row(r):
-                open_syms.add(r.symbol)
-                if not had_hold:
-                    open_position_count += 1
-                    if _play_is_play01_family(r.play):
-                        open_play01_count += 1
-                    if _play_is_play02_family(r.play):
-                        open_play02_count += 1
+        repo = _signals_repo(conn)
+        stats = repo.persist_scan_results(
+            conn.cursor(),
+            recorded_at_utc=recorded_at_utc,
+            rows=rows,
+            scan_params_json=json.dumps(scan_params, ensure_ascii=False),
+            limits=PersistScanLimits(
+                max_open_positions=MAX_OPEN_POSITIONS,
+                max_open_play01=MAX_OPEN_PLAY01,
+                max_open_play02=MAX_OPEN_PLAY02,
+                db_skip_flat=DB_SKIP_FLAT,
+                default_notional_usdt=VIRTUAL_NOTIONAL_USDT,
+            ),
+            callbacks=PersistScanCallbacks(
+                is_open_hold_row=_is_open_hold_row,
+                scan_supersedes_open_hold=_scan_supersedes_open_hold,
+                play_is_play01=_play_is_play01_family,
+                play_is_play02=_play_is_play02_family,
+                settle_supersede=_settle_cb,
+            ),
+        )
         conn.commit()
-        if skipped_open:
-            print(f"[db] skipped_open_hold={skipped_open}")
-        if skipped_open_cap:
-            print(f"[db] skipped_open_position_cap={skipped_open_cap}")
-        if skipped_play01_cap:
-            print(f"[db] skipped_open_play01_cap={skipped_play01_cap}")
-        if skipped_play02_cap:
-            print(f"[db] skipped_open_play02_cap={skipped_play02_cap}")
-        return written, str(DB_PATH)
+        return stats.written, str(DB_PATH)
     finally:
         conn.close()
 
@@ -2860,19 +2542,10 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
     conn = init_db()
     try:
         cur = conn.cursor()
-        cur.execute(
-            f"""
-            SELECT id, symbol, side, play, entry_price, sl_price, tp_price, entry_bar_open_ms,
-                   COALESCE(virtual_notional_usdt, ?) AS notion
-            FROM {ZCT_DB_SIGNALS_TABLE}
-            WHERE outcome IS NULL
-              AND sl_price IS NOT NULL AND tp_price IS NOT NULL
-              AND side IN ('LONG','SHORT')
-            ORDER BY id ASC
-            """,
-            (VIRTUAL_NOTIONAL_USDT,),
+        repo = _signals_repo(conn)
+        rows = repo.fetch_open_signals_for_resolve(
+            cur, default_notional_usdt=VIRTUAL_NOTIONAL_USDT
         )
-        rows = cur.fetchall()
         end_ms = int(time.time() * 1000)
         if rows and RESOLVE_INTER_SYMBOL_SLEEP_SEC > 0:
             print(
@@ -2970,26 +2643,18 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
                 continue
             pnl = _pnl_r(side, entry, exit_px, sl, tp)
             pnl_u = _pnl_usdt(side, entry, exit_px, float(notion))
-            cur.execute(
-                f"""
-                UPDATE {ZCT_DB_SIGNALS_TABLE}
-                SET outcome = ?, outcome_at_utc = ?, exit_price = ?, pnl_r = ?, pnl_usdt = ?,
-                    notes = CASE WHEN notes IS NULL OR notes = '' THEN ?
-                                 ELSE notes || '; ' || ? END
-                WHERE id = ? AND outcome IS NULL
-                """,
-                (
-                    outcome,
-                    now_utc,
-                    exit_px,
-                    round(pnl, 6),
-                    round(pnl_u, 4),
-                    note,
-                    note,
-                    sid,
-                ),
-            )
-            if cur.rowcount:
+            pnl_r = round(pnl, 6)
+            pnl_u_r = round(pnl_u, 4)
+            if repo.update_resolved_signal(
+                cur,
+                int(sid),
+                outcome=str(outcome),
+                outcome_at_utc=now_utc,
+                exit_price=float(exit_px),
+                pnl_r=pnl_r,
+                pnl_usdt=pnl_u_r,
+                note=note,
+            ):
                 stats["resolved"] += 1
                 resolved_events.append(
                     {
@@ -2998,30 +2663,23 @@ def resolve_open_signals_from_db() -> Dict[str, Any]:
                         "side": side,
                         "outcome": outcome,
                         "exit_price": exit_px,
-                        "pnl_r": round(pnl, 6),
-                        "pnl_usdt": round(pnl_u, 4),
+                        "pnl_r": pnl_r,
+                        "pnl_usdt": pnl_u_r,
                     }
                 )
-                cur.execute(
-                    f"""
-                    INSERT INTO {ZCT_DB_SETTLEMENTS_TABLE} (
-                        settled_at_utc, signal_id, symbol, side, play, outcome,
-                        entry_price, exit_price, pnl_r, pnl_usdt, virtual_notional_usdt
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        now_utc,
-                        sid,
-                        sym,
-                        side,
-                        play,
-                        outcome,
-                        entry,
-                        exit_px,
-                        round(pnl, 6),
-                        round(pnl_u, 4),
-                        float(notion),
-                    ),
+                repo.insert_settlement(
+                    cur,
+                    settled_at_utc=now_utc,
+                    signal_id=int(sid),
+                    symbol=str(sym),
+                    side=str(side),
+                    play=play,
+                    outcome=str(outcome),
+                    entry_price=float(entry),
+                    exit_price=float(exit_px),
+                    pnl_r=pnl_r,
+                    pnl_usdt=pnl_u_r,
+                    virtual_notional_usdt=float(notion),
                 )
                 _apply_settlement_cooldowns(
                     cur,
@@ -3121,17 +2779,23 @@ def _tg_push_resolve_text(events: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
+def run_scan(
+    use_tg: bool = True,
+    *,
+    do_resolve: bool = True,
+    config: Optional[StrategyConfig] = None,
+) -> Dict[str, Any]:
+    c = (config or DEFAULT_STRATEGY_CONFIG).copy_for_scan()
     syms = _symbols_from_env()
-    if BTC_MACRO_FILTER_ENABLED:
-        _btc_macro_reset_for_scan()
+    if c.btc_macro_filter_enabled:
+        _btc_macro_reset_for_scan(c)
         if "BTCUSDT" in syms:
             syms = ["BTCUSDT"] + [s for s in syms if s != "BTCUSDT"]
-    halt_day = _circuit_breaker_halted()
+    halt_day = _circuit_breaker_halted(c)
     if halt_day:
         print(
-            f"[risk] P1 日损熔断开启：当日 settlements 累计已达 ≤-{MAX_DAILY_LOSS_PCT:.0%}×"
-            f"{ACCOUNT_EQUITY_USDT:g} USDT，本轮跳过新开方向单"
+            f"[risk] P1 日损熔断开启：当日 settlements 累计已达 ≤-{c.max_daily_loss_pct:.0%}×"
+            f"{c.account_equity_usdt:g} USDT，本轮跳过新开方向单"
         )
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     results: List[Dict[str, Any]] = []
@@ -3141,28 +2805,45 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
         f"{_scan_title_short()} 信号扫描 `{ts}` UTC\n标的: {', '.join(syms) if syms else '(无)'}"
     ]
 
-    for sym in syms:
-        try:
-            res = analyze_symbol(sym, halt_daily_circuit=halt_day)
-            if res is None:
-                text_blocks.append(f"\n{sym}: 数据不足（会话 K 过少或无 K 线）")
-                tg_summary_lines.append(f"· {sym}  数据不足")
-                continue
-            results.append(asdict(res))
-            result_objs.append(res)
-            text_blocks.append("\n" + format_result(res))
-            actionable = (
-                res.side in ("LONG", "SHORT")
-                and res.sl_price is not None
-                and res.tp_price is not None
-            )
-            mark = "★" if actionable else "·"
-            tg_summary_lines.append(
-                f"{mark} {sym}  {res.side}  {res.play}  conf={res.confidence}  {res.regime}"
-            )
-        except Exception as e:
-            text_blocks.append(f"\n{sym}: ERROR {e}")
-            tg_summary_lines.append(f"· {sym}  ERROR {e}")
+    from accumulation_radar import init_db
+    from zct_db_repositories import CooldownRepository
+
+    _scan_conn = init_db()
+    _cooldown_repo = CooldownRepository(_scan_conn)
+    _cooldown_blocked_set = (
+        c.cooldown_blocks_batch(syms, repo=_cooldown_repo) if syms else set()
+    )
+    try:
+        for sym in syms:
+            try:
+                res = analyze_symbol(
+                    sym,
+                    halt_daily_circuit=halt_day,
+                    config=c,
+                    cooldown_repo=_cooldown_repo,
+                    cooldown_blocked=sym in _cooldown_blocked_set,
+                )
+                if res is None:
+                    text_blocks.append(f"\n{sym}: 数据不足（会话 K 过少或无 K 线）")
+                    tg_summary_lines.append(f"· {sym}  数据不足")
+                    continue
+                results.append(asdict(res))
+                result_objs.append(res)
+                text_blocks.append("\n" + format_result(res))
+                actionable = (
+                    res.side in ("LONG", "SHORT")
+                    and res.sl_price is not None
+                    and res.tp_price is not None
+                )
+                mark = "★" if actionable else "·"
+                tg_summary_lines.append(
+                    f"{mark} {sym}  {res.side}  {res.play}  conf={res.confidence}  {res.regime}"
+                )
+            except Exception as e:
+                text_blocks.append(f"\n{sym}: ERROR {e}")
+                tg_summary_lines.append(f"· {sym}  ERROR {e}")
+    finally:
+        _scan_conn.close()
 
     scan_params: Dict[str, Any] = {
         "lane": "touch_pool" if _touch_pool_universe_enabled() else "vwap_default",
@@ -3178,6 +2859,7 @@ def run_scan(use_tg: bool = True, *, do_resolve: bool = True) -> Dict[str, Any]:
         "db_skip_flat": DB_SKIP_FLAT,
         "swing_lookback": SWING_LOOKBACK,
         "min_sl_pct": MIN_SL_PCT,
+        "max_sl_widen_pct": MAX_SL_WIDEN_PCT,
         "resolve_max_bars": RESOLVE_MAX_BARS,
         "resolve_max_hold_ms": RESOLVE_MAX_HOLD_MS,
         "resolve_max_hold_ms_play02": RESOLVE_MAX_HOLD_MS_PLAY02,
