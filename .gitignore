@@ -45,3 +45,8 @@ s6_signals_history.json
 
 # Model cache (downloaded at runtime)
 .huggingface/
+
+.env.oi
+DEPLOY.md
+start.sh
+stop.sh

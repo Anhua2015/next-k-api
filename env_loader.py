@@ -17,5 +17,7 @@ def load_env_oi(base_dir: Optional[Path] = None) -> Optional[Path]:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+                # Strip inline comment (whitespace + # and everything after)
+                v = v.split(" #")[0].split("\t#")[0].strip()
+                os.environ.setdefault(k.strip(), v)
     return path

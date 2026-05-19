@@ -150,6 +150,13 @@ def run_zct_vwap_signal_subprocess() -> None:
 
 def run_zct_vwap_signal_task() -> None:
     run_zct_vwap_signal_subprocess()
+    # Push any new signals to the Binance live-trading bridge (push model, not polling).
+    if os.getenv("BINANCE_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            from binance_bridge.signal_bridge import on_scan_complete
+            on_scan_complete()
+        except Exception as e:
+            logger.warning("binance_bridge signal_bridge on_scan_complete failed: %s", e)
 
 
 def run_zct_vwap_resolve_only_subprocess() -> None:
