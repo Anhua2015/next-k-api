@@ -119,6 +119,25 @@ def symbol_touch_metrics(
     }
 
 
+def symbol_walk_end_open_ms(
+    trades: List[Dict[str, Any]],
+    symbol: str,
+    *,
+    fallback_ms: int,
+) -> int:
+    """标的回测末根时间：优先 exit_bar_open_ms，否则 signal_open_ms；无成交则用 fallback。"""
+    su = str(symbol).strip().upper()
+    ends: List[int] = []
+    for r in trades:
+        if str(r.get("symbol", "")).strip().upper() != su:
+            continue
+        for key in ("exit_bar_open_ms", "signal_open_ms"):
+            raw = r.get(key)
+            if raw is not None:
+                ends.append(int(raw))
+    return max(ends) if ends else int(fallback_ms)
+
+
 def t4_bucket_touch_metrics(
     trades: List[Dict[str, Any]],
     symbol: str,
@@ -166,20 +185,25 @@ def enrich_per_symbol_stats(
     hist_end_open_ms: Optional[int] = None,
     bucket_hours: int = 6,
 ) -> Dict[str, Dict[str, Any]]:
+    fallback_end = int(hist_end_open_ms or 0)
     out: Dict[str, Dict[str, Any]] = {}
     for sym, row in per_symbol.items():
         merged = dict(row)
         merged.update(
             symbol_touch_metrics(trades, sym, default_notional=default_notional)
         )
-        if hist_end_open_ms is not None:
+        if fallback_end > 0:
+            sym_end = symbol_walk_end_open_ms(
+                trades, sym, fallback_ms=fallback_end
+            )
             merged.update(
                 t4_bucket_touch_metrics(
                     trades,
                     sym,
-                    window_end_ms=int(hist_end_open_ms),
+                    window_end_ms=sym_end,
                     bucket_hours=bucket_hours,
                 )
             )
+            merged["t4_hist_end_open_ms"] = sym_end
         out[sym] = merged
     return out

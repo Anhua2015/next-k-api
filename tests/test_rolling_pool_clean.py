@@ -86,6 +86,21 @@ class RollingPoolCleanTests(unittest.TestCase):
             )
         )
 
+    def test_t4_evict_even_when_24h_sample_below_floor(self) -> None:
+        """小样本豁免 24h 胜率/PF，但不豁免 T4。"""
+        r = rolling_evict_reason(
+            _row(
+                win=2,
+                loss=2,
+                win_rate_touch_sl_tp=0.80,
+                profit_factor_net=2.0,
+                t4_win_rate_touch_sl_tp=0.30,
+            ),
+            min_win_loss_abs=10,
+            min_t4_touch_win_rate_evict=0.40,
+        )
+        self.assertEqual(r, "t4_touch_win_rate_below_rolling_min")
+
 
 if __name__ == "__main__":
     unittest.main()

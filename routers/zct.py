@@ -194,6 +194,8 @@ async def post_zct_touch_pool_scan(
             min_touch_share=float(body.min_touch_share),
             min_profit_factor=float(body.min_profit_factor),
             max_consecutive_losses_at_end=int(body.max_consecutive_losses_at_end),
+            min_t4_touch_win_rate=float(body.min_t4_touch_win_rate),
+            bucket_hours=int(body.bucket_hours) if int(body.bucket_hours) > 0 else None,
             quiet=True,
             symbols_source=scan_src,
         )

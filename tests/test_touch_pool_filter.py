@@ -120,6 +120,39 @@ class TouchPoolFilterTests(unittest.TestCase):
         self.assertIn("OKUSDT", syms)
         self.assertNotIn("BADUSDT", syms)
 
+    def test_filter_t4_unavailable_reason(self) -> None:
+        summary = {
+            "per_symbol": {
+                "XUSDT": {
+                    "win": 20,
+                    "loss": 5,
+                    "n_trades": 30,
+                    "expired": 0,
+                    "win_rate_touch_sl_tp": 0.8,
+                    "profit_factor_net": 1.5,
+                    "consecutive_losses_at_end": 0,
+                    "t4_win_rate_touch_sl_tp": None,
+                },
+            }
+        }
+        filt = _filter_pool(
+            summary,
+            min_touch_trades=1,
+            strict_greater_touch=False,
+            min_touch_win_rate=0.72,
+            strict_greater_rate=False,
+            min_total_trades=20,
+            max_expired_ratio=1.0,
+            min_profit_factor=1.25,
+            max_consecutive_losses_at_end=2,
+            min_t4_touch_win_rate=0.50,
+        )
+        self.assertEqual(len(filt["matched"]), 0)
+        self.assertIn(
+            "t4_touch_win_rate_unavailable",
+            filt["rejected"][0]["reject_reason"],
+        )
+
     def test_t4_bucket_metrics(self) -> None:
         end = 100_000_000
         six_h = 6 * 3_600_000

@@ -230,8 +230,14 @@ def _filter_pool(
         t4_wr = row.get("t4_win_rate_touch_sl_tp")
         t4_wr_f = float(t4_wr) if t4_wr is not None else None
         ok_t4 = True
+        t4_reject: Optional[str] = None
         if float(min_t4_touch_win_rate) > 0:
-            ok_t4 = t4_wr_f is not None and t4_wr_f >= float(min_t4_touch_win_rate)
+            if t4_wr_f is None:
+                ok_t4 = False
+                t4_reject = "t4_touch_win_rate_unavailable"
+            elif t4_wr_f < float(min_t4_touch_win_rate):
+                ok_t4 = False
+                t4_reject = "t4_touch_win_rate_below_threshold"
 
         rec: Dict[str, Any] = {
             "symbol": su,
@@ -293,8 +299,8 @@ def _filter_pool(
                 rec["reject_reason"].append("profit_factor_below_threshold")
             if not ok_consec:
                 rec["reject_reason"].append("consecutive_losses_at_end_too_high")
-            if not ok_t4:
-                rec["reject_reason"].append("t4_touch_win_rate_below_threshold")
+            if not ok_t4 and t4_reject:
+                rec["reject_reason"].append(t4_reject)
             rejected.append(rec)
 
     matched.sort(
@@ -331,6 +337,10 @@ def touch_pool_bucket_hours() -> int:
     return max(1, _int_env("ZCT_TOUCH_POOL_BUCKET_HOURS", 6))
 
 
+def master_scan_min_t4_touch_win_rate() -> float:
+    return _float_env("ZCT_TOUCH_POOL_MIN_T4_WIN_RATE", 0.50)
+
+
 def rolling_clean_config() -> Dict[str, Any]:
     """Phase 2 滚动清洗阈值（环境变量可覆盖）。"""
     return {
@@ -363,11 +373,22 @@ def rolling_evict_reason(
     """
     滚动 24h 窗口内是否应从触轨池剔除；None=保留。
     任一触发：触轨胜率 < min_wr；扣摩擦 PF < min_pf；T4 触轨胜率 < min_t4；末段连亏 >= max_consec。
-    触轨样本 win+loss < min_win_loss_abs 时不按胜率/PF 淘汰（防小样本颠簸）。
+    触轨样本 win+loss < min_win_loss_abs 时不按 24h 胜率/PF 淘汰（防小样本颠簸）；T4 动量线不受该豁免影响。
     """
     consec = int(row.get("consecutive_losses_at_end") or 0)
     if consec >= max(1, int(max_consecutive_losses_evict)):
         return "consecutive_losses_at_end_veto"
+
+    if float(min_t4_touch_win_rate_evict) > 0:
+        t4_wr = row.get("t4_win_rate_touch_sl_tp")
+        if t4_wr is None:
+            return "t4_touch_win_rate_unavailable"
+        try:
+            t4_f = float(t4_wr)
+        except (TypeError, ValueError):
+            return "t4_touch_win_rate_invalid"
+        if t4_f < float(min_t4_touch_win_rate_evict):
+            return "t4_touch_win_rate_below_rolling_min"
 
     w = int(row.get("win", 0) or 0)
     l_ = int(row.get("loss", 0) or 0)
@@ -385,17 +406,6 @@ def rolling_evict_reason(
         return "touch_win_rate_invalid"
     if wr_f < float(min_touch_win_rate):
         return "touch_win_rate_below_rolling_min"
-
-    if float(min_t4_touch_win_rate_evict) > 0:
-        t4_wr = row.get("t4_win_rate_touch_sl_tp")
-        if t4_wr is None:
-            return "t4_touch_win_rate_unavailable"
-        try:
-            t4_f = float(t4_wr)
-        except (TypeError, ValueError):
-            return "t4_touch_win_rate_invalid"
-        if t4_f < float(min_t4_touch_win_rate_evict):
-            return "t4_touch_win_rate_below_rolling_min"
 
     pf_f = _profit_factor_value(row)
     if pf_f != float("inf") and pf_f < float(min_profit_factor):
@@ -460,7 +470,7 @@ def run_walkforward_enriched(
         "bucket_hours": int(cfg.get("bucket_hours") or touch_pool_bucket_hours()),
         "rolling_min_win_loss_abs": int(cfg.get("min_win_loss_abs", 0)),
         "rolling_min_win_loss_rule": (
-            f"skip wr/pf evict if win+loss < {int(cfg.get('min_win_loss_abs', 0))}"
+            f"skip 24h wr/pf evict if win+loss < {int(cfg.get('min_win_loss_abs', 0))}; T4 always checked"
             if int(cfg.get("min_win_loss_abs", 0)) > 0
             else "off"
         ),
@@ -511,12 +521,17 @@ def run_asset_pool_scan(
     min_touch_share: float = 0.0,
     min_profit_factor: float = 1.25,
     max_consecutive_losses_at_end: int = 2,
-    min_t4_touch_win_rate: float = 0.50,
+    min_t4_touch_win_rate: Optional[float] = None,
     bucket_hours: Optional[int] = None,
     quiet: bool = True,
     symbols_source: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """跑 walk-forward 并筛选；返回 (pool_payload, raw_backtest_summary)。"""
+    mt4 = (
+        master_scan_min_t4_touch_win_rate()
+        if min_t4_touch_win_rate is None
+        else float(min_t4_touch_win_rate)
+    )
     ctx = contextlib.redirect_stdout(io.StringIO()) if quiet else contextlib.nullcontext()
     with ctx:
         summary = run_backtest(
@@ -556,12 +571,26 @@ def run_asset_pool_scan(
         min_touch_share=float(min_touch_share),
         min_profit_factor=float(min_profit_factor),
         max_consecutive_losses_at_end=int(max_consecutive_losses_at_end),
-        min_t4_touch_win_rate=float(min_t4_touch_win_rate),
+        min_t4_touch_win_rate=mt4,
+    )
+    t4_rej = sum(
+        1
+        for r in filt["rejected"]
+        if any(
+            x.startswith("t4_")
+            for x in (r.get("reject_reason") or [])
+        )
     )
     print(
         _format_pool_scan_aggregate_lines(summary, touch_rows, filt["matched"]),
         flush=True,
     )
+    if mt4 > 0:
+        print(
+            f"[pool] T4(last {bh}h) gate>={mt4:.0%}: "
+            f"matched={len(filt['matched'])} rejected_t4={t4_rej}",
+            flush=True,
+        )
 
     crit: Dict[str, Any] = {
         "days": float(days),
@@ -596,11 +625,11 @@ def run_asset_pool_scan(
         "tp_mode_note": "PLAY01/02=1R；PLAY03 默认 vwap（ZCT_PLAY03_TP_MODE）",
         "max_consecutive_losses_at_end": int(max_consecutive_losses_at_end),
         "consecutive_losses_rule": f"end_streak <= {int(max_consecutive_losses_at_end)} (<3)",
-        "min_t4_touch_win_rate": float(min_t4_touch_win_rate),
+        "min_t4_touch_win_rate": mt4,
         "t4_bucket_hours": bh,
         "t4_rule": (
-            f"T4(last {bh}h) touch_win_rate >= {float(min_t4_touch_win_rate):.0%}"
-            if float(min_t4_touch_win_rate) > 0
+            f"T4(last {bh}h) touch_win_rate >= {mt4:.0%}"
+            if mt4 > 0
             else "off"
         ),
         "scan_phase": "daily_master",
@@ -686,8 +715,8 @@ def main() -> None:
     ap.add_argument(
         "--min-t4-touch-win-rate",
         type=float,
-        default=0.50,
-        help="T4(末 bucket_hours h) 触轨胜率下限，主筛默认 0.50；0=关闭",
+        default=-1.0,
+        help="T4 触轨胜率下限；-1=ZCT_TOUCH_POOL_MIN_T4_WIN_RATE(默认0.50)；0=关闭",
     )
     ap.add_argument(
         "--bucket-hours",
@@ -770,7 +799,11 @@ def main() -> None:
         min_touch_share=float(args.min_touch_share),
         min_profit_factor=float(args.min_profit_factor),
         max_consecutive_losses_at_end=int(args.max_consecutive_losses_at_end),
-        min_t4_touch_win_rate=float(args.min_t4_touch_win_rate),
+        min_t4_touch_win_rate=(
+            None
+            if float(args.min_t4_touch_win_rate) < 0
+            else float(args.min_t4_touch_win_rate)
+        ),
         bucket_hours=int(args.bucket_hours) if int(args.bucket_hours) > 0 else None,
         quiet=True,
         symbols_source=sym_src,

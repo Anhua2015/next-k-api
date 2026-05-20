@@ -113,7 +113,11 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
         min_touch_share=float(ns.min_touch_share),
         min_profit_factor=float(ns.min_profit_factor),
         max_consecutive_losses_at_end=int(ns.max_consecutive_losses_at_end),
-        min_t4_touch_win_rate=float(ns.min_t4_touch_win_rate),
+        min_t4_touch_win_rate=(
+            None
+            if float(ns.min_t4_touch_win_rate) < 0
+            else float(ns.min_t4_touch_win_rate)
+        ),
         bucket_hours=int(ns.bucket_hours) if int(ns.bucket_hours) > 0 else None,
         quiet=True,
         symbols_source=sym_src,
@@ -220,8 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--min-t4-touch-win-rate",
         type=float,
-        default=0.50,
-        help="T4(末 6h) 触轨胜率下限，主筛默认 0.50",
+        default=-1.0,
+        help="T4(末 6h) 触轨胜率下限；-1=读 ZCT_TOUCH_POOL_MIN_T4_WIN_RATE(默认0.50)",
     )
     ap.add_argument(
         "--bucket-hours",

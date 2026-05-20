@@ -145,6 +145,15 @@ def run_rolling_pool_clean(
         if reason:
             to_remove.append(sym)
             details.append({**snap, "evict_reason": reason})
+            if str(reason).startswith("t4_"):
+                t4w = snap.get("t4_win_rate_touch_sl_tp")
+                logger.info(
+                    "[rolling_clean] evict %s: %s t4_wr=%s (floor=%.0f%%)",
+                    sym,
+                    reason,
+                    t4w,
+                    min_t4 * 100.0,
+                )
         else:
             kept.append(sym)
             kept_rows.append(snap)

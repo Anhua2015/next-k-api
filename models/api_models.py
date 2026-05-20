@@ -76,6 +76,18 @@ class ZctTouchPoolScanBody(BaseModel):
         le=50,
         description="周期末连亏上限（2 即 <3）",
     )
+    min_t4_touch_win_rate: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        description="T4(末 bucket_hours h) 触轨胜率下限；0=关闭",
+    )
+    bucket_hours: int = Field(
+        default=0,
+        ge=0,
+        le=24,
+        description="T1–T4 分桶宽度；0=用 ZCT_TOUCH_POOL_BUCKET_HOURS",
+    )
     signal_interval: str = Field(default="1m")
     sleep_between_symbols: float = Field(default=0.25, ge=0.0, le=10.0)
     persist_db: bool = Field(default=True)
