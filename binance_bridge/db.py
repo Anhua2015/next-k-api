@@ -30,10 +30,16 @@ DEFAULT_CONFIG: Dict[str, str] = {
     "testnet": "false",
     "enabled": "false",
     "margin_usdt": "100",
-    "max_positions": "3",
+    "max_positions": "8",
+    "max_positions_play01": "5",
+    "max_positions_play02": "5",
+    "max_positions_play03": "5",
     "leverage": "10",
     "enabled_sources": "zct_vwap",
     "position_expire_hours": "4",
+    "expire_hours_play01": "5",
+    "expire_hours_play02": "4",
+    "expire_hours_play03": "3",
 }
 
 # Map environment variables to config keys (applied on first init, env wins over defaults).
@@ -44,7 +50,13 @@ _ENV_TO_CONFIG: Dict[str, str] = {
     "BINANCE_MARGIN_USDT": "margin_usdt",
     "BINANCE_LEVERAGE": "leverage",
     "BINANCE_MAX_POSITIONS": "max_positions",
+    "BINANCE_MAX_POSITIONS_PLAY01": "max_positions_play01",
+    "BINANCE_MAX_POSITIONS_PLAY02": "max_positions_play02",
+    "BINANCE_MAX_POSITIONS_PLAY03": "max_positions_play03",
     "BINANCE_EXPIRE_HOURS": "position_expire_hours",
+    "BINANCE_EXPIRE_HOURS_PLAY01": "expire_hours_play01",
+    "BINANCE_EXPIRE_HOURS_PLAY02": "expire_hours_play02",
+    "BINANCE_EXPIRE_HOURS_PLAY03": "expire_hours_play03",
 }
 
 DDL = """
@@ -137,6 +149,11 @@ def init_db() -> None:
         # Online migration: add expire_at if upgrading from a schema without it.
         if not _column_exists(conn, "positions", "expire_at"):
             conn.execute("ALTER TABLE positions ADD COLUMN expire_at TEXT")
+        # Online migration: add play column for per-play position tracking.
+        if not _column_exists(conn, "signals_log", "play"):
+            conn.execute("ALTER TABLE signals_log ADD COLUMN play TEXT")
+        if not _column_exists(conn, "positions", "play"):
+            conn.execute("ALTER TABLE positions ADD COLUMN play TEXT")
         # Apply env vars first (win over defaults) — INSERT OR IGNORE so
         # user-set values already in DB are never overwritten on restart.
         for env_key, config_key in _ENV_TO_CONFIG.items():
@@ -218,6 +235,7 @@ def insert_signal(
     received_at: str,
     status: str = "received",
     skip_reason: Optional[str] = None,
+    play: Optional[str] = None,
 ) -> Optional[int]:
     """Insert signal; return rowid, or None if duplicate (UNIQUE constraint)."""
     try:
@@ -226,12 +244,12 @@ def insert_signal(
                 """INSERT INTO signals_log
                    (source, api_signal_id, symbol, side, entry_price, sl_price,
                     tp_price, confidence, regime, notional_usdt, received_at,
-                    status, skip_reason)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    status, skip_reason, play)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     source, api_signal_id, symbol, side, entry_price, sl_price,
                     tp_price, confidence, regime, notional_usdt, received_at,
-                    status, skip_reason,
+                    status, skip_reason, play,
                 ),
             )
             return cur.lastrowid
@@ -269,6 +287,57 @@ def _compute_expire_at(expire_hours: float) -> str:
     ).isoformat()
 
 
+def _resolve_expire_hours(play: Optional[str]) -> float:
+    """Return expire hours for a given play type, falling back to global."""
+    if play:
+        p = str(play).strip().upper()
+        if p.startswith("PLAY01"):
+            val = get_config("expire_hours_play01", "")
+        elif p.startswith("PLAY02"):
+            val = get_config("expire_hours_play02", "")
+        elif p.startswith("PLAY03"):
+            val = get_config("expire_hours_play03", "")
+        else:
+            val = ""
+        if val:
+            try:
+                return float(val)
+            except ValueError:
+                pass
+    return float(get_config("position_expire_hours", "4"))
+
+
+def count_open_by_play(play: Optional[str]) -> int:
+    """Count open positions for a given play type."""
+    if not play:
+        return 0
+    p = str(play).strip().upper()
+    prefix = ""
+    if p.startswith("PLAY01"):
+        prefix = "PLAY01%"
+    elif p.startswith("PLAY02"):
+        prefix = "PLAY02%"
+    elif p.startswith("PLAY03"):
+        prefix = "PLAY03%"
+    else:
+        return 0
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM positions WHERE status='open' AND play LIKE ?",
+            (prefix,),
+        ).fetchone()
+    return row["cnt"] if row else 0
+
+
+def count_open_total() -> int:
+    """Count total open positions."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM positions WHERE status='open'"
+        ).fetchone()
+    return row["cnt"] if row else 0
+
+
 def insert_position(
     signal_log_id: int,
     symbol: str,
@@ -283,20 +352,21 @@ def insert_position(
     notional_usdt: Optional[float],
     leverage: Optional[int],
     opened_at: str,
+    play: Optional[str] = None,
 ) -> int:
-    expire_hours = float(get_config("position_expire_hours", "4"))
+    expire_hours = _resolve_expire_hours(play)
     expire_at = _compute_expire_at(expire_hours)
     with get_db(write=True) as conn:
         cur = conn.execute(
             """INSERT INTO positions
                (signal_log_id, symbol, side, entry_order_id, sl_order_id,
                 tp_order_id, entry_price, sl_price, tp_price, quantity,
-                notional_usdt, leverage, opened_at, expire_at, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open')""",
+                notional_usdt, leverage, opened_at, expire_at, status, play)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
             (
                 signal_log_id, symbol, side, entry_order_id, sl_order_id,
                 tp_order_id, entry_price, sl_price, tp_price, quantity,
-                notional_usdt, leverage, opened_at, expire_at,
+                notional_usdt, leverage, opened_at, expire_at, play,
             ),
         )
         return cur.lastrowid
