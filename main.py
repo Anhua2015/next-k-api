@@ -18,6 +18,7 @@ from app_state import state
 import scheduler_config as sched_cfg
 from routers import accumulation as accumulation_router
 from routers import core as core_router
+from routers import maintenance as maintenance_router
 from routers import radar as radar_router
 from routers import s2_s6 as s2_s6_router
 from routers import vp_regime as vp_regime_router
@@ -115,6 +116,7 @@ app.add_middleware(
 )
 
 app.include_router(core_router.router)
+app.include_router(maintenance_router.router)
 if sched_cfg.env_truthy("NEXT_K_RADAR_API_ENABLED"):
     app.include_router(radar_router.router)
 app.include_router(accumulation_router.router)
