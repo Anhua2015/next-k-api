@@ -22,6 +22,7 @@ def _row(**kwargs):
         "win_rate_touch_sl_tp": 0.75,
         "profit_factor_net": 1.3,
         "consecutive_losses_at_end": 0,
+        "t4_win_rate_touch_sl_tp": 0.75,
     }
     base.update(kwargs)
     return base
@@ -69,6 +70,21 @@ class RollingPoolCleanTests(unittest.TestCase):
             min_win_loss_abs=10,
         )
         self.assertEqual(r, "consecutive_losses_at_end_veto")
+
+    def test_evict_low_t4_win_rate(self) -> None:
+        r = rolling_evict_reason(
+            _row(t4_win_rate_touch_sl_tp=0.35),
+            min_t4_touch_win_rate_evict=0.40,
+        )
+        self.assertEqual(r, "t4_touch_win_rate_below_rolling_min")
+
+    def test_keep_t4_at_40_pct(self) -> None:
+        self.assertIsNone(
+            rolling_evict_reason(
+                _row(t4_win_rate_touch_sl_tp=0.40),
+                min_t4_touch_win_rate_evict=0.40,
+            )
+        )
 
 
 if __name__ == "__main__":

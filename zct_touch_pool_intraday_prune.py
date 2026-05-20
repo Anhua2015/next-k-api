@@ -9,6 +9,7 @@ Phase 2：日内滚动清洗（Rolling Pool Backtest）
 淘汰（任一即 DELETE，池子只减不增）：
 - 触轨胜率 < 70%（ZCT_TOUCH_POOL_ROLLING_MIN_WIN_RATE）
 - 扣摩擦 PF < 1.15（ZCT_TOUCH_POOL_ROLLING_MIN_PF）
+- T4（最近 6h）触轨胜率 < 40%（ZCT_TOUCH_POOL_ROLLING_MIN_T4_WIN_RATE）
 - 周期末连续亏损 >= 3（ZCT_TOUCH_POOL_ROLLING_MAX_CONSEC_LOSSES）
 
 主筛（08:05 全市场大选）见 zct_vwap_asset_pool_daily_job.py。
@@ -93,6 +94,7 @@ def run_rolling_pool_clean(
 
     min_wr = float(cfg["min_touch_win_rate"])
     min_pf = float(cfg["min_profit_factor"])
+    min_t4 = float(cfg.get("min_t4_touch_win_rate_evict", 0.40))
     max_consec = int(cfg["max_consecutive_losses_evict"])
     min_touch = int(cfg.get("min_win_loss_abs", 0))
 
@@ -129,6 +131,8 @@ def run_rolling_pool_clean(
             "n_trades": row.get("n_trades"),
             "expired": row.get("expired"),
             "unresolved": row.get("unresolved"),
+            "t4_win_rate_touch_sl_tp": row.get("t4_win_rate_touch_sl_tp"),
+            "t4_win_plus_loss": row.get("t4_win_plus_loss"),
         }
         reason = rolling_evict_reason(
             row,
@@ -136,6 +140,7 @@ def run_rolling_pool_clean(
             min_profit_factor=min_pf,
             max_consecutive_losses_evict=max_consec,
             min_win_loss_abs=min_touch,
+            min_t4_touch_win_rate_evict=min_t4,
         )
         if reason:
             to_remove.append(sym)

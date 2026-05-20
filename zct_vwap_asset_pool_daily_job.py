@@ -113,6 +113,8 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
         min_touch_share=float(ns.min_touch_share),
         min_profit_factor=float(ns.min_profit_factor),
         max_consecutive_losses_at_end=int(ns.max_consecutive_losses_at_end),
+        min_t4_touch_win_rate=float(ns.min_t4_touch_win_rate),
+        bucket_hours=int(ns.bucket_hours) if int(ns.bucket_hours) > 0 else None,
         quiet=True,
         symbols_source=sym_src,
     )
@@ -214,6 +216,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="周期末连续亏损上限（默认 2 即 <3）",
+    )
+    ap.add_argument(
+        "--min-t4-touch-win-rate",
+        type=float,
+        default=0.50,
+        help="T4(末 6h) 触轨胜率下限，主筛默认 0.50",
+    )
+    ap.add_argument(
+        "--bucket-hours",
+        type=int,
+        default=0,
+        help="分桶宽度小时，0=ZCT_TOUCH_POOL_BUCKET_HOURS",
     )
     ap.add_argument("--signal-interval", type=str, default="1m", choices=["1m", "5m"])
     ap.add_argument("--sleep-between-symbols", type=float, default=None)

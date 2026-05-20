@@ -119,11 +119,52 @@ def symbol_touch_metrics(
     }
 
 
+def t4_bucket_touch_metrics(
+    trades: List[Dict[str, Any]],
+    symbol: str,
+    *,
+    window_end_ms: int,
+    bucket_hours: int = 6,
+) -> Dict[str, Any]:
+    """最近一个时间桶（默认 T4=末 6h）触轨统计，按 signal_open_ms 分桶。"""
+    bh = max(1, int(bucket_hours))
+    bucket_ms = bh * 3_600_000
+    lo = int(window_end_ms) - bucket_ms
+    hi = int(window_end_ms)
+    su = str(symbol).strip().upper()
+    bucket_tr = [
+        r
+        for r in trades
+        if str(r.get("symbol", "")).strip().upper() == su
+        and r.get("signal_open_ms") is not None
+        and lo <= int(r["signal_open_ms"]) < hi
+    ]
+    w = sum(1 for x in bucket_tr if x.get("outcome") == "win")
+    l_ = sum(1 for x in bucket_tr if x.get("outcome") == "loss")
+    ex = sum(1 for x in bucket_tr if x.get("outcome") == "expired")
+    touch = w + l_
+    resolved = touch + ex
+    return {
+        "t4_bucket_hours": bh,
+        "t4_start_ms": lo,
+        "t4_end_ms": hi,
+        "t4_n_trades": len(bucket_tr),
+        "t4_win": w,
+        "t4_loss": l_,
+        "t4_expired": ex,
+        "t4_win_plus_loss": touch,
+        "t4_win_rate_touch_sl_tp": round(w / touch, 6) if touch else None,
+        "t4_win_rate_vs_all_resolved": round(w / resolved, 6) if resolved else None,
+    }
+
+
 def enrich_per_symbol_stats(
     per_symbol: Dict[str, Dict[str, Any]],
     trades: List[Dict[str, Any]],
     *,
     default_notional: float,
+    hist_end_open_ms: Optional[int] = None,
+    bucket_hours: int = 6,
 ) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     for sym, row in per_symbol.items():
@@ -131,5 +172,14 @@ def enrich_per_symbol_stats(
         merged.update(
             symbol_touch_metrics(trades, sym, default_notional=default_notional)
         )
+        if hist_end_open_ms is not None:
+            merged.update(
+                t4_bucket_touch_metrics(
+                    trades,
+                    sym,
+                    window_end_ms=int(hist_end_open_ms),
+                    bucket_hours=bucket_hours,
+                )
+            )
         out[sym] = merged
     return out

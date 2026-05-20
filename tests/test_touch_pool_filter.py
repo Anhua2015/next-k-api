@@ -14,6 +14,7 @@ if str(_API_ROOT) not in sys.path:
 from zct_touch_pool_metrics import (
     net_pnl_after_friction,
     round_trip_friction_usdt,
+    t4_bucket_touch_metrics,
     taker_bps_per_side,
     slippage_bps_per_side,
     trailing_consecutive_losses_at_end,
@@ -43,6 +44,7 @@ class TouchPoolFilterTests(unittest.TestCase):
                     "win_rate_touch_sl_tp": 0.8,
                     "profit_factor_net": 1.1,
                     "consecutive_losses_at_end": 0,
+                    "t4_win_rate_touch_sl_tp": 0.6,
                 },
                 "ETHUSDT": {
                     "win": 8,
@@ -53,6 +55,7 @@ class TouchPoolFilterTests(unittest.TestCase):
                     "win_rate_touch_sl_tp": 0.8,
                     "profit_factor_net": 1.5,
                     "consecutive_losses_at_end": 1,
+                    "t4_win_rate_touch_sl_tp": 0.6,
                 },
             }
         }
@@ -68,10 +71,79 @@ class TouchPoolFilterTests(unittest.TestCase):
             min_touch_share=0.0,
             min_profit_factor=1.25,
             max_consecutive_losses_at_end=2,
+            min_t4_touch_win_rate=0.0,
         )
         syms = {m["symbol"] for m in filt["matched"]}
         self.assertNotIn("BTCUSDT", syms)
         self.assertIn("ETHUSDT", syms)
+
+    def test_filter_requires_t4_win_rate(self) -> None:
+        summary = {
+            "per_symbol": {
+                "OKUSDT": {
+                    "win": 20,
+                    "loss": 5,
+                    "n_trades": 30,
+                    "expired": 0,
+                    "win_rate_touch_sl_tp": 0.8,
+                    "profit_factor_net": 1.5,
+                    "consecutive_losses_at_end": 0,
+                    "t4_win_rate_touch_sl_tp": 0.55,
+                    "t4_win_plus_loss": 8,
+                },
+                "BADUSDT": {
+                    "win": 20,
+                    "loss": 5,
+                    "n_trades": 30,
+                    "expired": 0,
+                    "win_rate_touch_sl_tp": 0.8,
+                    "profit_factor_net": 1.5,
+                    "consecutive_losses_at_end": 0,
+                    "t4_win_rate_touch_sl_tp": 0.45,
+                    "t4_win_plus_loss": 8,
+                },
+            }
+        }
+        filt = _filter_pool(
+            summary,
+            min_touch_trades=1,
+            strict_greater_touch=False,
+            min_touch_win_rate=0.72,
+            strict_greater_rate=False,
+            min_total_trades=20,
+            max_expired_ratio=1.0,
+            min_profit_factor=1.25,
+            max_consecutive_losses_at_end=2,
+            min_t4_touch_win_rate=0.50,
+        )
+        syms = {m["symbol"] for m in filt["matched"]}
+        self.assertIn("OKUSDT", syms)
+        self.assertNotIn("BADUSDT", syms)
+
+    def test_t4_bucket_metrics(self) -> None:
+        end = 100_000_000
+        six_h = 6 * 3_600_000
+        trades = [
+            {
+                "symbol": "XUSDT",
+                "signal_open_ms": end - 3_600_000,
+                "outcome": "win",
+            },
+            {
+                "symbol": "XUSDT",
+                "signal_open_ms": end - 2_000_000,
+                "outcome": "loss",
+            },
+            {
+                "symbol": "XUSDT",
+                "signal_open_ms": end - six_h - 60_000,
+                "outcome": "win",
+            },
+        ]
+        m = t4_bucket_touch_metrics(trades, "XUSDT", window_end_ms=end, bucket_hours=6)
+        self.assertEqual(m["t4_win"], 1)
+        self.assertEqual(m["t4_loss"], 1)
+        self.assertAlmostEqual(m["t4_win_rate_touch_sl_tp"], 0.5)
 
     def test_net_pnl_after_friction_reduces_win(self) -> None:
         gross = net_pnl_after_friction("LONG", 100.0, 101.0, 1000.0)
