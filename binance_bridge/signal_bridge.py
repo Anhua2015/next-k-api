@@ -50,7 +50,7 @@ def _read_open_zct_signals() -> List[Dict[str, Any]]:
     try:
         cur = conn.execute(
             """SELECT id, symbol, side, entry_price, sl_price, tp_price,
-                      virtual_notional_usdt, recorded_at_utc, confidence, regime
+                      virtual_notional_usdt, recorded_at_utc, confidence, regime, play
                FROM zct_vwap_signals
                WHERE outcome IS NULL
                  AND sl_price IS NOT NULL
@@ -88,9 +88,26 @@ def on_scan_complete() -> Dict[str, Any]:
         return result
 
     try:
-        max_pos = int(_db.get_config("max_positions", "3"))
+        max_pos = int(_db.get_config("max_positions", "8"))
     except ValueError:
-        max_pos = 3
+        max_pos = 8
+
+    # Per-play max configs
+    _play_max = {}
+    for _pn in ("play01", "play02", "play03"):
+        try:
+            _play_max[_pn] = int(_db.get_config(f"max_positions_{_pn}", "5"))
+        except ValueError:
+            _play_max[_pn] = 5
+
+    def _play_max_for(p: str) -> int:
+        if not p:
+            return max_pos
+        pu = p.strip().upper()
+        for _k in ("PLAY01", "PLAY02", "PLAY03"):
+            if pu.startswith(_k):
+                return _play_max.get(_k.lower(), 5)
+        return max_pos
 
     signals = _read_open_zct_signals()
     result["scanned"] = len(signals)
@@ -101,11 +118,12 @@ def on_scan_complete() -> Dict[str, Any]:
         side = sig.get("side", "")
         sl_price = sig.get("sl_price")
         tp_price = sig.get("tp_price")
+        play = sig.get("play", "") or ""
 
         if not api_id or not symbol or not sl_price or not tp_price:
             continue
 
-        detail: Dict[str, Any] = {"api_signal_id": api_id, "symbol": symbol, "side": side}
+        detail: Dict[str, Any] = {"api_signal_id": api_id, "symbol": symbol, "side": side, "play": play}
 
         # Atomic: insert into signals_log + position-count check must be serialised.
         with _db._db_write_lock:
@@ -121,6 +139,7 @@ def on_scan_complete() -> Dict[str, Any]:
                 regime=sig.get("regime"),
                 notional_usdt=sig.get("virtual_notional_usdt"),
                 received_at=_now_utc(),
+                play=play,
             )
             if signal_log_id is None:
                 # Duplicate — already processed in a previous scan.
@@ -138,11 +157,22 @@ def on_scan_complete() -> Dict[str, Any]:
                 result["details"].append(detail)
                 continue
 
-            # Gate: max_positions reached
-            open_count = len(_db.get_open_positions())
+            # Gate: per-play max positions reached
+            play_max = _play_max_for(play)
+            play_open = _db.count_open_by_play(play)
+            if play_open >= play_max:
+                _db.update_signal_status(signal_log_id, "skipped_max_positions", f"play={play} max={play_max} open={play_open}")
+                logger.info("bridge skip %s %s: play=%s max=%d reached", side, symbol, play, play_max)
+                detail["action"] = "skipped_max_positions"
+                result["skipped"] += 1
+                result["details"].append(detail)
+                continue
+
+            # Gate: global max_positions reached
+            open_count = _db.count_open_total()
             if open_count >= max_pos:
-                _db.update_signal_status(signal_log_id, "skipped_max_positions", f"max={max_pos} open={open_count}")
-                logger.info("bridge skip %s %s: max_positions=%d reached", side, symbol, max_pos)
+                _db.update_signal_status(signal_log_id, "skipped_max_positions", f"global max={max_pos} open={open_count}")
+                logger.info("bridge skip %s %s: global max_positions=%d reached", side, symbol, max_pos)
                 detail["action"] = "skipped_max_positions"
                 result["skipped"] += 1
                 result["details"].append(detail)
@@ -157,6 +187,7 @@ def on_scan_complete() -> Dict[str, Any]:
                 "sl_price": float(sl_price),
                 "tp_price": float(tp_price),
                 "notional_usdt": sig.get("virtual_notional_usdt"),
+                "play": play,
             })
             detail["action"] = "traded" if ok else "error"
             if ok:

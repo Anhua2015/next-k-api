@@ -446,12 +446,14 @@ def _validate_sl_distance(side: str, sl_price: float, mark_px: float, tick: str)
 def execute_trade(signal: Dict[str, Any]) -> bool:
     """Open a Binance Futures position for a ZCT signal.
 
-    signal keys: signal_log_id, symbol, side (LONG/SHORT), sl_price, tp_price.
+    signal keys: signal_log_id, symbol, side (LONG/SHORT), sl_price, tp_price,
+                 play (optional, for per-play expire hours).
     Returns True when entry + SL + TP all succeed.
     """
     signal_log_id = signal["signal_log_id"]
     symbol = signal["symbol"]
     side = signal["side"]
+    play = signal.get("play", "") or ""
     try:
         sl_price = float(signal["sl_price"])
         tp_price = float(signal["tp_price"])
@@ -559,6 +561,7 @@ def execute_trade(signal: Dict[str, Any]) -> bool:
         notional_usdt=margin,
         leverage=leverage,
         opened_at=_now_utc(),
+        play=play,
     )
     update_signal_status(signal_log_id, "traded")
     logger.info("Opened %s %s qty=%s entry=%.6f sl=%.6f tp=%.6f", side, symbol, qty, actual_entry, sl_p, tp_p)
