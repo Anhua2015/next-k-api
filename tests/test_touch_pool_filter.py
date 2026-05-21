@@ -39,7 +39,7 @@ class TouchPoolFilterTests(unittest.TestCase):
         self.assertEqual(p["min_total_trades"], 10)
         self.assertEqual(p["min_win_loss_abs"], 10)
         self.assertEqual(p["min_touch_trades"], 10)
-        self.assertAlmostEqual(p["min_touch_win_rate"], 0.85)
+        self.assertAlmostEqual(p["min_touch_win_rate"], 0.82)
         self.assertAlmostEqual(p["min_profit_factor"], 1.30)
         self.assertEqual(p["max_consecutive_losses_at_end"], 1)
         self.assertEqual(p["min_t4_touch_win_rate"], 0.0)
@@ -88,7 +88,7 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.85,
+            min_touch_win_rate=0.82,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
@@ -120,7 +120,7 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.85,
+            min_touch_win_rate=0.82,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
@@ -150,7 +150,7 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.85,
+            min_touch_win_rate=0.82,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
@@ -180,7 +180,7 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.85,
+            min_touch_win_rate=0.82,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
