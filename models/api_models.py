@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from touch_pool_config import (
     TOUCH_POOL_MAX_CONSEC_LOSSES,
+    TOUCH_POOL_MAX_WIN_LOSS_ABS,
     TOUCH_POOL_MIN_PF,
     TOUCH_POOL_MIN_T4_WIN_RATE,
     TOUCH_POOL_MIN_TOUCH_TRADES,
@@ -87,6 +88,12 @@ class ZctTouchPoolScanBody(BaseModel):
         description="1.0=关闭过期占比过滤；稳档可设 0.4",
     )
     min_win_loss_abs: int = Field(default=TOUCH_POOL_MIN_WIN_LOSS_ABS, ge=0, le=200_000)
+    max_win_loss_abs: int = Field(
+        default=TOUCH_POOL_MAX_WIN_LOSS_ABS,
+        ge=0,
+        le=200_000,
+        description="触轨样本 win+loss 上限；0=关闭",
+    )
     min_touch_share: float = Field(default=0.0, ge=0.0, le=1.0)
     min_profit_factor: float = Field(default=TOUCH_POOL_MIN_PF, gt=0.0)
     max_consecutive_losses_at_end: int = Field(

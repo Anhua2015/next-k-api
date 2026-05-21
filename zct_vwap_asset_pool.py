@@ -13,8 +13,8 @@ ZCT VWAP 触轨资产池：walk-forward（默认近 6h）→ 按触轨胜率、�
 
 - **回测窗口 6h**（`ZCT_TOUCH_POOL_WALK_HOURS=6`）
 - **n_trades >= 10**
-- **win + loss >= 10**
-- **触轨胜率 >= 82%**
+- **10 <= win + loss <= 35**
+- **触轨胜率 >= 80%**
 - **扣摩擦 PF > 1.30**
 - **末段连亏 <= 1**（重叠窗口全亏则挡出）
 
@@ -185,7 +185,8 @@ def _filter_pool(
     strict_greater_rate: bool,
     min_total_trades: int,
     max_expired_ratio: float,
-    min_win_loss_abs: int = 3,
+    min_win_loss_abs: int = 10,
+    max_win_loss_abs: int = 35,
     min_touch_share: float = 0.0,
     min_profit_factor: float = 1.30,
     max_consecutive_losses_at_end: int = 1,
@@ -221,6 +222,8 @@ def _filter_pool(
         ok_exp = exp_ratio < float(max_expired_ratio)
         floor_abs = int(min_win_loss_abs)
         ok_wl_abs = True if floor_abs <= 0 else (touch >= floor_abs)
+        cap_abs = int(max_win_loss_abs)
+        ok_wl_cap = True if cap_abs <= 0 else (touch <= cap_abs)
         share_min = float(min_touch_share)
         if share_min <= 0.0:
             ok_share = True
@@ -269,6 +272,7 @@ def _filter_pool(
             and ok_nt
             and ok_exp
             and ok_wl_abs
+            and ok_wl_cap
             and ok_share
             and ok_pf
             and ok_consec
@@ -298,6 +302,8 @@ def _filter_pool(
                     rec["reject_reason"].append("expired_ratio_invalid")
             if not ok_wl_abs and floor_abs > 0:
                 rec["reject_reason"].append("touch_trades_below_min")
+            if not ok_wl_cap and cap_abs > 0:
+                rec["reject_reason"].append("touch_trades_above_max")
             if not ok_share and share_min > 0.0:
                 rec["reject_reason"].append("touch_share_below_min")
             if not ok_pf:
@@ -350,6 +356,7 @@ def touch_pool_4h_criteria_doc(
     walk_days: float,
     min_total_trades: int,
     min_win_loss_abs: int,
+    max_win_loss_abs: int,
     min_touch_win_rate: float,
     min_profit_factor: float,
     max_consecutive_losses_at_end: int,
@@ -358,18 +365,24 @@ def touch_pool_4h_criteria_doc(
     """写入 pool runs 的可读规则摘要（与当次 scan 实参一致）。"""
     wh = float(walk_days) * 24.0
     wh_lbl = _format_walk_hours_label(walk_days)
+    wl_cap = (
+        f" | {min_win_loss_abs}<=win+loss<={max_win_loss_abs}"
+        if int(max_win_loss_abs) > 0
+        else f" | win+loss>={min_win_loss_abs}"
+    )
     return {
         "scan_mode": "touch_pool_4h_full",
         "walk_hours": wh,
         "walk_days": float(walk_days),
         "min_total_trades": int(min_total_trades),
         "min_win_loss_abs": int(min_win_loss_abs),
+        "max_win_loss_abs": int(max_win_loss_abs),
         "min_touch_win_rate": float(min_touch_win_rate),
         "min_profit_factor_exclusive": float(min_profit_factor),
         "max_consecutive_losses_at_end": int(max_consecutive_losses_at_end),
         "min_t4_touch_win_rate": float(min_t4_touch_win_rate),
         "entry_rule": (
-            f"{wh_lbl} walk | n>={min_total_trades} | win+loss>={min_win_loss_abs} | "
+            f"{wh_lbl} walk | n>={min_total_trades}{wl_cap} | "
             f"WR>={min_touch_win_rate:.0%} | PF>{min_profit_factor} | "
             f"end_streak<={max_consecutive_losses_at_end}"
         ),
@@ -566,6 +579,7 @@ def run_asset_pool_scan(
     min_profit_factor: Optional[float] = None,
     max_consecutive_losses_at_end: Optional[int] = None,
     min_t4_touch_win_rate: Optional[float] = None,
+    max_win_loss_abs: Optional[int] = None,
     bucket_hours: Optional[int] = None,
     quiet: bool = True,
     symbols_source: Optional[str] = None,
@@ -583,6 +597,9 @@ def run_asset_pool_scan(
     p_wr = float(min_touch_win_rate if min_touch_win_rate is not None else defaults["min_touch_win_rate"])
     p_nt = int(min_total_trades if min_total_trades is not None else defaults["min_total_trades"])
     p_wl = int(min_win_loss_abs if min_win_loss_abs is not None else defaults["min_win_loss_abs"])
+    p_wl_max = int(
+        max_win_loss_abs if max_win_loss_abs is not None else defaults["max_win_loss_abs"]
+    )
     p_share = float(min_touch_share if min_touch_share is not None else defaults["min_touch_share"])
     p_pf = float(min_profit_factor if min_profit_factor is not None else defaults["min_profit_factor"])
     p_consec = int(
@@ -626,6 +643,7 @@ def run_asset_pool_scan(
         min_total_trades=p_nt,
         max_expired_ratio=float(max_expired_ratio),
         min_win_loss_abs=p_wl,
+        max_win_loss_abs=p_wl_max,
         min_touch_share=p_share,
         min_profit_factor=p_pf,
         max_consecutive_losses_at_end=p_consec,
@@ -655,6 +673,7 @@ def run_asset_pool_scan(
             walk_days=walk_days,
             min_total_trades=p_nt,
             min_win_loss_abs=p_wl,
+            max_win_loss_abs=p_wl_max,
             min_touch_win_rate=p_wr,
             min_profit_factor=p_pf,
             max_consecutive_losses_at_end=p_consec,
@@ -673,6 +692,10 @@ def run_asset_pool_scan(
         "min_win_loss_abs": p_wl,
         "min_win_loss_abs_rule": (
             "off" if p_wl <= 0 else f"win+loss >= {p_wl}"
+        ),
+        "max_win_loss_abs": p_wl_max,
+        "max_win_loss_abs_rule": (
+            "off" if p_wl_max <= 0 else f"win+loss <= {p_wl_max}"
         ),
         "min_touch_share": p_share,
         "min_touch_share_rule": (
@@ -764,6 +787,12 @@ def main() -> None:
         type=int,
         default=int(cfg["min_win_loss_abs"]),
         help="win+loss 须 ≥ 本值（默认 10）",
+    )
+    ap.add_argument(
+        "--max-win-loss-abs",
+        type=int,
+        default=int(cfg["max_win_loss_abs"]),
+        help="win+loss 须 ≤ 本值（默认 35；0=关闭上限）",
     )
     ap.add_argument(
         "--min-touch-share",
@@ -867,6 +896,7 @@ def main() -> None:
         min_total_trades=int(args.min_total_trades),
         max_expired_ratio=float(args.max_expired_ratio),
         min_win_loss_abs=int(args.min_win_loss_abs),
+        max_win_loss_abs=int(args.max_win_loss_abs),
         min_touch_share=float(args.min_touch_share),
         min_profit_factor=float(args.min_profit_factor),
         max_consecutive_losses_at_end=int(args.max_consecutive_losses_at_end),

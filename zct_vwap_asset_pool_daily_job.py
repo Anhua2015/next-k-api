@@ -108,6 +108,7 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
         min_total_trades=int(ns.min_total_trades),
         max_expired_ratio=float(ns.max_expired_ratio),
         min_win_loss_abs=int(ns.min_win_loss_abs),
+        max_win_loss_abs=int(ns.max_win_loss_abs),
         min_touch_share=float(ns.min_touch_share),
         min_profit_factor=float(ns.min_profit_factor),
         max_consecutive_losses_at_end=int(ns.max_consecutive_losses_at_end),
@@ -205,6 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(cfg["min_win_loss_abs"]),
         help="win+loss 须 ≥ 该值（默认 10）",
+    )
+    ap.add_argument(
+        "--max-win-loss-abs",
+        type=int,
+        default=int(cfg["max_win_loss_abs"]),
+        help="win+loss 须 ≤ 该值（默认 35；0=关闭上限）",
     )
     ap.add_argument(
         "--min-touch-share",

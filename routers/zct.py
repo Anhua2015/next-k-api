@@ -191,6 +191,7 @@ async def post_zct_touch_pool_scan(
             min_total_trades=int(body.min_total_trades),
             max_expired_ratio=float(body.max_expired_ratio),
             min_win_loss_abs=int(body.min_win_loss_abs),
+            max_win_loss_abs=int(body.max_win_loss_abs),
             min_touch_share=float(body.min_touch_share),
             min_profit_factor=float(body.min_profit_factor),
             max_consecutive_losses_at_end=int(body.max_consecutive_losses_at_end),

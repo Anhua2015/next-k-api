@@ -39,7 +39,8 @@ class TouchPoolFilterTests(unittest.TestCase):
         self.assertEqual(p["min_total_trades"], 10)
         self.assertEqual(p["min_win_loss_abs"], 10)
         self.assertEqual(p["min_touch_trades"], 10)
-        self.assertAlmostEqual(p["min_touch_win_rate"], 0.82)
+        self.assertAlmostEqual(p["min_touch_win_rate"], 0.80)
+        self.assertEqual(p["max_win_loss_abs"], 35)
         self.assertAlmostEqual(p["min_profit_factor"], 1.30)
         self.assertEqual(p["max_consecutive_losses_at_end"], 1)
         self.assertEqual(p["min_t4_touch_win_rate"], 0.0)
@@ -51,6 +52,7 @@ class TouchPoolFilterTests(unittest.TestCase):
             walk_days=0.5,
             min_total_trades=5,
             min_win_loss_abs=3,
+            max_win_loss_abs=35,
             min_touch_win_rate=0.70,
             min_profit_factor=1.30,
             max_consecutive_losses_at_end=1,
@@ -88,11 +90,12 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.82,
+            min_touch_win_rate=0.80,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
             min_win_loss_abs=10,
+            max_win_loss_abs=35,
             min_touch_share=0.0,
             min_profit_factor=1.30,
             max_consecutive_losses_at_end=1,
@@ -120,17 +123,53 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.82,
+            min_touch_win_rate=0.80,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
             min_win_loss_abs=10,
+            max_win_loss_abs=35,
             min_touch_share=0.0,
             min_profit_factor=1.30,
             max_consecutive_losses_at_end=1,
             min_t4_touch_win_rate=0.0,
         )
         self.assertEqual(len(filt["matched"]), 0)
+
+    def test_filter_rejects_win_loss_above_max(self) -> None:
+        summary = {
+            "per_symbol": {
+                "XUSDT": {
+                    "win": 30,
+                    "loss": 6,
+                    "n_trades": 40,
+                    "expired": 0,
+                    "win_rate_touch_sl_tp": 0.833,
+                    "profit_factor_net": 2.0,
+                    "consecutive_losses_at_end": 0,
+                },
+            }
+        }
+        filt = _filter_pool(
+            summary,
+            min_touch_trades=10,
+            strict_greater_touch=False,
+            min_touch_win_rate=0.80,
+            strict_greater_rate=False,
+            min_total_trades=10,
+            max_expired_ratio=1.0,
+            min_win_loss_abs=10,
+            max_win_loss_abs=35,
+            min_touch_share=0.0,
+            min_profit_factor=1.30,
+            max_consecutive_losses_at_end=1,
+            min_t4_touch_win_rate=0.0,
+        )
+        self.assertEqual(len(filt["matched"]), 0)
+        self.assertIn(
+            "touch_trades_above_max",
+            filt["rejected"][0]["reject_reason"],
+        )
 
     def test_filter_rejects_pf_at_threshold_exclusive(self) -> None:
         summary = {
@@ -150,11 +189,12 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.82,
+            min_touch_win_rate=0.80,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
             min_win_loss_abs=10,
+            max_win_loss_abs=35,
             min_touch_share=0.0,
             min_profit_factor=1.30,
             max_consecutive_losses_at_end=1,
@@ -180,11 +220,12 @@ class TouchPoolFilterTests(unittest.TestCase):
             summary,
             min_touch_trades=10,
             strict_greater_touch=False,
-            min_touch_win_rate=0.82,
+            min_touch_win_rate=0.80,
             strict_greater_rate=False,
             min_total_trades=10,
             max_expired_ratio=1.0,
             min_win_loss_abs=10,
+            max_win_loss_abs=35,
             min_touch_share=0.0,
             min_profit_factor=1.30,
             max_consecutive_losses_at_end=1,

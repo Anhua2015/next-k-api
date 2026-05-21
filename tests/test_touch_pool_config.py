@@ -14,6 +14,7 @@ if str(_API_ROOT) not in sys.path:
 from touch_pool_config import (
     TOUCH_POOL_CRON_HOURS,
     TOUCH_POOL_CRON_MINUTE,
+    TOUCH_POOL_MAX_WIN_LOSS_ABS,
     TOUCH_POOL_MIN_PF,
     TOUCH_POOL_WALK_HOURS,
     apply_touch_pool_default_env,
@@ -30,6 +31,7 @@ class TouchPoolConfigTests(unittest.TestCase):
         self.assertAlmostEqual(p["min_profit_factor"], TOUCH_POOL_MIN_PF)
         self.assertEqual(p["min_win_loss_abs"], 10)
         self.assertEqual(p["min_touch_trades"], 10)
+        self.assertEqual(p["max_win_loss_abs"], TOUCH_POOL_MAX_WIN_LOSS_ABS)
 
     def test_cron_slots_default(self) -> None:
         slots = touch_pool_4h_cron_slots()

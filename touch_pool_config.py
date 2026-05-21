@@ -19,7 +19,8 @@ TOUCH_POOL_WALK_HOURS: float = 6.0
 TOUCH_POOL_MIN_TOTAL_TRADES: int = 10
 TOUCH_POOL_MIN_WIN_LOSS_ABS: int = 10
 TOUCH_POOL_MIN_TOUCH_TRADES: int = 10  # 与 MIN_WIN_LOSS_ABS 对齐
-TOUCH_POOL_MIN_TOUCH_WIN_RATE: float = 0.82
+TOUCH_POOL_MIN_TOUCH_WIN_RATE: float = 0.80
+TOUCH_POOL_MAX_WIN_LOSS_ABS: int = 35  # win+loss 上限；0=关闭
 TOUCH_POOL_MIN_PF: float = 1.30
 TOUCH_POOL_MAX_CONSEC_LOSSES: int = 1
 TOUCH_POOL_MIN_T4_WIN_RATE: float = 0.0  # 0 = 关闭 T4 门控
@@ -83,6 +84,9 @@ def touch_pool_4h_filter_params() -> Dict[str, Any]:
         ),
         "max_expired_ratio": TOUCH_POOL_MAX_EXPIRED_RATIO,
         "min_win_loss_abs": min_wl,
+        "max_win_loss_abs": max(
+            0, _int_env("ZCT_TOUCH_POOL_MAX_WIN_LOSS_ABS", TOUCH_POOL_MAX_WIN_LOSS_ABS)
+        ),
         "min_touch_share": TOUCH_POOL_MIN_TOUCH_SHARE,
         "min_profit_factor": _float_env("ZCT_TOUCH_POOL_MIN_PF", TOUCH_POOL_MIN_PF),
         "max_consecutive_losses_at_end": _int_env(
@@ -123,6 +127,7 @@ def touch_pool_default_child_env() -> Dict[str, str]:
         "ZCT_TOUCH_POOL_MIN_WIN_LOSS_ABS": str(TOUCH_POOL_MIN_WIN_LOSS_ABS),
         "ZCT_TOUCH_POOL_MIN_TOUCH_TRADES": str(TOUCH_POOL_MIN_TOUCH_TRADES),
         "ZCT_TOUCH_POOL_MIN_TOUCH_WIN_RATE": str(TOUCH_POOL_MIN_TOUCH_WIN_RATE),
+        "ZCT_TOUCH_POOL_MAX_WIN_LOSS_ABS": str(TOUCH_POOL_MAX_WIN_LOSS_ABS),
         "ZCT_TOUCH_POOL_MIN_PF": str(TOUCH_POOL_MIN_PF),
         "ZCT_TOUCH_POOL_MAX_CONSEC_LOSSES": str(TOUCH_POOL_MAX_CONSEC_LOSSES),
         "ZCT_TOUCH_POOL_MIN_T4_WIN_RATE": str(TOUCH_POOL_MIN_T4_WIN_RATE),
