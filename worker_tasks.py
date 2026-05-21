@@ -164,6 +164,7 @@ def _push_signals_to_protocol() -> None:
     from accumulation_radar import init_db
 
     conn = init_db()
+    conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
             """SELECT id, symbol, play, side, entry_price, sl_price, tp_price,
