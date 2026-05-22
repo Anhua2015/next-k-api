@@ -20,12 +20,12 @@ POWDER_KEG_MIN_OI_USD: float = 2_000_000.0
 POWDER_KEG_MIN_OI_DELTA_1H_PCT: float = 2.5
 POWDER_KEG_MIN_OI_DELTA_6H_PCT: float = 5.0
 
-# 费率极端：|fundingRate|×100，例如 0.05 = 0.05%/8h 档
-POWDER_KEG_MIN_FR_ABS_PCT: float = 0.04
+# 费率极端：|fundingRate|×100（实战级 0.025；正负方向见 allowed_side）
+POWDER_KEG_MIN_FR_ABS_PCT: float = 0.025
 
-# 横盘：24h 涨跌幅 + 近 6 根 1h K 振幅
-POWDER_KEG_MAX_PX_CHG_24H_PCT: float = 6.0
-POWDER_KEG_MAX_RANGE_6H_PCT: float = 5.5
+# 横盘：24h 涨跌幅 + 近 6 根 1h K 振幅（实战级）
+POWDER_KEG_MAX_PX_CHG_24H_PCT: float = 10.0
+POWDER_KEG_MAX_RANGE_6H_PCT: float = 8.5
 
 # 预筛后深度扫描（OI+K线）上限；收筹池通常远小于该值
 POWDER_KEG_OI_SCAN_MAX_SYMBOLS: int = 80

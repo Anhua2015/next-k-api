@@ -37,10 +37,23 @@ class PowderKegRadarTests(unittest.TestCase):
         }
         self.assertTrue(_passes_hard_filters(row, self.p))
 
+    def test_passes_practical_sideways_bounds(self) -> None:
+        """实战级：24h≤10%、6h振幅≤8.5% 可通过。"""
+        row = {
+            "vol": 10_000_000,
+            "px_chg": 9.0,
+            "range_6h_pct": 8.0,
+            "fr_pct": -0.03,
+            "oi_usd": 5_000_000,
+            "oi_delta_1h_pct": 3.0,
+            "oi_delta_6h_pct": 6.0,
+        }
+        self.assertTrue(_passes_hard_filters(row, self.p))
+
     def test_rejects_high_px_chg(self) -> None:
         row = {
             "vol": 10_000_000,
-            "px_chg": 12.0,
+            "px_chg": 11.0,
             "range_6h_pct": 3.0,
             "fr_pct": -0.08,
             "oi_usd": 5_000_000,
