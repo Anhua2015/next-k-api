@@ -14,6 +14,7 @@ if str(_API_ROOT) not in sys.path:
 from powder_keg_config import powder_keg_params
 from powder_keg_radar import (
     _dedupe_items_for_insert,
+    _funding_side_metadata,
     _passes_hard_filters,
     _retention_cutoff_ms,
     _score_row,
@@ -73,6 +74,16 @@ class PowderKegRadarTests(unittest.TestCase):
         strong = {**base, "oi_delta_6h_pct": 15.0}
         self.assertGreater(_score_row(strong, self.p), _score_row(weak, self.p))
 
+
+    def test_funding_side_negative_long_positive_short(self) -> None:
+        neg = _funding_side_metadata(-0.08)
+        self.assertEqual(neg["funding_sign"], "negative")
+        self.assertEqual(neg["allowed_side"], "LONG")
+        self.assertAlmostEqual(neg["funding_rate_abs_pct"], 0.08)
+
+        pos = _funding_side_metadata(0.06)
+        self.assertEqual(pos["funding_sign"], "positive")
+        self.assertEqual(pos["allowed_side"], "SHORT")
 
     def test_dedupe_items_keeps_higher_score(self) -> None:
         items = [

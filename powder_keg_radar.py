@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-火药桶宏观雷达（币安）：仅在收筹池 watchlist 内扫描；OI 激增 + 费率极端 + 横盘 → Top 3~5。
+火药桶宏观雷达（币安）：收筹池内 OI 激增 + |费率|极端 + 横盘；负费率→仅多、正费率→仅空。
 
 用法:
   python powder_keg_radar.py --once
@@ -380,6 +380,56 @@ def _depth_scan_symbol(
         row.update(oi)
 
 
+def _funding_side_metadata(fr_pct: float) -> Dict[str, Any]:
+    """
+    费率极端保留 |fr| 门槛；方向用于执行侧过滤：
+    负费率 → 仅 LONG；正费率 → 仅 SHORT。
+    """
+    fr = float(fr_pct)
+    abs_fr = abs(fr)
+    if fr < 0:
+        return {
+            "funding_sign": "negative",
+            "funding_sign_label": "负费率",
+            "funding_extreme_label": "负费率极端",
+            "allowed_side": "LONG",
+            "allowed_side_label": "仅做多",
+            "funding_rate_abs_pct": round(abs_fr, 4),
+        }
+    if fr > 0:
+        return {
+            "funding_sign": "positive",
+            "funding_sign_label": "正费率",
+            "funding_extreme_label": "正费率极端",
+            "allowed_side": "SHORT",
+            "allowed_side_label": "仅做空",
+            "funding_rate_abs_pct": round(abs_fr, 4),
+        }
+    return {
+        "funding_sign": "zero",
+        "funding_sign_label": "零费率",
+        "funding_extreme_label": "费率中性",
+        "allowed_side": None,
+        "allowed_side_label": None,
+        "funding_rate_abs_pct": 0.0,
+    }
+
+
+def _attach_funding_side(row: Dict[str, Any]) -> None:
+    """写入 funding_sign / allowed_side 等（就地修改 row）。"""
+    meta = _funding_side_metadata(float(row.get("fr_pct") or 0))
+    row.update(meta)
+
+
+def _enrich_powder_keg_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    fr = item.get("funding_rate_pct")
+    if fr is None and item.get("detail"):
+        fr = item["detail"].get("fr_pct")
+    if fr is not None:
+        item.update(_funding_side_metadata(float(fr)))
+    return item
+
+
 def _passes_hard_filters(row: Dict[str, Any], p: Dict[str, Any]) -> bool:
     if float(row["vol"]) < float(p["min_vol_24h_usd"]):
         return False
@@ -418,9 +468,16 @@ def _summary_line(row: Dict[str, Any]) -> str:
     fr = float(row["fr_pct"])
     px = float(row["px_chg"])
     rng = float(row.get("range_6h_pct") or 0)
+    side = str(row.get("allowed_side_label") or "")
+    if fr < 0:
+        fr_tag = f"负费率{fr:+.3f}%|{abs(fr):.3f}%"
+    elif fr > 0:
+        fr_tag = f"正费率{fr:+.3f}%|{abs(fr):.3f}%"
+    else:
+        fr_tag = f"费率{fr:+.3f}%"
     return (
         f"🧨{coin} OI1h{d1h:+.1f}%/6h{d6h:+.1f}% "
-        f"费率{fr:+.3f}% 24h{px:+.1f}% 6h振幅{rng:.1f}%"
+        f"{fr_tag}{('→' + side) if side else ''} 24h{px:+.1f}% 6h振幅{rng:.1f}%"
     )
 
 
@@ -522,6 +579,7 @@ def scan_powder_keg_candidates(
     for row in pre:
         _depth_scan_symbol(row, p)
         if _passes_hard_filters(row, p):
+            _attach_funding_side(row)
             row["score"] = _score_row(row, p)
             row["summary_line"] = _summary_line(row)
             candidates.append(row)
@@ -609,6 +667,12 @@ def persist_powder_keg_watchlist(
                 "oi_delta_1h_pct",
                 "oi_delta_6h_pct",
                 "fr_pct",
+                "funding_sign",
+                "funding_sign_label",
+                "funding_extreme_label",
+                "allowed_side",
+                "allowed_side_label",
+                "funding_rate_abs_pct",
                 "px_chg",
                 "range_6h_pct",
                 "vol",
@@ -692,7 +756,7 @@ def _row_to_item(r: Tuple[Any, ...]) -> Dict[str, Any]:
             det = json.loads(r[17])
         except json.JSONDecodeError:
             det = {}
-    return {
+    item = {
         "run_id": r[0],
         "run_at_ms": r[1],
         "generated_date": r[2],
@@ -712,6 +776,7 @@ def _row_to_item(r: Tuple[Any, ...]) -> Dict[str, Any]:
         "summary_line": r[16],
         "detail": det,
     }
+    return _enrich_powder_keg_item(item)
 
 
 _SELECT_COLS = """
@@ -784,6 +849,7 @@ def load_powder_keg_watchlist(
         }
         for r in cur.fetchall()
     ]
+    fr_thr = float(p.get("min_fr_abs_pct") or 0)
     return {
         "ok": True,
         "items": items,
@@ -796,6 +862,11 @@ def load_powder_keg_watchlist(
         "run_audit": run_audit,
         "universe": "watchlist",
         "dedupe_by_symbol": True,
+        "funding_extreme_rules": {
+            "threshold_abs_pct": fr_thr,
+            "negative": {"allowed_side": "LONG", "label": "负费率极端 → 仅做多"},
+            "positive": {"allowed_side": "SHORT", "label": "正费率极端 → 仅做空"},
+        },
     }
 
 
