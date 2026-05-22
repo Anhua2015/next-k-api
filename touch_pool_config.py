@@ -1,5 +1,5 @@
 """
-触轨池每 4h 全量筛选 — 默认配置（代码真源）。
+触轨池每 2h 全量筛选 — 默认配置（代码真源）。
 
 环境变量可覆盖；未设置时与本模块常量一致。
 部署参考：`.env.oi.example` 中已取消注释的 ZCT_TOUCH_POOL_* 项。
@@ -11,7 +11,7 @@ import os
 from typing import Any, Dict, List, Tuple
 
 # ── 调度（Asia/Shanghai cron）────────────────────────────────────────────
-TOUCH_POOL_CRON_HOURS: Tuple[int, ...] = (0, 4, 8, 12, 16, 20)
+TOUCH_POOL_CRON_HOURS: Tuple[int, ...] = (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22)
 TOUCH_POOL_CRON_MINUTE: int = 7
 
 # ── walk / 筛选硬阈值 ────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ def touch_pool_bucket_hours() -> int:
 
 
 def touch_pool_4h_filter_params() -> Dict[str, Any]:
-    """每 4h 全量闭环入库参数。"""
+    """每 2h 全量闭环入库参数（cron 见 TOUCH_POOL_CRON_HOURS）。"""
     t4_raw = _float_env("ZCT_TOUCH_POOL_MIN_T4_WIN_RATE", TOUCH_POOL_MIN_T4_WIN_RATE)
     min_wl = max(0, _int_env("ZCT_TOUCH_POOL_MIN_WIN_LOSS_ABS", TOUCH_POOL_MIN_WIN_LOSS_ABS))
     min_touch = max(0, _int_env("ZCT_TOUCH_POOL_MIN_TOUCH_TRADES", TOUCH_POOL_MIN_TOUCH_TRADES))

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-触轨池：每 4h 全宇宙 walk-forward（默认 6h 窗口）→ 筛选 → 写入 accumulation.db。
+触轨池：每 2h 全宇宙 walk-forward（默认 6h 窗口）→ 筛选 → 写入 accumulation.db。
 
 表：
 - **zct_vwap_touch_pool**：每轮在单事务内 **先 DELETE 全表** 再写入当前入选标的（symbol PRIMARY KEY）。
@@ -9,7 +9,7 @@
 运行：
   python zct_vwap_asset_pool_daily_job.py --once --worth-watch-plus-default-22
   python zct_vwap_asset_pool_daily_job.py --daemon
-  （`--daemon` 默认：上海 00/04/08/12/16/20 点 :07；可用 `ZCT_TOUCH_POOL_CRON_HOURS` 覆盖）
+  （`--daemon` 默认：上海每 2h 整点 :07；可用 `ZCT_TOUCH_POOL_CRON_HOURS` 覆盖）
 
 默认配置见 `touch_pool_config.py` / `.env.oi.example`。
 """
@@ -154,12 +154,12 @@ def run_once(ns: argparse.Namespace) -> Dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     cfg = touch_pool_4h_filter_params()
-    ap = argparse.ArgumentParser(description="ZCT 触轨池每 4h 全量入库")
+    ap = argparse.ArgumentParser(description="ZCT 触轨池每 2h 全量入库")
     ap.add_argument("--once", action="store_true", help="跑一轮退出（给计划任务用）")
     ap.add_argument(
         "--daemon",
         action="store_true",
-        help="APScheduler 常驻：默认 00/04/08/12/16/20 :05 上海",
+        help="APScheduler 常驻：默认每 2h 整点 :07 上海",
     )
     ap.add_argument("--cron-hour", type=int, default=None, metavar="H", help="单槽 daemon 用")
     ap.add_argument("--cron-minute", type=int, default=None, metavar="M")
@@ -316,7 +316,7 @@ def main() -> None:
                 replace_existing=True,
             )
         logger.info(
-            "touch_pool 4h daemon tz=%s slots=%s",
+            "touch_pool 2h daemon tz=%s slots=%s",
             tz_name,
             ",".join(f"{h:02d}:{m:02d}" for h, m in slots),
         )

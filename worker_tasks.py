@@ -178,7 +178,7 @@ def run_zct_vwap_resolve_only_task() -> None:
 
 def run_zct_touch_pool_4h_subprocess() -> None:
     logger.info(
-        "Starting zct_vwap_asset_pool_daily_job --once --worth-watch-plus-default-22 (6h 4h-full)"
+        "Starting zct_vwap_asset_pool_daily_job --once --worth-watch-plus-default-22 (6h walk 2h-cron)"
     )
     _run_subprocess_locked(
         "zct_touch_pool",
@@ -194,7 +194,7 @@ def run_zct_touch_pool_4h_subprocess() -> None:
 
 
 def run_zct_touch_pool_4h_task() -> None:
-    logger.info("开始执行 ZCT 触轨池每 4h 全量筛选（6h walk + 全表重写）...")
+    logger.info("开始执行 ZCT 触轨池每 2h 全量筛选（6h walk + 全表重写）...")
     run_zct_touch_pool_4h_subprocess()
 
 
