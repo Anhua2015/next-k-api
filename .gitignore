@@ -48,5 +48,3 @@ s6_signals_history.json
 
 .env.oi
 DEPLOY.md
-start.sh
-stop.sh
