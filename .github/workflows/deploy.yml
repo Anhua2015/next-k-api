@@ -20,4 +20,5 @@ jobs:
           script: |
             cd /home/ubuntu/next-k/next-k-api  # 👈 改成你服务器上项目的绝对路径
             git pull origin release
+            bash stop.sh 
             bash start.sh       # 👈 改成你重启服务的脚本或命令
