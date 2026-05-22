@@ -481,6 +481,41 @@ def _summary_line(row: Dict[str, Any]) -> str:
     )
 
 
+def _log_powder_keg_scan_summary(out: Dict[str, Any]) -> None:
+    """统一 INFO/WARNING，便于确认是否已向币安拉数。"""
+    if not out.get("ok"):
+        logger.warning(
+            "powder_keg 扫描中止 error=%s watchlist_count=%s message=%s",
+            out.get("error"),
+            out.get("watchlist_count"),
+            out.get("message") or out.get("error"),
+        )
+        return
+    picked = list(out.get("items") or [])
+    sym_sample = ", ".join(
+        f"{i.get('symbol')}({i.get('funding_sign', '?')})" for i in picked[:5]
+    )
+    stats = out.get("scan_stats") or {}
+    logger.info(
+        "powder_keg 扫描完成 pool=%s binance_ticker=%s binance_funding=%s "
+        "api_mode=%s pre=%s depth=%s oi_ok=%s kline_ok=%s matched=%s top_n=%s "
+        "picked=%s elapsed_sec=%.1f %s",
+        out.get("watchlist_count"),
+        stats.get("ticker_rows"),
+        stats.get("funding_rows"),
+        out.get("api_mode"),
+        out.get("scanned_pre"),
+        stats.get("depth_scanned"),
+        stats.get("oi_fetched"),
+        stats.get("kline_fetched"),
+        out.get("matched"),
+        out.get("top_n"),
+        len(picked),
+        float(out.get("elapsed_sec") or 0),
+        f"symbols=[{sym_sample}]" if sym_sample else "",
+    )
+
+
 def scan_powder_keg_candidates(
     *,
     params: Optional[Dict[str, Any]] = None,
@@ -506,10 +541,16 @@ def scan_powder_keg_candidates(
     pool_rows: List[Dict[str, Any]] = []
     pre: List[Dict[str, Any]] = []
     api_mode = "unknown"
+    t_scan = time.monotonic()
     try:
         pool_rows = _load_watchlist_universe(db)
+        logger.info(
+            "powder_keg 开始扫描 universe=%s 收筹池=%s",
+            universe,
+            len(pool_rows),
+        )
         if not pool_rows:
-            return {
+            out_empty: Dict[str, Any] = {
                 "ok": False,
                 "error": "watchlist_empty",
                 "message": "收筹池为空，请先运行 accumulation_radar pool（每日收筹扫描）",
@@ -517,11 +558,31 @@ def scan_powder_keg_candidates(
                 "watchlist_count": 0,
                 "candidates": [],
             }
+            _log_powder_keg_scan_summary(out_empty)
+            return out_empty
 
         pool_syms = [ent["symbol"] for ent in pool_rows]
+        logger.info(
+            "powder_keg 拉取币安行情/费率 symbols=%s …",
+            len(pool_syms),
+        )
         ticker_map, funding_map, api_mode = _fetch_maps_for_symbols(pool_syms, p)
+        logger.info(
+            "powder_keg 币安返回 ticker=%s funding=%s api_mode=%s",
+            len(ticker_map),
+            len(funding_map),
+            api_mode,
+        )
         if not ticker_map and not funding_map:
-            return {"ok": False, "error": "ticker_api", "candidates": []}
+            out_api: Dict[str, Any] = {
+                "ok": False,
+                "error": "ticker_api",
+                "message": "币安 24hr/premiumIndex 无有效返回",
+                "watchlist_count": len(pool_rows),
+                "candidates": [],
+            }
+            _log_powder_keg_scan_summary(out_api)
+            return out_api
 
         pre = []
         for ent in pool_rows:
@@ -562,6 +623,12 @@ def scan_powder_keg_candidates(
         if cap > 0 and len(pre) > cap:
             pre = pre[:cap]
 
+        logger.info(
+            "powder_keg 预筛完成 pool=%s → pre=%s (cap=%s) 开始深度扫描 OI+K线 …",
+            len(pool_rows),
+            len(pre),
+            cap if cap > 0 else "none",
+        )
         if not quiet:
             est_calls = 2 * len(pre) if api_mode == "per_symbol" else 52
             est_calls += 2 * len(pre)
@@ -575,9 +642,15 @@ def scan_powder_keg_candidates(
             db.close()
 
     candidates: List[Dict[str, Any]] = []
+    oi_fetched = 0
+    kline_fetched = 0
     sleep_s = float(p["sleep_per_symbol_sec"])
     for row in pre:
         _depth_scan_symbol(row, p)
+        if row.get("oi_usd") is not None:
+            oi_fetched += 1
+        if row.get("range_6h_pct") is not None:
+            kline_fetched += 1
         if _passes_hard_filters(row, p):
             _attach_funding_side(row)
             row["score"] = _score_row(row, p)
@@ -590,7 +663,7 @@ def scan_powder_keg_candidates(
     top_n = int(p["top_n"])
     picked = candidates[:top_n]
 
-    return {
+    out_ok: Dict[str, Any] = {
         "ok": True,
         "run_cst": _now_cst_label(),
         "universe": universe,
@@ -601,7 +674,17 @@ def scan_powder_keg_candidates(
         "items": picked,
         "params": p,
         "api_mode": api_mode,
+        "scan_stats": {
+            "ticker_rows": len(ticker_map),
+            "funding_rows": len(funding_map),
+            "depth_scanned": len(pre),
+            "oi_fetched": oi_fetched,
+            "kline_fetched": kline_fetched,
+        },
+        "elapsed_sec": round(time.monotonic() - t_scan, 2),
     }
+    _log_powder_keg_scan_summary(out_ok)
+    return out_ok
 
 
 def _record_powder_keg_run(
@@ -877,6 +960,11 @@ def run_powder_keg_radar_once(*, quiet: bool = False) -> Dict[str, Any]:
         if not out.get("ok"):
             return out
         p = out.get("params") or powder_keg_params()
+        logger.info(
+            "powder_keg 开始入库 matched=%s top_n=%s",
+            out.get("matched"),
+            out.get("top_n"),
+        )
         meta = persist_powder_keg_watchlist(
             conn,
             list(out.get("items") or []),
@@ -892,6 +980,13 @@ def run_powder_keg_radar_once(*, quiet: bool = False) -> Dict[str, Any]:
         out["persist"] = meta
         payload = load_powder_keg_watchlist(conn)
         out["watchlist"] = payload
+        logger.info(
+            "powder_keg 入库完成 inserted=%s replaced=%s deduped=%s 表内=%s",
+            meta.get("inserted"),
+            meta.get("replaced_symbol_rows"),
+            meta.get("deduped_symbol_rows"),
+            payload.get("count"),
+        )
         if not quiet:
             print(
                 f"[powder_keg] 入库 {payload.get('count', 0)} 个: "

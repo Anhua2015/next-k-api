@@ -229,11 +229,30 @@ def run_powder_keg_radar_task() -> None:
             return
         logger.info("开始执行火药桶宏观雷达…")
         out = run_powder_keg_radar_once(quiet=True)
+        if not out.get("ok"):
+            logger.warning(
+                "火药桶雷达结束(未成功) error=%s watchlist=%s msg=%s",
+                out.get("error"),
+                out.get("watchlist_count"),
+                out.get("message"),
+            )
+            return
         n = int((out.get("watchlist") or {}).get("count") or 0)
+        stats = out.get("scan_stats") or {}
+        persist = out.get("persist") or {}
         logger.info(
-            "火药桶雷达完成 matched=%s 入库=%s",
+            "火药桶雷达完成 pool=%s 币安ticker=%s pre=%s depth_oi=%s/%s "
+            "matched=%s 本轮入库=%s 表内总数=%s api=%s 耗时=%ss",
+            out.get("watchlist_count"),
+            stats.get("ticker_rows"),
+            out.get("scanned_pre"),
+            stats.get("oi_fetched"),
+            stats.get("depth_scanned"),
             out.get("matched"),
+            persist.get("inserted"),
             n,
+            out.get("api_mode"),
+            out.get("elapsed_sec"),
         )
     except Exception as e:
         logger.exception("powder_keg_radar failed: %s", e)
