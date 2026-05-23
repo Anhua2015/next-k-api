@@ -89,6 +89,26 @@ class TestProfitProtect(unittest.TestCase):
             )
             self.assertIsNone(rule)
 
+    def test_trail_arm_requires_close_when_flag_on(self):
+        with patch.multiple(
+            cfg,
+            ST_EXIT_MODE="trail_atr",
+            ST_TRAIL_ATR_MULT=2.0,
+            ST_TRAIL_ARM_ATR=1.0,
+            ST_TRAIL_ARM_USE_CLOSE=True,
+        ):
+            entry, atr = 100.0, 2.0
+            st = update_protect_state(
+                ProtectState(entry, 0.0, False),
+                side="LONG",
+                entry=entry,
+                high=102.5,
+                low=99.0,
+                close=100.5,
+                atr=atr,
+            )
+            self.assertFalse(st.trail_armed)
+
     def test_update_peak_when_atr_zero(self):
         with patch.multiple(cfg, ST_GIVEBACK_PEAK_USE_CLOSE=True):
             st = update_protect_state(

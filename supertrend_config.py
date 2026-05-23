@@ -102,8 +102,11 @@ ST_MAX_LOSSES_PER_SYMBOL_PER_DAY = max(
 )
 
 # --- 利润保护（仅对已持仓；优先级 giveback → trail_atr → reverse_signal）---
-ST_TRAIL_ATR_MULT = max(0.0, float(os.getenv("ST_TRAIL_ATR_MULT", "1.75") or 1.75))
-ST_TRAIL_ARM_ATR = max(0.0, float(os.getenv("ST_TRAIL_ARM_ATR", "1.0") or 1.0))
+# 跟踪止损：默认偏宽，减少横盘「浅 MFE + 小反弹」即被扫
+ST_TRAIL_ATR_MULT = max(0.0, float(os.getenv("ST_TRAIL_ATR_MULT", "2.5") or 2.5))
+ST_TRAIL_ARM_ATR = max(0.0, float(os.getenv("ST_TRAIL_ARM_ATR", "2.0") or 2.0))
+# 武装条件用收盘价顺向幅度（不用影线 MFE），避免一根针就启动跟踪
+ST_TRAIL_ARM_USE_CLOSE = env_truthy("ST_TRAIL_ARM_USE_CLOSE", default=True)
 ST_GIVEBACK_PCT = max(0.0, min(1.0, float(os.getenv("ST_GIVEBACK_PCT", "0.35") or 0.35)))
 ST_GIVEBACK_MIN_PEAK_PCT = max(
     0.0, float(os.getenv("ST_GIVEBACK_MIN_PEAK_PCT", "0.006") or 0.006)

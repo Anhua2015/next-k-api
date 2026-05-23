@@ -78,7 +78,10 @@ def update_protect_state(
     trail_stop = state.trail_stop
 
     if atr > 0:
-        fav_move = (mfe - entry) if side == "LONG" else (entry - mfe)
+        if cfg.ST_TRAIL_ARM_USE_CLOSE:
+            fav_move = max(0.0, (close - entry) if side == "LONG" else (entry - close))
+        else:
+            fav_move = (mfe - entry) if side == "LONG" else (entry - mfe)
         if not trail_armed and cfg.ST_TRAIL_ARM_ATR > 0 and fav_move >= cfg.ST_TRAIL_ARM_ATR * atr:
             trail_armed = True
 
