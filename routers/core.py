@@ -23,7 +23,7 @@ async def root():
         "docs": "/docs",
         "health": "/api/health",
         "zct_vwap_dashboard": "/dashboard/zct-vwap",
-        "supertrend_api": "/api/supertrend/signals",
+        "momentum_api": "/api/momentum/summary",
     }
 
 
@@ -52,5 +52,5 @@ async def health(request: Request):
         scheduler_embedded=embedded,
         scheduler_running=sch is not None,
         zct_vwap_scheduler_enabled=sched_cfg.ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED,
-        st_scheduler_enabled=sched_cfg.ST_SCHEDULER_ENABLED,
+        mom_scheduler_enabled=sched_cfg.MOM_SCHEDULER_ENABLED,
     )

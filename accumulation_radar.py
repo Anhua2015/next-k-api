@@ -2021,9 +2021,9 @@ def init_db():
     _migrate_zct_vwap_snapshot_and_settlements(c)
     _migrate_zct_hot_oi_merge_into_vwap_unified(c)
     try:
-        from supertrend_db import migrate_st_tables
+        from momentum_db import migrate_mom_tables
 
-        migrate_st_tables(c)
+        migrate_mom_tables(c)
     except ImportError:
         pass
     conn.commit()
