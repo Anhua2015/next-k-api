@@ -1,4 +1,4 @@
-"""币安 U 本位 fapi REST（K 线 / 现价，Supertrend 等轻量脚本共用）。"""
+"""币安 U 本位 fapi REST（K 线 / 现价等轻量脚本共用）。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import requests
 
-from supertrend_config import FAPI
+FAPI = "https://fapi.binance.com"
 
 
 def api_get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
@@ -50,6 +50,12 @@ def fetch_mark_price(symbol: str) -> Optional[float]:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def fetch_top_movers() -> List[Dict[str, Any]]:
+    """币安合约 Top Movers（公开，无需 API Key）。"""
+    data = api_get("/fapi/v1/topMovers")
+    return data if isinstance(data, list) else []
 
 
 def klines_to_df(rows: List[List[Any]]) -> pd.DataFrame:

@@ -1,10 +1,11 @@
-"""Supertrend 纸面信号 API。"""
+"""动量多一空一 — topMovers 纸面仓位 API。"""
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -12,7 +13,7 @@ from utils.maintenance_auth import require_maintenance_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/supertrend", tags=["supertrend"])
+router = APIRouter(prefix="/api/momentum", tags=["momentum"])
 
 
 def _rows_to_dicts(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
@@ -22,21 +23,13 @@ def _rows_to_dicts(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
 def _compute_summary(cur: sqlite3.Cursor) -> Dict[str, Any]:
     cur.execute(
         """
-        SELECT COUNT(*) FROM st_signals
+        SELECT COUNT(*) FROM mom_signals
         WHERE outcome IS NULL AND side IN ('LONG', 'SHORT')
         """
     )
     open_positions = int(cur.fetchone()[0] or 0)
 
-    cur.execute(
-        """
-        SELECT COUNT(*) FROM st_signals
-        WHERE outcome IS NOT NULL
-        """
-    )
-    settled_snapshots = int(cur.fetchone()[0] or 0)
-
-    cur.execute("SELECT COUNT(*) FROM st_settlements")
+    cur.execute("SELECT COUNT(*) FROM mom_settlements")
     settled_count = int(cur.fetchone()[0] or 0)
 
     cur.execute(
@@ -44,8 +37,7 @@ def _compute_summary(cur: sqlite3.Cursor) -> Dict[str, Any]:
         SELECT COALESCE(SUM(pnl_usdt), 0),
                SUM(CASE WHEN pnl_usdt > 0 THEN 1 ELSE 0 END),
                SUM(CASE WHEN pnl_usdt < 0 THEN 1 ELSE 0 END)
-        FROM st_settlements
-        WHERE pnl_usdt IS NOT NULL
+        FROM mom_settlements WHERE pnl_usdt IS NOT NULL
         """
     )
     row = cur.fetchone()
@@ -57,66 +49,72 @@ def _compute_summary(cur: sqlite3.Cursor) -> Dict[str, Any]:
 
     cur.execute(
         """
-        SELECT settled_at_utc, pnl_usdt FROM st_settlements
-        WHERE pnl_usdt IS NOT NULL
-        ORDER BY settled_at_utc ASC
+        SELECT COALESCE(SUM(unrealized_pnl_usdt), 0) FROM mom_signals
+        WHERE outcome IS NULL AND side IN ('LONG', 'SHORT')
         """
     )
-    by_day: Dict[str, float] = {}
-    for settled_at, pnl in cur.fetchall():
-        day = str(settled_at or "")[:10]
-        if not day:
-            continue
-        by_day[day] = by_day.get(day, 0.0) + float(pnl or 0)
-    cum = 0.0
-    equity_points: List[Dict[str, Any]] = []
-    for day in sorted(by_day.keys()):
-        cum += by_day[day]
-        equity_points.append(
-            {"date": day, "day_pnl_usdt": by_day[day], "cum_pnl_usdt": cum}
-        )
+    unrealized = float(cur.fetchone()[0] or 0)
 
-    last_run: Optional[str] = None
+    cur.execute(
+        """
+        SELECT side, symbol, unrealized_pnl_usdt, mark_price, entry_price
+        FROM mom_signals
+        WHERE outcome IS NULL AND side IN ('LONG', 'SHORT')
+        ORDER BY side ASC
+        """
+    )
+    open_legs = [dict(r) for r in cur.fetchall()]
+
+    last_run: str | None = None
+    long_target: str | None = None
+    short_target: str | None = None
     try:
         cur.execute(
-            "SELECT ran_at_utc FROM st_runs ORDER BY id DESC LIMIT 1"
+            "SELECT ran_at_utc, long_target, short_target FROM mom_runs ORDER BY id DESC LIMIT 1"
         )
         r = cur.fetchone()
-        if r and r[0]:
-            last_run = str(r[0])
+        if r:
+            last_run = str(r[0]) if r[0] else None
+            long_target = r[1]
+            short_target = r[2]
     except sqlite3.OperationalError:
         pass
 
     try:
-        import supertrend_config as st_cfg
+        import momentum_config as mom_cfg
 
-        timeframe = st_cfg.ST_TIMEFRAME
-        st_period = st_cfg.ST_ATR_PERIOD
-        st_multiplier = st_cfg.ST_ATR_MULTIPLIER
+        notional = mom_cfg.MOM_NOTIONAL_USDT
+        interval = mom_cfg.MOM_SCAN_INTERVAL_MINUTES
+        long_event = mom_cfg.MOM_LONG_EVENT
+        short_event = mom_cfg.MOM_SHORT_EVENT
     except Exception:
-        timeframe = "5m"
-        st_period = 10
-        st_multiplier = 3.0
+        notional = 1.0
+        interval = 15
+        long_event = "PULLBACK"
+        short_event = "RALLY"
 
     return {
         "ok": True,
         "open_positions": open_positions,
         "settled_count": settled_count,
-        "settled_snapshots": settled_snapshots,
         "total_pnl_usdt": total_pnl,
+        "unrealized_pnl_usdt": unrealized,
         "win_rate": win_rate,
         "wins": wins,
         "losses": losses,
-        "timeframe": timeframe,
-        "st_period": st_period,
-        "st_multiplier": st_multiplier,
+        "notional_usdt": notional,
+        "scan_interval_minutes": interval,
+        "long_event": long_event,
+        "short_event": short_event,
         "last_run_utc": last_run,
-        "equity_points": equity_points,
+        "last_long_target": long_target,
+        "last_short_target": short_target,
+        "open_legs": open_legs,
     }
 
 
 @router.get("/summary")
-async def get_st_summary():
+async def get_momentum_summary():
     from accumulation_radar import init_db
 
     conn = init_db()
@@ -126,21 +124,14 @@ async def get_st_summary():
         return _compute_summary(cur)
     except sqlite3.OperationalError as e:
         if "no such table" in str(e).lower():
-            return {
-                "ok": True,
-                "open_positions": 0,
-                "settled_count": 0,
-                "total_pnl_usdt": 0,
-                "win_rate": None,
-                "equity_points": [],
-            }
-        raise HTTPException(status_code=500, detail="st_summary_error") from e
+            return {"ok": True, "open_positions": 0, "settled_count": 0, "total_pnl_usdt": 0}
+        raise HTTPException(status_code=500, detail="mom_summary_error") from e
     finally:
         conn.close()
 
 
 @router.get("/signals")
-async def get_st_signals():
+async def get_momentum_signals():
     from accumulation_radar import init_db
 
     conn = init_db()
@@ -149,7 +140,7 @@ async def get_st_signals():
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT * FROM st_signals
+            SELECT * FROM mom_signals
             ORDER BY
               CASE WHEN outcome IS NULL AND side IN ('LONG','SHORT') THEN 0 ELSE 1 END,
               recorded_at_utc DESC
@@ -159,13 +150,13 @@ async def get_st_signals():
     except sqlite3.OperationalError as e:
         if "no such table" in str(e).lower():
             return {"signals": []}
-        raise HTTPException(status_code=500, detail="st_signals_error") from e
+        raise HTTPException(status_code=500, detail="mom_signals_error") from e
     finally:
         conn.close()
 
 
 @router.get("/settlements")
-async def get_st_settlements(limit: int = 100):
+async def get_momentum_settlements(limit: int = 100):
     from accumulation_radar import init_db
 
     lim = max(1, min(500, int(limit)))
@@ -175,9 +166,8 @@ async def get_st_settlements(limit: int = 100):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT * FROM st_settlements
-            ORDER BY settled_at_utc DESC
-            LIMIT ?
+            SELECT * FROM mom_settlements
+            ORDER BY settled_at_utc DESC LIMIT ?
             """,
             (lim,),
         )
@@ -185,45 +175,52 @@ async def get_st_settlements(limit: int = 100):
     except sqlite3.OperationalError as e:
         if "no such table" in str(e).lower():
             return {"settlements": []}
-        raise HTTPException(status_code=500, detail="st_settlements_error") from e
+        raise HTTPException(status_code=500, detail="mom_settlements_error") from e
     finally:
         conn.close()
 
 
+@router.get("/top-movers")
+async def get_top_movers_snapshot():
+    """当前 topMovers 解析结果（只读，不下单）。"""
+    from momentum_signals import fetch_momentum_targets
+
+    long_sym, short_sym, meta = fetch_momentum_targets()
+    return {
+        "ok": not meta.get("error"),
+        "long_target": long_sym,
+        "short_target": short_sym,
+        "meta": meta,
+    }
+
+
 @router.post("/maintenance/clear-db")
-async def post_st_clear_db(_: None = Depends(require_maintenance_token)):
-    """
-    清空 Supertrend：st_signals、st_settlements、st_indicator_state、st_runs、st_symbol_cooldown。
-    需 X-Maintenance-Token。
-    """
+async def post_momentum_clear_db(_: None = Depends(require_maintenance_token)):
     from accumulation_radar import init_db
-    from supertrend_db import clear_st_lane_tables
+    from momentum_db import clear_mom_lane_tables
 
     try:
         conn = init_db()
         try:
-            deleted = clear_st_lane_tables(conn)
+            deleted = clear_mom_lane_tables(conn)
         finally:
             conn.close()
-        logger.warning("st clear-db: %s", deleted)
+        logger.warning("mom clear-db: %s", deleted)
         return {"ok": True, **deleted}
     except Exception as e:
-        logger.exception("st clear-db failed: %s", e)
-        raise HTTPException(status_code=500, detail="st_clear_db_failed") from e
+        logger.exception("mom clear-db failed: %s", e)
+        raise HTTPException(status_code=500, detail="mom_clear_db_failed") from e
 
 
 @router.post("/scan")
-async def post_st_scan(_: None = Depends(require_maintenance_token)):
-    """手动触发 Supertrend 扫描（与定时任务同源）。"""
-    import threading
-
+async def post_momentum_scan(_: None = Depends(require_maintenance_token)):
     def _work() -> None:
         try:
-            from supertrend_signal_scanner import run_scan
+            from momentum_scanner import run_scan
 
             run_scan(notify=True)
         except Exception:
-            logger.exception("manual st scan failed")
+            logger.exception("manual mom scan failed")
 
     threading.Thread(target=_work, daemon=True).start()
-    return {"accepted": True, "task": "st_scan"}
+    return {"accepted": True, "task": "mom_scan"}

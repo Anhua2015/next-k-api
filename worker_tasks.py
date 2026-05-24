@@ -23,7 +23,6 @@ _S6_ALPHA_SCRIPT = _API_DIR / "s6_futures_alpha_autonomous_trading_v1.py"
 _ZCT_VWAP_SCRIPT = _API_DIR / "zct_vwap_signal_scanner.py"
 _ZCT_TOUCH_POOL_JOB = _API_DIR / "zct_vwap_asset_pool_daily_job.py"
 _ZCT_TOUCH_POOL_PRUNE = _API_DIR / "zct_touch_pool_intraday_prune.py"
-_ST_SCRIPT = _API_DIR / "supertrend_signal_scanner.py"
 
 _subprocess_locks: Dict[str, threading.Lock] = {
     "accumulation_pool": threading.Lock(),
@@ -33,11 +32,10 @@ _subprocess_locks: Dict[str, threading.Lock] = {
     "zct_vwap_scan": threading.Lock(),
     "zct_vwap_resolve": threading.Lock(),
     "zct_touch_pool": threading.Lock(),
-    "st_scan": threading.Lock(),
-    "st_resolve": threading.Lock(),
 }
 _heat_watch_refresh_lock = threading.Lock()
 _powder_keg_radar_lock = threading.Lock()
+_momentum_scan_lock = threading.Lock()
 
 
 def _run_subprocess_locked(lock_key: str, argv: list[str], *, cwd: Path, env: dict | None = None) -> None:
@@ -305,31 +303,31 @@ def run_zct_touch_pool_intraday_prune_task() -> None:
     run_zct_touch_pool_4h_task()
 
 
-def run_st_scan_subprocess() -> None:
-    logger.info("Starting supertrend_signal_scanner subprocess")
-    _run_subprocess_locked(
-        "st_scan",
-        [sys.executable, str(_ST_SCRIPT)],
-        cwd=_ST_SCRIPT.parent,
-    )
+def run_momentum_scan_task() -> None:
+    """动量多一空一：topMovers 纸面调仓（默认每 15 分钟）。"""
+    if not _momentum_scan_lock.acquire(blocking=False):
+        logger.warning("跳过 momentum_scan：上一轮仍在运行")
+        return
+    try:
+        from momentum_config import momentum_scheduler_enabled
+        from momentum_scanner import run_scan
 
-
-def run_st_scan_task() -> None:
-    logger.info("开始执行 Supertrend 扫描（热度+OI 标的）…")
-    run_st_scan_subprocess()
-
-
-def run_st_resolve_subprocess() -> None:
-    logger.info("Starting supertrend_signal_scanner --resolve-only subprocess")
-    _run_subprocess_locked(
-        "st_resolve",
-        [sys.executable, str(_ST_SCRIPT), "--resolve-only"],
-        cwd=_ST_SCRIPT.parent,
-    )
-
-
-def run_st_resolve_task() -> None:
-    run_st_resolve_subprocess()
+        if not momentum_scheduler_enabled():
+            logger.info("MOM_SCHEDULER_ENABLED=0，跳过动量扫描")
+            return
+        logger.info("开始执行动量 topMovers 纸面扫描…")
+        stats = run_scan(notify=True)
+        logger.info(
+            "动量扫描完成 long=%s short=%s opens=%s closes=%s",
+            stats.get("long_target"),
+            stats.get("short_target"),
+            stats.get("opens"),
+            stats.get("closes"),
+        )
+    except Exception as e:
+        logger.exception("momentum_scan failed: %s", e)
+    finally:
+        _momentum_scan_lock.release()
 
 
 def run_powder_keg_radar_task() -> None:

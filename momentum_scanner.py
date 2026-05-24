@@ -1,0 +1,440 @@
+"""动量多一空一 — topMovers 纸面调仓。
+
+- 多：最新 PULLBACK（默认）
+- 空：最新 RALLY（默认）
+- 每腿最多 1 个持仓；标的变化时市价纸面平仓再开仓
+
+CLI:
+  python momentum_scanner.py
+  python momentum_scanner.py --no-tg
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sqlite3
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import momentum_config as cfg
+from binance_fapi import fetch_mark_price
+from momentum_db import (
+    archive_settlement,
+    fetch_open_by_side,
+    last_close_utc_ms,
+    migrate_mom_tables,
+)
+from momentum_signals import fetch_momentum_targets
+
+logger = logging.getLogger(__name__)
+
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def send_tg(text: str) -> None:
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    try:
+        import requests
+
+        requests.post(
+            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown"},
+            timeout=15,
+        )
+    except Exception:
+        pass
+
+
+def pnl_usdt(side: str, entry: float, exit_px: float, notional: float) -> float:
+    if entry <= 0 or notional <= 0:
+        return 0.0
+    if side.upper() == "LONG":
+        return notional * (exit_px - entry) / entry
+    return notional * (entry - exit_px) / entry
+
+
+def _outcome_for_pnl(pnl: float) -> str:
+    if pnl > 0:
+        return "win"
+    if pnl < 0:
+        return "loss"
+    return "flat"
+
+
+def _cooldown_blocks(cur, *, symbol: str, side: str) -> bool:
+    if cfg.MOM_COOLDOWN_SEC <= 0:
+        return False
+    last_ms = last_close_utc_ms(cur, symbol=symbol, side=side)
+    if last_ms is None:
+        return False
+    elapsed = (_now_ms() - last_ms) / 1000.0
+    return elapsed < cfg.MOM_COOLDOWN_SEC
+
+
+def _settle_row(
+    cur,
+    row: sqlite3.Row,
+    *,
+    exit_price: float,
+    exit_rule: str,
+    now_utc: str,
+) -> Dict[str, Any]:
+    side = str(row["side"])
+    entry = float(row["entry_price"] or 0)
+    notional = float(row["virtual_notional_usdt"] or cfg.MOM_NOTIONAL_USDT)
+    pnl = pnl_usdt(side, entry, exit_price, notional)
+    outcome = _outcome_for_pnl(pnl)
+    cur.execute(
+        """
+        UPDATE mom_signals SET
+            outcome = ?, outcome_at_utc = ?, exit_price = ?,
+            pnl_usdt = ?, exit_rule = ?, mark_price = ?, unrealized_pnl_usdt = NULL
+        WHERE id = ?
+        """,
+        (outcome, now_utc, exit_price, pnl, exit_rule, exit_price, row["id"]),
+    )
+    archive_settlement(
+        cur,
+        signal_id=int(row["id"]),
+        symbol=str(row["symbol"]),
+        side=side,
+        outcome=outcome,
+        entry_price=entry,
+        exit_price=exit_price,
+        pnl_usdt=pnl,
+        notional=notional,
+        exit_rule=exit_rule,
+        settled_at_utc=now_utc,
+    )
+    return {
+        "symbol": row["symbol"],
+        "side": side,
+        "entry": entry,
+        "exit": exit_price,
+        "pnl_usdt": pnl,
+        "outcome": outcome,
+        "exit_rule": exit_rule,
+    }
+
+
+def _open_row(
+    cur,
+    *,
+    side: str,
+    symbol: str,
+    signal_type: str,
+    entry_price: float,
+    event_timestamp_ms: Optional[int],
+    now_utc: str,
+    meta: Dict[str, Any],
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO mom_signals (
+            recorded_at_utc, side, symbol, signal_type, entry_price,
+            virtual_notional_usdt, event_timestamp_ms, mark_price,
+            unrealized_pnl_usdt, meta_json, updated_at_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now_utc,
+            side.upper(),
+            symbol.upper(),
+            signal_type,
+            entry_price,
+            cfg.MOM_NOTIONAL_USDT,
+            event_timestamp_ms,
+            entry_price,
+            0.0,
+            json.dumps(meta, default=str),
+            now_utc,
+        ),
+    )
+
+
+def _mark_open_row(cur, row: sqlite3.Row, *, mark: float, now_utc: str) -> None:
+    side = str(row["side"])
+    entry = float(row["entry_price"] or 0)
+    notional = float(row["virtual_notional_usdt"] or cfg.MOM_NOTIONAL_USDT)
+    u = pnl_usdt(side, entry, mark, notional)
+    cur.execute(
+        """
+        UPDATE mom_signals SET mark_price = ?, unrealized_pnl_usdt = ?, updated_at_utc = ?
+        WHERE id = ? AND outcome IS NULL
+        """,
+        (mark, u, now_utc, row["id"]),
+    )
+
+
+def _adjust_side(
+    cur,
+    *,
+    side: str,
+    target_symbol: Optional[str],
+    signal_type: str,
+    event_timestamp_ms: Optional[int],
+    now_utc: str,
+    stats: Dict[str, Any],
+    events: List[str],
+    signal_meta: Dict[str, Any],
+) -> None:
+    if not target_symbol:
+        open_row = fetch_open_by_side(cur, side)
+        if open_row:
+            sym = str(open_row["symbol"])
+            px = fetch_mark_price(sym)
+            if px is not None:
+                _mark_open_row(cur, open_row, mark=px, now_utc=now_utc)
+        return
+
+    target_symbol = target_symbol.upper()
+    open_row = fetch_open_by_side(cur, side)
+    current_sym = str(open_row["symbol"]).upper() if open_row else None
+
+    if current_sym == target_symbol:
+        px = fetch_mark_price(target_symbol)
+        if px is None:
+            stats["skipped"].append(f"{side}:no_mark_price:{target_symbol}")
+            return
+        _mark_open_row(cur, open_row, mark=px, now_utc=now_utc)
+        return
+
+    closed_without_reopen = False
+
+    if open_row and current_sym:
+        exit_px = fetch_mark_price(current_sym)
+        if exit_px is None:
+            stats["skipped"].append(f"{side}:no_exit_price:{current_sym}")
+            return
+        closed = _settle_row(
+            cur,
+            open_row,
+            exit_price=exit_px,
+            exit_rule="rotate",
+            now_utc=now_utc,
+        )
+        stats["closes"] += 1
+        closed_without_reopen = True
+        events.append(
+            f"平{side[0]} {closed['symbol']} pnl={closed['pnl_usdt']:.4f}U ({closed['outcome']})"
+        )
+
+    if _cooldown_blocks(cur, symbol=target_symbol, side=side):
+        if closed_without_reopen:
+            stats["skipped"].append(
+                f"{side}:closed_without_reopen:cooldown:{target_symbol}"
+            )
+        else:
+            stats["skipped"].append(f"{side}:cooldown:{target_symbol}")
+        return
+
+    entry_px = fetch_mark_price(target_symbol)
+    if entry_px is None:
+        if closed_without_reopen:
+            stats["skipped"].append(
+                f"{side}:closed_without_reopen:no_entry_price:{target_symbol}"
+            )
+        else:
+            stats["skipped"].append(f"{side}:no_entry_price:{target_symbol}")
+        return
+
+    meta = {
+        "lane": "momentum_top_movers",
+        "signal": signal_meta,
+        "notional_usdt": cfg.MOM_NOTIONAL_USDT,
+        "equity_usdt": cfg.MOM_ACCOUNT_EQUITY_USDT,
+        "leverage": cfg.MOM_LEVERAGE,
+    }
+    _open_row(
+        cur,
+        side=side,
+        symbol=target_symbol,
+        signal_type=signal_type,
+        entry_price=entry_px,
+        event_timestamp_ms=event_timestamp_ms,
+        now_utc=now_utc,
+        meta=meta,
+    )
+    stats["opens"] += 1
+    events.append(f"开{side[0]} {target_symbol} @ {entry_px:.8g} ({signal_type})")
+
+
+def _persist_mom_run(
+    cur,
+    *,
+    now_utc: str,
+    long_sym: Optional[str],
+    short_sym: Optional[str],
+    stats: Dict[str, Any],
+    events: List[str],
+    sig_meta: Dict[str, Any],
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO mom_runs (
+            ran_at_utc, long_target, short_target, opens, closes, skipped, detail_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now_utc,
+            long_sym,
+            short_sym,
+            stats["opens"],
+            stats["closes"],
+            ",".join(stats["skipped"][:20]),
+            json.dumps(
+                {
+                    "ok": stats.get("ok", True),
+                    "error": stats.get("error"),
+                    "events": events[:30],
+                    "signal_meta": sig_meta,
+                    "notional_usdt": cfg.MOM_NOTIONAL_USDT,
+                },
+                default=str,
+            ),
+        ),
+    )
+
+
+def run_scan_conn(
+    conn: sqlite3.Connection, *, notify: bool = True
+) -> Dict[str, Any]:
+    now_utc = _utc_now()
+    stats: Dict[str, Any] = {
+        "ok": True,
+        "opens": 0,
+        "closes": 0,
+        "skipped": [],
+    }
+    events: List[str] = []
+    sig_meta: Dict[str, Any] = {}
+
+    conn.row_factory = sqlite3.Row
+    migrate_mom_tables(conn.cursor())
+    conn.commit()
+    cur = conn.cursor()
+
+    if cfg.MOM_NOTIONAL_USDT <= 0:
+        stats["ok"] = False
+        stats["error"] = "zero_notional"
+        logger.warning("[mom] MOM_NOTIONAL_USDT<=0，跳过调仓")
+        _persist_mom_run(
+            cur,
+            now_utc=now_utc,
+            long_sym=None,
+            short_sym=None,
+            stats=stats,
+            events=events,
+            sig_meta={"error": "zero_notional"},
+        )
+        conn.commit()
+        return stats
+
+    long_sym, short_sym, sig_meta = fetch_momentum_targets()
+    if sig_meta.get("error"):
+        stats["ok"] = False
+        stats["error"] = sig_meta["error"]
+        logger.warning("[mom] topMovers 失败: %s", sig_meta)
+        _persist_mom_run(
+            cur,
+            now_utc=now_utc,
+            long_sym=long_sym,
+            short_sym=short_sym,
+            stats=stats,
+            events=events,
+            sig_meta=sig_meta,
+        )
+        conn.commit()
+        return stats
+
+    long_evt = sig_meta.get("long_event_raw") or {}
+    short_evt = sig_meta.get("short_event_raw") or {}
+    long_ts = int(long_evt.get("createTimestamp") or 0) or None
+    short_ts = int(short_evt.get("createTimestamp") or 0) or None
+
+    _adjust_side(
+        cur,
+        side="LONG",
+        target_symbol=long_sym,
+        signal_type=cfg.MOM_LONG_EVENT,
+        event_timestamp_ms=long_ts,
+        now_utc=now_utc,
+        stats=stats,
+        events=events,
+        signal_meta=long_evt,
+    )
+    _adjust_side(
+        cur,
+        side="SHORT",
+        target_symbol=short_sym,
+        signal_type=cfg.MOM_SHORT_EVENT,
+        event_timestamp_ms=short_ts,
+        now_utc=now_utc,
+        stats=stats,
+        events=events,
+        signal_meta=short_evt,
+    )
+    _persist_mom_run(
+        cur,
+        now_utc=now_utc,
+        long_sym=long_sym,
+        short_sym=short_sym,
+        stats=stats,
+        events=events,
+        sig_meta=sig_meta,
+    )
+    conn.commit()
+
+    summary = (
+        f"[mom] {now_utc} long={long_sym} short={short_sym} "
+        f"opens={stats['opens']} closes={stats['closes']}"
+    )
+    print(summary)
+    for e in events:
+        print(f"  · {e}")
+
+    if notify and events and cfg.MOM_TG_NOTIFY:
+        send_tg("*动量纸面*\n" + "\n".join(events[:12]))
+
+    stats["long_target"] = long_sym
+    stats["short_target"] = short_sym
+    stats["events"] = events
+    return stats
+
+
+def run_scan(*, notify: bool = True) -> Dict[str, Any]:
+    from accumulation_radar import init_db
+
+    conn = init_db()
+    try:
+        return run_scan_conn(conn, notify=notify)
+    finally:
+        conn.close()
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+    ap = argparse.ArgumentParser(description="动量多一空一纸面扫描")
+    ap.add_argument("--no-tg", action="store_true")
+    args = ap.parse_args()
+    run_scan(notify=not args.no_tg)
+
+
+if __name__ == "__main__":
+    main()
