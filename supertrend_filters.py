@@ -29,6 +29,9 @@ class EntryFilterContext:
     range_pct: Optional[float] = None
     atr_pct: Optional[float] = None
     flip_count: int = 0
+    vp_poc: Optional[float] = None
+    vp_val: Optional[float] = None
+    vp_vah: Optional[float] = None
 
 
 def closed_bars_df(st_df: pd.DataFrame, *, timeframe_ms: int, now_ms: Optional[int] = None) -> pd.DataFrame:
@@ -120,6 +123,97 @@ def htf_trend_for_symbol(
     return int(closed.iloc[-1]["st_trend"])
 
 
+def volume_profile_levels(
+    closed: pd.DataFrame,
+    lookback: int,
+    *,
+    num_bins: int = 42,
+    value_area_pct: float = 0.70,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """近 lookback 根已收盘 K 的 POC / VAL / VAH（成交量分布价值区）。"""
+    if closed.empty or lookback <= 0:
+        return None, None, None
+    tail = closed.tail(lookback)
+    if tail.empty or "high" not in tail.columns or "low" not in tail.columns:
+        return None, None, None
+    vol_col = "volume" if "volume" in tail.columns else None
+    if vol_col is None:
+        return None, None, None
+
+    lo = float(tail["low"].min())
+    hi = float(tail["high"].max())
+    if hi <= lo:
+        mid = float(tail["close"].iloc[-1])
+        return mid, lo, hi
+
+    rows = [
+        {
+            "low": float(r["low"]),
+            "high": float(r["high"]),
+            "vol": float(r[vol_col]),
+        }
+        for _, r in tail.iterrows()
+    ]
+    tot_vol = sum(r["vol"] for r in rows)
+    if tot_vol <= 0:
+        mid = (lo + hi) / 2.0
+        return mid, lo, hi
+
+    n = max(int(num_bins), 12)
+    step = (hi - lo) / float(n)
+    if step <= 0:
+        mid = (lo + hi) / 2.0
+        return mid, lo, hi
+
+    bins = [0.0] * n
+    for r in rows:
+        a, b, va = r["low"], r["high"], r["vol"]
+        if va <= 0:
+            continue
+        ia = max(0, min(n - 1, int((a - lo) / step)))
+        ib = max(0, min(n - 1, int((b - lo) / step)))
+        if ia > ib:
+            ia, ib = ib, ia
+        span = ib - ia + 1
+        per = va / float(span)
+        for k in range(ia, ib + 1):
+            bins[k] += per
+
+    peak_i = max(range(n), key=lambda i: bins[i])
+    poc = lo + (peak_i + 0.5) * step
+    totv = sum(bins)
+    if totv <= 0:
+        return poc, lo, hi
+
+    target = totv * float(value_area_pct)
+    acc = bins[peak_i]
+    L = R = peak_i
+    while acc < target and (L > 0 or R < n - 1):
+        lv = bins[L - 1] if L > 0 else -1.0
+        rv = bins[R + 1] if R < n - 1 else -1.0
+        if lv >= rv:
+            if L > 0:
+                L -= 1
+                acc += bins[L]
+            elif R < n - 1:
+                R += 1
+                acc += bins[R]
+            else:
+                break
+        else:
+            if R < n - 1:
+                R += 1
+                acc += bins[R]
+            elif L > 0:
+                L -= 1
+                acc += bins[L]
+            else:
+                break
+    val = lo + L * step
+    vah = lo + (R + 1) * step
+    return poc, val, vah
+
+
 def range_pct(closed: pd.DataFrame, lookback: int) -> Optional[float]:
     if closed.empty or lookback <= 0:
         return None
@@ -154,7 +248,7 @@ def compute_entry_intent(
     open_row: Optional[Any],
 ) -> Tuple[bool, bool]:
     """
-    入场意图：flip 当根 + 翻转后窗口内同向（解决「确认 K 需 2 根但仅 flip 根下单」）。
+    入场意图：flip 当根；window=0 时仅允许至多 ST_ENTRY_CONFIRM_BARS 根（无宽窗口补票）。
     """
     window = cfg.ST_ENTRY_WINDOW_BARS
     has_long = open_row is not None and str(open_row["side"]) == "LONG"
@@ -165,7 +259,10 @@ def compute_entry_intent(
 
     def in_window(since: int) -> bool:
         if window <= 0:
-            return since == 0
+            confirm_cap = cfg.ST_ENTRY_CONFIRM_BARS
+            if confirm_cap <= 0:
+                return since == 0
+            return since <= confirm_cap
         return since <= window
 
     want_long = (
@@ -184,12 +281,29 @@ def compute_entry_intent(
 
 
 def flip_signal_count(closed: pd.DataFrame, lookback: int) -> int:
+    """买卖信号根数（偏激进）；防连斩请用 flip_trend_count。"""
     if closed.empty or lookback <= 0:
         return 0
     tail = closed.tail(lookback)
     buys = tail.get("buy_signal", pd.Series(False, index=tail.index)).astype(bool)
     sells = tail.get("sell_signal", pd.Series(False, index=tail.index)).astype(bool)
     return int((buys | sells).sum())
+
+
+def flip_trend_count(closed: pd.DataFrame, lookback: int) -> int:
+    """st_trend 方向切换次数（多空翻转）。"""
+    if closed.empty or lookback <= 0 or "st_trend" not in closed.columns:
+        return 0
+    trends = closed.tail(lookback)["st_trend"].astype(int).tolist()
+    if len(trends) < 2:
+        return 0
+    flips = 0
+    prev = trends[0]
+    for t in trends[1:]:
+        if t != prev and t != 0 and prev != 0:
+            flips += 1
+        prev = t
+    return flips
 
 
 def entry_confirm_ok(closed: pd.DataFrame, side: str, bars: int) -> bool:
@@ -233,10 +347,18 @@ def build_filter_context(
     rp = range_pct(closed, cfg.ST_RANGE_LOOKBACK) if cfg.ST_MAX_RANGE_PCT > 0 else None
     atr_pct = (st_atr / close_px) if close_px > 0 and st_atr > 0 else None
     flips = (
-        flip_signal_count(closed, cfg.ST_CHOP_LOOKBACK)
-        if cfg.ST_FILTER_ENABLED and cfg.ST_CHOP_MAX_FLIPS > 0
+        flip_trend_count(closed, cfg.ST_CHOP_LOOKBACK)
+        if cfg.ST_CHOP_MAX_FLIPS > 0
         else 0
     )
+    vp_poc = vp_val = vp_vah = None
+    if cfg.ST_FILTER_ENABLED and cfg.ST_VP_ENABLED and cfg.ST_VP_LOOKBACK > 0:
+        vp_poc, vp_val, vp_vah = volume_profile_levels(
+            closed,
+            cfg.ST_VP_LOOKBACK,
+            num_bins=cfg.ST_VP_NUM_BINS,
+            value_area_pct=cfg.ST_VP_VALUE_AREA_PCT,
+        )
     return EntryFilterContext(
         symbol=symbol,
         side=side,
@@ -252,11 +374,35 @@ def build_filter_context(
         range_pct=rp,
         atr_pct=atr_pct,
         flip_count=flips,
+        vp_poc=vp_poc,
+        vp_val=vp_val,
+        vp_vah=vp_vah,
     )
+
+
+def _evaluate_vp_filters(ctx: EntryFilterContext) -> Tuple[bool, str]:
+    if not cfg.ST_VP_ENABLED or cfg.ST_VP_LOOKBACK <= 0:
+        return True, ""
+    val, vah = ctx.vp_val, ctx.vp_vah
+    if val is None or vah is None:
+        return False, "vp_unavailable"
+    px = ctx.close_px
+    if val < px < vah:
+        return False, "vp_inside_value_area"
+    if ctx.side == "LONG" and px <= vah:
+        return False, "vp_long_not_above_vah"
+    if ctx.side == "SHORT" and px >= val:
+        return False, "vp_short_not_below_val"
+    return True, ""
 
 
 def evaluate_entry_filters(ctx: EntryFilterContext) -> Tuple[bool, str]:
     """返回 (允许开仓, 拒绝原因 code)。"""
+    if cfg.ST_VP_ENABLED and (cfg.ST_FILTER_ENABLED or cfg.ST_VP_INDEPENDENT):
+        ok, reason = _evaluate_vp_filters(ctx)
+        if not ok:
+            return False, reason
+
     if not cfg.ST_FILTER_ENABLED:
         return True, ""
 
@@ -296,15 +442,94 @@ def evaluate_entry_filters(ctx: EntryFilterContext) -> Tuple[bool, str]:
     return True, ""
 
 
-def chop_cooldown_until_bar(ctx: EntryFilterContext, timeframe_ms: int) -> Optional[int]:
+def chop_cooldown_until_bar(
+    flip_count: int,
+    bar_open_ms: int,
+    timeframe_ms: int,
+    *,
+    filter_enabled: Optional[bool] = None,
+) -> Optional[int]:
     """翻转过密时，返回禁止新开仓直到的 bar_open_ms（含）。"""
-    if not cfg.ST_FILTER_ENABLED:
+    if filter_enabled is None:
+        filter_enabled = cfg.ST_FILTER_ENABLED
+    if not filter_enabled:
         return None
     if cfg.ST_CHOP_MAX_FLIPS <= 0 or cfg.ST_CHOP_COOLDOWN_BARS <= 0:
         return None
-    if ctx.flip_count < cfg.ST_CHOP_MAX_FLIPS:
+    if flip_count < cfg.ST_CHOP_MAX_FLIPS:
         return None
-    return ctx.bar_open_ms + cfg.ST_CHOP_COOLDOWN_BARS * timeframe_ms
+    return bar_open_ms + cfg.ST_CHOP_COOLDOWN_BARS * timeframe_ms
+
+
+def chop_cooldown_until_bar_from_ctx(ctx: EntryFilterContext, timeframe_ms: int) -> Optional[int]:
+    return chop_cooldown_until_bar(ctx.flip_count, ctx.bar_open_ms, timeframe_ms)
+
+
+def structure_sl_price(
+    side: str,
+    *,
+    st_up: float,
+    st_dn: float,
+    prev_low: Optional[float] = None,
+    prev_high: Optional[float] = None,
+) -> Optional[float]:
+    """
+    结构硬止损价：多取 st_up 与前一根低点的较低者；空取 st_dn 与前一根高点的较高者。
+    """
+    if side == "LONG":
+        candidates = [v for v in (st_up, prev_low) if v is not None and v > 0]
+        return min(candidates) if candidates else None
+    if side == "SHORT":
+        candidates = [v for v in (st_dn, prev_high) if v is not None and v > 0]
+        return max(candidates) if candidates else None
+    return None
+
+
+def structure_sl_valid(side: str, entry_price: float, sl_price: float) -> bool:
+    if sl_price <= 0 or entry_price <= 0:
+        return False
+    if side == "LONG":
+        return sl_price < entry_price
+    if side == "SHORT":
+        return sl_price > entry_price
+    return False
+
+
+def hard_sl_triggered(
+    side: str,
+    sl_price: Optional[float],
+    *,
+    low: float,
+    high: float,
+    close: float,
+    use_wick: Optional[bool] = None,
+) -> bool:
+    if sl_price is None or sl_price <= 0:
+        return False
+    sl = float(sl_price)
+    wick = cfg.ST_HARD_SL_USE_WICK if use_wick is None else bool(use_wick)
+    if side == "LONG":
+        return (low < sl) if wick else (close < sl)
+    if side == "SHORT":
+        return (high > sl) if wick else (close > sl)
+    return False
+
+
+def hard_sl_fill_price(
+    side: str,
+    sl_price: float,
+    *,
+    low: float,
+    high: float,
+    close: float,
+) -> float:
+    """纸面成交价：影线触发时用 SL 线价，否则收盘。"""
+    sl = float(sl_price)
+    if side == "LONG" and low < sl:
+        return sl
+    if side == "SHORT" and high > sl:
+        return sl
+    return close
 
 
 def record_filter_reject(stats: Dict[str, Any], reason: str) -> None:

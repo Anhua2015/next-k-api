@@ -73,9 +73,9 @@ def env_truthy(name: str, *, default: bool = False) -> bool:
 ST_FILTER_ENABLED = env_truthy("ST_FILTER_ENABLED", default=True)
 
 ST_ADX_PERIOD = max(2, int(os.getenv("ST_ADX_PERIOD", "14") or 14))
-ST_ADX_MIN = max(0.0, float(os.getenv("ST_ADX_MIN", "25") or 25))
+ST_ADX_MIN = max(0.0, float(os.getenv("ST_ADX_MIN", "30") or 30))
 
-ST_HTF_TIMEFRAME = (os.getenv("ST_HTF_TIMEFRAME", "15m") or "15m").strip()
+ST_HTF_TIMEFRAME = (os.getenv("ST_HTF_TIMEFRAME", "1h") or "1h").strip()
 ST_HTF_REQUIRE_ALIGN = env_truthy("ST_HTF_REQUIRE_ALIGN", default=True)
 
 ST_MIN_ATR_PCT = max(0.0, float(os.getenv("ST_MIN_ATR_PCT", "0.0015") or 0.0015))
@@ -83,30 +83,48 @@ ST_RANGE_LOOKBACK = max(1, int(os.getenv("ST_RANGE_LOOKBACK", "24") or 24))
 ST_MAX_RANGE_PCT = max(0.0, float(os.getenv("ST_MAX_RANGE_PCT", "0.012") or 0.012))
 
 ST_ENTRY_CONFIRM_BARS = max(0, int(os.getenv("ST_ENTRY_CONFIRM_BARS", "2") or 2))
-# 翻转后允许尝试入场的 K 线窗口（含确认 K 延迟；0=仅 flip 当根）
+# 翻转后允许尝试入场的 K 线窗口；0=仅 flip 当根 + 至多 ST_ENTRY_CONFIRM_BARS 根（无补票）
 ST_ENTRY_WINDOW_BARS = max(
-    0, int(os.getenv("ST_ENTRY_WINDOW_BARS", "6") or 6)
+    0, int(os.getenv("ST_ENTRY_WINDOW_BARS", "0") or 0)
 )
 ST_MIN_DIST_ATR = max(0.0, float(os.getenv("ST_MIN_DIST_ATR", "0.3") or 0.3))
 
-ST_CHOP_LOOKBACK = max(1, int(os.getenv("ST_CHOP_LOOKBACK", "48") or 48))
+ST_CHOP_LOOKBACK = max(1, int(os.getenv("ST_CHOP_LOOKBACK", "24") or 24))
 ST_CHOP_MAX_FLIPS = max(0, int(os.getenv("ST_CHOP_MAX_FLIPS", "3") or 3))
-ST_CHOP_COOLDOWN_BARS = max(0, int(os.getenv("ST_CHOP_COOLDOWN_BARS", "12") or 12))
+ST_CHOP_COOLDOWN_BARS = max(0, int(os.getenv("ST_CHOP_COOLDOWN_BARS", "48") or 48))
+
+# Volume Profile：价值区内禁止开仓；多需突破 VAH、空需跌破 VAL
+ST_VP_ENABLED = env_truthy("ST_VP_ENABLED", default=True)
+ST_VP_LOOKBACK = max(1, int(os.getenv("ST_VP_LOOKBACK", "24") or 24))
+ST_VP_NUM_BINS = max(12, int(os.getenv("ST_VP_NUM_BINS", "42") or 42))
+ST_VP_VALUE_AREA_PCT = max(
+    0.5,
+    min(0.95, float(os.getenv("ST_VP_VALUE_AREA_PCT", "0.70") or 0.70)),
+)
+# 1=VP 在 ST_FILTER_ENABLED=0 时仍生效
+ST_VP_INDEPENDENT = env_truthy("ST_VP_INDEPENDENT", default=False)
+
+# 结构硬止损：1=影线刺破 SL 即触发（与 trail_atr 一致）；0=仅收盘破 SL
+ST_HARD_SL_USE_WICK = env_truthy("ST_HARD_SL_USE_WICK", default=True)
 
 ST_COOLDOWN_AFTER_LOSS_MIN = max(
     0, int(os.getenv("ST_COOLDOWN_AFTER_LOSS_MIN", "30") or 30)
 )
-ST_COOLDOWN_AFTER_WIN_MIN = max(0, int(os.getenv("ST_COOLDOWN_AFTER_WIN_MIN", "0") or 0))
+ST_COOLDOWN_AFTER_WIN_MIN = max(0, int(os.getenv("ST_COOLDOWN_AFTER_WIN_MIN", "15") or 15))
 ST_MAX_LOSSES_PER_SYMBOL_PER_DAY = max(
     0, int(os.getenv("ST_MAX_LOSSES_PER_SYMBOL_PER_DAY", "2") or 2)
 )
 
 # --- 利润保护（仅对已持仓；优先级 giveback → trail_atr → reverse_signal）---
-ST_TRAIL_ATR_MULT = max(0.0, float(os.getenv("ST_TRAIL_ATR_MULT", "1.75") or 1.75))
-ST_TRAIL_ARM_ATR = max(0.0, float(os.getenv("ST_TRAIL_ARM_ATR", "1.0") or 1.0))
-ST_GIVEBACK_PCT = max(0.0, min(1.0, float(os.getenv("ST_GIVEBACK_PCT", "0.35") or 0.35)))
+# 跟踪止损：默认偏宽，减少横盘「浅 MFE + 小反弹」即被扫
+ST_TRAIL_ATR_MULT = max(0.0, float(os.getenv("ST_TRAIL_ATR_MULT", "3.0") or 3.0))
+ST_TRAIL_ARM_ATR = max(0.0, float(os.getenv("ST_TRAIL_ARM_ATR", "3.0") or 3.0))
+# 武装条件用收盘价顺向幅度（不用影线 MFE），避免一根针就启动跟踪
+ST_TRAIL_ARM_USE_CLOSE = env_truthy("ST_TRAIL_ARM_USE_CLOSE", default=True)
+# 浮盈回撤：GIVEBACK_PCT=允许从「峰值利润」回撤的比例（越大越不易平）
+ST_GIVEBACK_PCT = max(0.0, min(1.0, float(os.getenv("ST_GIVEBACK_PCT", "0.85") or 0.85)))
 ST_GIVEBACK_MIN_PEAK_PCT = max(
-    0.0, float(os.getenv("ST_GIVEBACK_MIN_PEAK_PCT", "0.006") or 0.006)
+    0.0, float(os.getenv("ST_GIVEBACK_MIN_PEAK_PCT", "0.03") or 0.03)
 )
 # 峰值浮盈仅用收盘价（不用影线尖刺）；0/false=影线 MFE 也计入峰值
 ST_GIVEBACK_PEAK_USE_CLOSE = env_truthy("ST_GIVEBACK_PEAK_USE_CLOSE", default=True)

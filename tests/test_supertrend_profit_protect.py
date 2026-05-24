@@ -52,19 +52,19 @@ class TestProfitProtect(unittest.TestCase):
         with patch.multiple(
             cfg,
             ST_EXIT_MODE="giveback",
-            ST_GIVEBACK_PCT=0.35,
-            ST_GIVEBACK_MIN_PEAK_PCT=0.01,
+            ST_GIVEBACK_PCT=0.85,
+            ST_GIVEBACK_MIN_PEAK_PCT=0.03,
             ST_GIVEBACK_PEAK_USE_CLOSE=True,
             ST_GIVEBACK_REQUIRE_POSITIVE_PCT=True,
         ):
-            st = ProtectState(mfe_price=105.0, peak_pnl_pct=0.02, trail_armed=False)
+            st = ProtectState(mfe_price=105.0, peak_pnl_pct=0.04, trail_armed=False)
             rule = evaluate_profit_exit(
                 st,
                 side="LONG",
                 entry=100.0,
                 high=105.0,
                 low=99.0,
-                close=100.6,
+                close=100.5,
                 atr=2.0,
             )
             self.assertEqual(rule, "giveback")
@@ -73,11 +73,11 @@ class TestProfitProtect(unittest.TestCase):
         with patch.multiple(
             cfg,
             ST_EXIT_MODE="giveback",
-            ST_GIVEBACK_PCT=0.35,
-            ST_GIVEBACK_MIN_PEAK_PCT=0.01,
+            ST_GIVEBACK_PCT=0.85,
+            ST_GIVEBACK_MIN_PEAK_PCT=0.03,
             ST_GIVEBACK_REQUIRE_POSITIVE_PCT=True,
         ):
-            st = ProtectState(mfe_price=102.0, peak_pnl_pct=0.02, trail_armed=False)
+            st = ProtectState(mfe_price=102.0, peak_pnl_pct=0.04, trail_armed=False)
             rule = evaluate_profit_exit(
                 st,
                 side="LONG",
@@ -88,6 +88,26 @@ class TestProfitProtect(unittest.TestCase):
                 atr=2.0,
             )
             self.assertIsNone(rule)
+
+    def test_trail_arm_requires_close_when_flag_on(self):
+        with patch.multiple(
+            cfg,
+            ST_EXIT_MODE="trail_atr",
+            ST_TRAIL_ATR_MULT=2.0,
+            ST_TRAIL_ARM_ATR=1.0,
+            ST_TRAIL_ARM_USE_CLOSE=True,
+        ):
+            entry, atr = 100.0, 2.0
+            st = update_protect_state(
+                ProtectState(entry, 0.0, False),
+                side="LONG",
+                entry=entry,
+                high=102.5,
+                low=99.0,
+                close=100.5,
+                atr=atr,
+            )
+            self.assertFalse(st.trail_armed)
 
     def test_update_peak_when_atr_zero(self):
         with patch.multiple(cfg, ST_GIVEBACK_PEAK_USE_CLOSE=True):

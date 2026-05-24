@@ -3,9 +3,9 @@
 Supertrend 量化信号（币安 U 本位永续）
 
 - 标的：worth_watch_hot_oi（🔥⚡ 热度+OI，由 OI 雷达写入）
-- 平仓：利润保护（浮盈回撤 giveback → ATR 跟踪 trail_atr）→ 反转信号 reverse_signal
-- 开仓过滤：ADX / 15m 同向 / 箱体·ATR% / 确认 K / 翻转冷却等（ST_FILTER_ENABLED，仅挡新开）
-- 入场窗口：翻转后 ST_ENTRY_WINDOW_BARS 根内可入场（配合确认 K，非仅 flip 当根）
+- 平仓：结构硬止损 hard_sl（默认影线破 SL）→ 利润保护 → 反转信号 reverse_signal
+- 开仓过滤：ADX / 1h 同向 / VP 价值区 / 箱体·ATR% / 确认 K / 防连斩冷却等（ST_FILTER_ENABLED，仅挡新开）
+- 入场窗口：ST_ENTRY_WINDOW_BARS=0 时仅 flip 当根或确认 K 根数内，禁止宽窗口补票
 - 亏损冷却：仅挡同向再开，反转反手不受阻
 - 掉出热度+OI 池：不按市价强平；有仓则继续扫描至反转平仓，且不再开新仓/反手
 - 定时：APScheduler cron（K 线收盘后 +30s）；见 ST_SCHEDULER_ENABLED
@@ -45,17 +45,24 @@ from supertrend_db import (
     list_open_position_symbols,
     migrate_st_tables,
     purge_expired_cooldowns,
+    update_open_sl_price,
     upsert_indicator_state,
     upsert_symbol_cooldown,
 )
 from supertrend_filters import (
     build_filter_context,
     chop_cooldown_until_bar,
+    chop_cooldown_until_bar_from_ctx,
     closed_bars_df,
     compute_entry_intent,
     evaluate_entry_filters,
+    flip_trend_count,
+    hard_sl_fill_price,
+    hard_sl_triggered,
     htf_trend_for_symbol,
     record_filter_reject,
+    structure_sl_price,
+    structure_sl_valid,
 )
 from supertrend_indicator import compute_supertrend, last_closed_bar_signals
 from supertrend_profit_protect import run_profit_protection
@@ -196,7 +203,7 @@ def _try_open_side(
         symbol, side, st_df, last_bar, timeframe_ms=tf_ms, htf_trend=htf_trend
     )
 
-    until_chop = chop_cooldown_until_bar(ctx, tf_ms)
+    until_chop = chop_cooldown_until_bar_from_ctx(ctx, tf_ms)
     if until_chop is not None:
         upsert_symbol_cooldown(
             cur,
@@ -219,6 +226,28 @@ def _try_open_side(
         record_filter_reject(stats, reject)
         return
 
+    closed = closed_bars_df(st_df, timeframe_ms=tf_ms)
+    prev_low = prev_high = None
+    if len(closed) >= 2:
+        prev = closed.iloc[-2]
+        prev_low = float(prev["low"])
+        prev_high = float(prev["high"])
+    sl_price = structure_sl_price(
+        side,
+        st_up=st_up,
+        st_dn=st_dn,
+        prev_low=prev_low,
+        prev_high=prev_high,
+    )
+    if sl_price is None or sl_price <= 0:
+        stats["skipped"].append(f"{symbol}:structure_sl_unavailable")
+        record_filter_reject(stats, "structure_sl_unavailable")
+        return
+    if not structure_sl_valid(side, close_px, sl_price):
+        stats["skipped"].append(f"{symbol}:structure_sl_invalid")
+        record_filter_reject(stats, "structure_sl_invalid")
+        return
+
     meta = {
         "lane": "supertrend",
         "universe": cfg.ST_UNIVERSE_MODE,
@@ -228,6 +257,16 @@ def _try_open_side(
             "range_pct": ctx.range_pct,
             "atr_pct": ctx.atr_pct,
             "flip_count": ctx.flip_count,
+            "vp_poc": ctx.vp_poc,
+            "vp_val": ctx.vp_val,
+            "vp_vah": ctx.vp_vah,
+        },
+        "structure_sl": {
+            "sl_price": sl_price,
+            "st_up": st_up,
+            "st_dn": st_dn,
+            "prev_low": prev_low,
+            "prev_high": prev_high,
         },
     }
     _open_position(
@@ -236,6 +275,7 @@ def _try_open_side(
         side=side,
         signal_type=signal_type,
         entry_price=close_px,
+        sl_price=sl_price,
         bar_open_ms=bar_open_ms,
         trend=trend,
         st_up=st_up,
@@ -245,7 +285,9 @@ def _try_open_side(
         meta=meta,
     )
     stats["opens"] += 1
-    events.append(f"开{'多' if side == 'LONG' else '空'} {symbol} @ {close_px:.8g}")
+    events.append(
+        f"开{'多' if side == 'LONG' else '空'} {symbol} @ {close_px:.8g} SL={sl_price:.8g}"
+    )
 
 
 def _pnl_usdt(side: str, entry: float, exit_px: float, notional: float) -> float:
@@ -295,6 +337,8 @@ def _daily_loss_exceeded(conn) -> bool:
 def _outcome_for_exit(exit_rule: str, pnl: float) -> str:
     if exit_rule == "reverse_signal":
         return "reverse"
+    if exit_rule == "hard_sl":
+        return "loss"
     if exit_rule in ("trail_atr", "giveback"):
         return "win" if pnl >= 0 else "loss"
     if exit_rule == "universe_removed":
@@ -333,6 +377,46 @@ def _emit_close(
             f"rule={closed_evt['exit_rule']} exit={closed_evt['exit']:.8g} "
             f"pnl={closed_evt['pnl_usdt']:.2f} USDT"
         )
+
+
+def _try_hard_sl_exit(
+    cur,
+    open_row: sqlite3.Row,
+    *,
+    low_px: float,
+    high_px: float,
+    close_px: float,
+    now_utc: str,
+    symbol: str,
+    bar_open_ms: int,
+    stats: Dict[str, Any],
+    events: List[str],
+) -> Optional[Dict[str, Any]]:
+    side = str(open_row["side"])
+    sl_raw = open_row["sl_price"]
+    sl_price = float(sl_raw) if sl_raw is not None else None
+    if not hard_sl_triggered(
+        side, sl_price, low=low_px, high=high_px, close=close_px
+    ):
+        return None
+    fill_px = (
+        hard_sl_fill_price(side, float(sl_price), low=low_px, high=high_px, close=close_px)
+        if sl_price is not None
+        else close_px
+    )
+    stats["exit_hard_sl"] = int(stats.get("exit_hard_sl", 0)) + 1
+    closed = _close_position(
+        cur,
+        open_row,
+        exit_price=fill_px,
+        exit_rule="hard_sl",
+        now_utc=now_utc,
+        outcome="loss",
+    )
+    _emit_close(
+        cur, closed, symbol=symbol, bar_open_ms=bar_open_ms, now_utc=now_utc, stats=stats, events=events
+    )
+    return closed
 
 
 def _try_profit_protect_exit(
@@ -444,7 +528,7 @@ def _close_position(
     )
 
 
-def _bar_already_handled(
+def _should_skip_new_entries_this_bar(
     open_row: Optional[sqlite3.Row],
     *,
     bar_open_ms: int,
@@ -452,7 +536,7 @@ def _bar_already_handled(
     buy: bool,
     sell: bool,
 ) -> bool:
-    """同根 K 已处理且无未完成的反向动作时跳过（崩溃重跑仍可平仓/反手）。"""
+    """同根 K 已处理过新开/反手意图时跳过开仓（持仓退出逻辑仍执行）。"""
     if not state or int(state[0]) != bar_open_ms:
         return False
     if open_row is not None:
@@ -467,6 +551,154 @@ def _bar_already_handled(
     return True
 
 
+def _backfill_open_sl_if_missing(
+    cur,
+    open_row: Optional[sqlite3.Row],
+    *,
+    symbol: str,
+    st_df: pd.DataFrame,
+    last_bar: pd.Series,
+    tf_ms: int,
+    stats: Dict[str, Any],
+) -> Optional[sqlite3.Row]:
+    """旧仓 sl_price 为 NULL 时，用当前结构 SL 回填（便于 hard_sl）。"""
+    if open_row is None or open_row["sl_price"] is not None:
+        return open_row
+    side = str(open_row["side"])
+    entry = float(open_row["entry_price"] or 0)
+    st_up = float(last_bar["st_up"])
+    st_dn = float(last_bar["st_dn"])
+    closed = closed_bars_df(st_df, timeframe_ms=tf_ms)
+    prev_low = prev_high = None
+    if len(closed) >= 2:
+        prev = closed.iloc[-2]
+        prev_low = float(prev["low"])
+        prev_high = float(prev["high"])
+    sl = structure_sl_price(
+        side, st_up=st_up, st_dn=st_dn, prev_low=prev_low, prev_high=prev_high
+    )
+    if sl is None or not structure_sl_valid(side, entry, sl):
+        return open_row
+    update_open_sl_price(cur, int(open_row["id"]), sl)
+    stats["sl_backfilled"] = int(stats.get("sl_backfilled", 0)) + 1
+    return fetch_open_row(cur, symbol)
+
+
+def _maybe_apply_chop_cooldown(
+    cur,
+    *,
+    symbol: str,
+    closed: pd.DataFrame,
+    bar_open_ms: int,
+    tf_ms: int,
+    now_utc: str,
+) -> None:
+    if not cfg.ST_FILTER_ENABLED or cfg.ST_CHOP_MAX_FLIPS <= 0:
+        return
+    flips = flip_trend_count(closed, cfg.ST_CHOP_LOOKBACK)
+    until = chop_cooldown_until_bar(flips, bar_open_ms, tf_ms)
+    if until is None:
+        return
+    upsert_symbol_cooldown(
+        cur,
+        symbol=symbol,
+        until_bar_open_ms=until,
+        until_utc_ms=None,
+        reason="chop_flips",
+        updated_at_utc=now_utc,
+        blocked_side=None,
+    )
+
+
+def _run_open_position_exits(
+    cur,
+    open_row: Optional[sqlite3.Row],
+    *,
+    symbol: str,
+    bar_open_ms: int,
+    buy: bool,
+    sell: bool,
+    close_px: float,
+    high_px: float,
+    low_px: float,
+    st_atr: float,
+    now_utc: str,
+    stats: Dict[str, Any],
+    events: List[str],
+) -> Optional[sqlite3.Row]:
+    if open_row is None:
+        return None
+    closed_hsl = _try_hard_sl_exit(
+        cur,
+        open_row,
+        low_px=low_px,
+        high_px=high_px,
+        close_px=close_px,
+        now_utc=now_utc,
+        symbol=symbol,
+        bar_open_ms=bar_open_ms,
+        stats=stats,
+        events=events,
+    )
+    if closed_hsl:
+        return None
+    closed_pp = _try_profit_protect_exit(
+        cur,
+        open_row,
+        high_px=high_px,
+        low_px=low_px,
+        close_px=close_px,
+        st_atr=st_atr,
+        now_utc=now_utc,
+        symbol=symbol,
+        bar_open_ms=bar_open_ms,
+        stats=stats,
+        events=events,
+    )
+    if closed_pp:
+        return None
+    if "reverse_signal" not in cfg.st_exit_modes_enabled():
+        return open_row
+    pos_side = str(open_row["side"])
+    if pos_side == "LONG" and sell:
+        closed_evt = _close_position(
+            cur,
+            open_row,
+            exit_price=close_px,
+            exit_rule="reverse_signal",
+            now_utc=now_utc,
+        )
+        _emit_close(
+            cur,
+            closed_evt,
+            symbol=symbol,
+            bar_open_ms=bar_open_ms,
+            now_utc=now_utc,
+            stats=stats,
+            events=events,
+        )
+        return None
+    if pos_side == "SHORT" and buy:
+        closed_evt = _close_position(
+            cur,
+            open_row,
+            exit_price=close_px,
+            exit_rule="reverse_signal",
+            now_utc=now_utc,
+        )
+        _emit_close(
+            cur,
+            closed_evt,
+            symbol=symbol,
+            bar_open_ms=bar_open_ms,
+            now_utc=now_utc,
+            stats=stats,
+            events=events,
+        )
+        return None
+    return open_row
+
+
 def _open_position(
     cur,
     *,
@@ -474,6 +706,7 @@ def _open_position(
     side: str,
     signal_type: str,
     entry_price: float,
+    sl_price: float,
     bar_open_ms: int,
     trend: int,
     st_up: float,
@@ -500,14 +733,14 @@ def _open_position(
             entry_price, sl_price, tp_price, st_up, st_dn, st_atr,
             timeframe, st_period, st_multiplier, entry_bar_open_ms,
             virtual_notional_usdt, meta_json
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(symbol) DO UPDATE SET
             recorded_at_utc = excluded.recorded_at_utc,
             side = excluded.side,
             trend = excluded.trend,
             signal_type = excluded.signal_type,
             entry_price = excluded.entry_price,
-            sl_price = NULL,
+            sl_price = excluded.sl_price,
             tp_price = NULL,
             st_up = excluded.st_up,
             st_dn = excluded.st_dn,
@@ -531,6 +764,7 @@ def _open_position(
             trend,
             signal_type,
             entry_price,
+            sl_price,
             st_up,
             st_dn,
             st_atr,
@@ -588,72 +822,56 @@ def _process_symbol(
     st_dn = float(last_bar["st_dn"])
     st_atr = float(last_bar["st_atr"]) if not pd.isna(last_bar["st_atr"]) else 0.0
 
+    closed = closed_bars_df(st_df, timeframe_ms=tf_ms)
+    _maybe_apply_chop_cooldown(
+        cur,
+        symbol=symbol,
+        closed=closed,
+        bar_open_ms=bar_open_ms,
+        tf_ms=tf_ms,
+        now_utc=now_utc,
+    )
+
     open_row = fetch_open_row(cur, symbol)
+    open_row = _backfill_open_sl_if_missing(
+        cur,
+        open_row,
+        symbol=symbol,
+        st_df=st_df,
+        last_bar=last_bar,
+        tf_ms=tf_ms,
+        stats=stats,
+    )
+    open_row = _run_open_position_exits(
+        cur,
+        open_row,
+        symbol=symbol,
+        bar_open_ms=bar_open_ms,
+        buy=buy,
+        sell=sell,
+        close_px=close_px,
+        high_px=high_px,
+        low_px=low_px,
+        st_atr=st_atr,
+        now_utc=now_utc,
+        stats=stats,
+        events=events,
+    )
+
     state = get_indicator_state(cur, symbol)
-    if _bar_already_handled(open_row, bar_open_ms=bar_open_ms, state=state, buy=buy, sell=sell):
-        stats["skipped"].append(f"{symbol}:bar_already_processed")
-        return
-
-    if open_row is not None:
-        closed_pp = _try_profit_protect_exit(
-            cur,
-            open_row,
-            high_px=high_px,
-            low_px=low_px,
-            close_px=close_px,
-            st_atr=st_atr,
-            now_utc=now_utc,
-            symbol=symbol,
-            bar_open_ms=bar_open_ms,
-            stats=stats,
-            events=events,
+    skip_entries = _should_skip_new_entries_this_bar(
+        open_row, bar_open_ms=bar_open_ms, state=state, buy=buy, sell=sell
+    )
+    if skip_entries:
+        stats["skipped"].append(f"{symbol}:bar_already_processed_entries")
+        upsert_indicator_state(
+            cur, symbol=symbol, bar_open_ms=bar_open_ms, trend=trend, updated_at_utc=now_utc
         )
-        if closed_pp:
-            open_row = None
-
-    if open_row is not None and "reverse_signal" in cfg.st_exit_modes_enabled():
-        pos_side = str(open_row["side"])
-        if pos_side == "LONG" and sell:
-            closed_evt = _close_position(
-                cur,
-                open_row,
-                exit_price=close_px,
-                exit_rule="reverse_signal",
-                now_utc=now_utc,
-            )
-            _emit_close(
-                cur,
-                closed_evt,
-                symbol=symbol,
-                bar_open_ms=bar_open_ms,
-                now_utc=now_utc,
-                stats=stats,
-                events=events,
-            )
-            open_row = None
-        elif pos_side == "SHORT" and buy:
-            closed_evt = _close_position(
-                cur,
-                open_row,
-                exit_price=close_px,
-                exit_rule="reverse_signal",
-                now_utc=now_utc,
-            )
-            _emit_close(
-                cur,
-                closed_evt,
-                symbol=symbol,
-                bar_open_ms=bar_open_ms,
-                now_utc=now_utc,
-                stats=stats,
-                events=events,
-            )
-            open_row = None
+        return
 
     if buy or sell:
         stats["flips"] += 1
 
-    closed = closed_bars_df(st_df, timeframe_ms=tf_ms)
     want_long, want_short = compute_entry_intent(
         trend=trend,
         buy=buy,

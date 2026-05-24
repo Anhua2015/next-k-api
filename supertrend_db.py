@@ -100,6 +100,13 @@ def _ensure_cooldown_blocked_side_column(c: sqlite3.Cursor) -> None:
         c.execute("ALTER TABLE st_symbol_cooldown ADD COLUMN blocked_side TEXT")
 
 
+def update_open_sl_price(cur: sqlite3.Cursor, signal_id: int, sl_price: float) -> None:
+    cur.execute(
+        "UPDATE st_signals SET sl_price = ? WHERE id = ? AND outcome IS NULL",
+        (sl_price, signal_id),
+    )
+
+
 def fetch_open_row(cur: sqlite3.Cursor, symbol: str) -> Optional[sqlite3.Row]:
     cur.execute(
         """
