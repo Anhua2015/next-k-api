@@ -155,7 +155,7 @@ class TestMomentumScanner(unittest.TestCase):
         )
         run_scan_conn(self.conn, notify=False)
 
-        mock_px.side_effect = lambda s: {"BTCUSDT": 48400.0, "SOLUSDT": 100.0}[s]
+        mock_px.side_effect = lambda s: {"BTCUSDT": 48200.0, "SOLUSDT": 100.0}[s]
         mock_targets.return_value = (
             "SOLUSDT",
             None,
@@ -186,7 +186,7 @@ class TestMomentumScanner(unittest.TestCase):
         )
         run_scan_conn(self.conn, notify=False)
 
-        prices = iter([49900.0, 48400.0])
+        prices = iter([49900.0, 48200.0])
 
         def _px(sym: str) -> float:
             if sym == "BTCUSDT":
@@ -221,7 +221,7 @@ class TestMomentumScanner(unittest.TestCase):
         )
         run_scan_conn(self.conn, notify=False)
 
-        mock_px.side_effect = lambda s: 48400.0 if s == "BTCUSDT" else 100.0
+        mock_px.side_effect = lambda s: 48200.0 if s == "BTCUSDT" else 100.0
         mock_targets.return_value = (None, None, {"error": "empty_top_movers"})
         stats = run_scan_conn(self.conn, notify=False)
         self.assertFalse(stats["ok"])

@@ -16,12 +16,12 @@ from momentum_trail import (
 def _cfg(**kw) -> TrailConfig:
     base = dict(
         enabled=True,
-        stop_loss_pct=2.0,
+        stop_loss_pct=3.5,
         low_trail_stop_loss_pct=0.3,
-        trail_stop_loss_pct=0.2,
+        trail_stop_loss_pct=0.3,
         higher_trail_stop_loss_pct=0.25,
-        low_trail_profit_threshold=0.4,
-        first_trail_profit_threshold=1.0,
+        low_trail_profit_threshold=2.0,
+        first_trail_profit_threshold=2.0,
         second_trail_profit_threshold=3.0,
     )
     base.update(kw)
@@ -33,8 +33,8 @@ class TestMomentumTrail(unittest.TestCase):
         ev = evaluate_trail(
             side="LONG",
             entry=100.0,
-            mark=101.5,
-            peak_profit_pct=2.0,
+            mark=101.4,
+            peak_profit_pct=2.5,
             cfg=_cfg(),
         )
         self.assertEqual(ev.trail_tier, TIER_TIER1)
@@ -52,22 +52,22 @@ class TestMomentumTrail(unittest.TestCase):
         self.assertAlmostEqual(ev.profit_pct, 3.0)
         self.assertEqual(ev.exit_rule, "trail_tier2")
 
-    def test_low_tier_lock(self):
+    def test_no_low_tier_below_2pct_peak(self):
         ev = evaluate_trail(
             side="LONG",
             entry=100.0,
-            mark=100.29,
-            peak_profit_pct=0.5,
+            mark=100.5,
+            peak_profit_pct=1.5,
             cfg=_cfg(),
         )
-        self.assertEqual(ev.trail_tier, TIER_LOW)
-        self.assertEqual(ev.exit_rule, "trail_low")
+        self.assertNotEqual(ev.trail_tier, TIER_LOW)
+        self.assertIsNone(ev.exit_rule)
 
     def test_hard_stop(self):
         ev = evaluate_trail(
             side="LONG",
             entry=100.0,
-            mark=97.5,
+            mark=96.4,
             peak_profit_pct=0.0,
             cfg=_cfg(),
         )

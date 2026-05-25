@@ -42,7 +42,7 @@ class TestMomentumTrailTask(unittest.TestCase):
         run_scan_conn(self.conn, notify=False)
 
         mock_targets.reset_mock()
-        with patch("momentum_scanner.fetch_mark_price", return_value=48400.0):
+        with patch("momentum_scanner.fetch_mark_price", return_value=48200.0):
             stats = run_trail_checks_conn(self.conn, notify=False)
         mock_targets.assert_not_called()
         self.assertEqual(stats["closes"], 1)

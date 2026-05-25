@@ -99,12 +99,13 @@ def mom_filter_enabled() -> bool:
 
 # ── 分档移动止盈（buou_trail 纸面版，默认开；MOM_TRAIL_ENABLED=0 关闭）────
 MOM_TRAIL_ENABLED = env_truthy("MOM_TRAIL_ENABLED", default=True)
-MOM_TRAIL_STOP_LOSS_PCT = max(0.0, float(os.getenv("MOM_TRAIL_STOP_LOSS_PCT", "3") or 3))
+MOM_TRAIL_STOP_LOSS_PCT = max(0.0, float(os.getenv("MOM_TRAIL_STOP_LOSS_PCT", "3.5") or 3.5))
 MOM_TRAIL_LOW_STOP_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_STOP_PCT", "0.3") or 0.3))
-MOM_TRAIL_TIER1_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER1_DRAWBACK", "0.2") or 0.2)))
+MOM_TRAIL_TIER1_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER1_DRAWBACK", "0.3") or 0.3)))
 MOM_TRAIL_TIER2_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER2_DRAWBACK", "0.25") or 0.25)))
-MOM_TRAIL_LOW_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_THRESHOLD_PCT", "0.4") or 0.4))
-MOM_TRAIL_TIER1_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_TIER1_THRESHOLD_PCT", "1.0") or 1.0))
+# 低档阈值与一档同为 2% 时，peak<2% 不进低档保护，避免强标的微利被洗出
+MOM_TRAIL_LOW_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_THRESHOLD_PCT", "2.0") or 2.0))
+MOM_TRAIL_TIER1_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_TIER1_THRESHOLD_PCT", "2.0") or 2.0))
 MOM_TRAIL_TIER2_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_TIER2_THRESHOLD_PCT", "3.0") or 3.0))
 
 
