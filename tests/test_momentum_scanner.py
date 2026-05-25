@@ -130,6 +130,37 @@ class TestMomentumScanner(unittest.TestCase):
         )
         self.assertIsNone(fetch_open_by_side(cur, "LONG"))
 
+    @patch("momentum_config.mom_filter_enabled", return_value=False)
+    @patch("momentum_scanner.cfg.MOM_COOLDOWN_SEC", 0)
+    @patch("momentum_scanner.cfg.MOM_TRAIL_REOPEN_COOLDOWN_SEC", 3600)
+    @patch("momentum_scanner.fetch_momentum_targets")
+    @patch("momentum_scanner.fetch_mark_price")
+    def test_trail_reopen_cooldown_blocks_same_symbol(
+        self, mock_px, mock_targets, _mock_filter
+    ):
+        mock_px.side_effect = lambda s: {"BTCUSDT": 100.0}[s]
+        mock_targets.return_value = (
+            "BTCUSDT",
+            None,
+            {"long_event_raw": {}, "short_event_raw": {}},
+        )
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO mom_settlements (
+                settled_at_utc, signal_id, symbol, side, outcome,
+                entry_price, exit_price, pnl_usdt, virtual_notional_usdt, exit_rule
+            ) VALUES (?, 1, 'BTCUSDT', 'LONG', 'win', 100, 105, 50, 1000, 'trail_tier1')
+            """,
+            ("2099-01-01T00:00:00Z",),
+        )
+        self.conn.commit()
+        stats = run_scan_conn(self.conn, notify=False)
+        self.assertEqual(stats["opens"], 0)
+        self.assertTrue(
+            any("trail_reopen_cooldown:BTCUSDT" in s for s in stats["skipped"])
+        )
+
     @patch("momentum_scanner.fetch_momentum_targets")
     def test_top_movers_error_writes_run(self, mock_targets):
         mock_targets.return_value = (None, None, {"error": "empty_top_movers"})

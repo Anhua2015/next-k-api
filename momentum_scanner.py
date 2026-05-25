@@ -24,6 +24,7 @@ from binance_fapi import fetch_mark_price
 from momentum_db import (
     archive_settlement,
     fetch_open_by_side,
+    last_close_info,
     last_close_utc_ms,
     migrate_mom_tables,
 )
@@ -141,14 +142,29 @@ def _outcome_for_pnl(pnl: float) -> str:
     return "flat"
 
 
-def _cooldown_blocks(cur, *, symbol: str, side: str) -> bool:
-    if cfg.MOM_COOLDOWN_SEC <= 0:
-        return False
-    last_ms = last_close_utc_ms(cur, symbol=symbol, side=side)
+def _reopen_cooldown_kind(cur, *, symbol: str, side: str) -> str:
+    """
+    若应禁止再次开仓，返回原因片段：trail_reopen_cooldown | cooldown；否则空串。
+    移动止盈(exit_rule 以 trail 开头)后用更长冷却，避免下轮扫描立刻重开。
+    """
+    last_ms, exit_rule = last_close_info(cur, symbol=symbol, side=side)
     if last_ms is None:
-        return False
+        return ""
     elapsed = (_now_ms() - last_ms) / 1000.0
-    return elapsed < cfg.MOM_COOLDOWN_SEC
+    rule = str(exit_rule or "")
+    if (
+        cfg.MOM_TRAIL_REOPEN_BLOCK
+        and rule.startswith("trail")
+        and elapsed < cfg.MOM_TRAIL_REOPEN_COOLDOWN_SEC
+    ):
+        return "trail_reopen_cooldown"
+    if cfg.MOM_COOLDOWN_SEC > 0 and elapsed < cfg.MOM_COOLDOWN_SEC:
+        return "cooldown"
+    return ""
+
+
+def _cooldown_blocks(cur, *, symbol: str, side: str) -> bool:
+    return bool(_reopen_cooldown_kind(cur, symbol=symbol, side=side))
 
 
 def _settle_row(
@@ -475,10 +491,23 @@ def _adjust_side(
             target_symbol,
         )
 
-    if _cooldown_blocks(cur, symbol=target_symbol, side=side):
-        reason = f"{side}:closed_without_reopen:cooldown:{target_symbol}" if closed_without_reopen else f"{side}:cooldown:{target_symbol}"
-        stats["skipped"].append(reason)
-        _log_mom("%s 冷却中不可开 %s (%s)", side, target_symbol, reason)
+    cd_kind = _reopen_cooldown_kind(cur, symbol=target_symbol, side=side)
+    if cd_kind:
+        tag = (
+            f"{side}:closed_without_reopen:{cd_kind}:{target_symbol}"
+            if closed_without_reopen
+            else f"{side}:{cd_kind}:{target_symbol}"
+        )
+        stats["skipped"].append(tag)
+        if cd_kind == "trail_reopen_cooldown":
+            _log_mom(
+                "%s 动态止盈后冷却中不可开 %s（%s 分钟内）",
+                side,
+                target_symbol,
+                cfg.MOM_TRAIL_REOPEN_COOLDOWN_MIN,
+            )
+        else:
+            _log_mom("%s 冷却中不可开 %s (%s)", side, target_symbol, tag)
         return
 
     report = inspect_open_filter(

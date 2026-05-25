@@ -165,21 +165,10 @@ def archive_settlement(
     )
 
 
-def last_close_utc_ms(
-    cur: sqlite3.Cursor, *, symbol: str, side: str
-) -> Optional[int]:
-    cur.execute(
-        """
-        SELECT settled_at_utc FROM mom_settlements
-        WHERE symbol = ? AND side = ?
-        ORDER BY id DESC LIMIT 1
-        """,
-        (symbol.upper(), side.upper()),
-    )
-    row = cur.fetchone()
-    if not row or not row[0]:
+def _settled_at_utc_to_ms(settled_at_utc: str | None) -> Optional[int]:
+    if not settled_at_utc:
         return None
-    raw = str(row[0]).replace("Z", "+00:00")
+    raw = str(settled_at_utc).replace("Z", "+00:00")
     try:
         from datetime import datetime, timezone
 
@@ -189,6 +178,33 @@ def last_close_utc_ms(
         return int(dt.timestamp() * 1000)
     except ValueError:
         return None
+
+
+def last_close_utc_ms(
+    cur: sqlite3.Cursor, *, symbol: str, side: str
+) -> Optional[int]:
+    ms, _ = last_close_info(cur, symbol=symbol, side=side)
+    return ms
+
+
+def last_close_info(
+    cur: sqlite3.Cursor, *, symbol: str, side: str
+) -> tuple[Optional[int], Optional[str]]:
+    """该标的+方向最近一次平仓时间(ms)与 exit_rule。"""
+    cur.execute(
+        """
+        SELECT settled_at_utc, exit_rule FROM mom_settlements
+        WHERE symbol = ? AND side = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (symbol.upper(), side.upper()),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None, None
+    return _settled_at_utc_to_ms(row[0]), (
+        str(row[1]) if row[1] is not None else None
+    )
 
 
 def clear_mom_lane_tables(conn: sqlite3.Connection) -> dict[str, int]:
