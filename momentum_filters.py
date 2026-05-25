@@ -72,6 +72,9 @@ def _check_event_filters(
     if age > cfg.MOM_MAX_EVENT_AGE_MIN:
         return False, f"filter:event:stale:{age:.0f}m"
 
+    if not cfg.MOM_PRICE_CHANGE_FILTER:
+        return True, ""
+
     pc = _parse_price_change(event_raw)
     if pc is None:
         return False, "filter:event:no_price_change"
@@ -141,6 +144,7 @@ def inspect_open_filter(
         "event_type": (event_raw or {}).get("eventType"),
         "price_change": pc,
         "event_age_min": round(age, 1) if age is not None else None,
+        "price_change_filter": cfg.MOM_PRICE_CHANGE_FILTER,
         "min_pullback_pct": cfg.MOM_MIN_PULLBACK_PCT,
         "min_rally_pct": cfg.MOM_MIN_RALLY_PCT,
         "max_event_age_min": cfg.MOM_MAX_EVENT_AGE_MIN,

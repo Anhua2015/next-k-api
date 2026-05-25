@@ -14,10 +14,13 @@ class TestMomentumFilters(unittest.TestCase):
 
     def setUp(self):
         self._enabled = cfg.MOM_FILTER_ENABLED
+        self._pc_filter = cfg.MOM_PRICE_CHANGE_FILTER
         cfg.MOM_FILTER_ENABLED = True
+        cfg.MOM_PRICE_CHANGE_FILTER = True
 
     def tearDown(self):
         cfg.MOM_FILTER_ENABLED = self._enabled
+        cfg.MOM_PRICE_CHANGE_FILTER = self._pc_filter
 
     def _fresh_event(self, price_change: str) -> dict:
         return {
