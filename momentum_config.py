@@ -73,7 +73,7 @@ MOM_VERBOSE_LOG = env_truthy("MOM_VERBOSE_LOG", default=True)
 MOM_FILTER_ENABLED = env_truthy("MOM_FILTER_ENABLED", default=True)
 MOM_MIN_PULLBACK_PCT = max(0.0, float(os.getenv("MOM_MIN_PULLBACK_PCT", "0.03") or 0.03))
 MOM_MIN_RALLY_PCT = max(0.0, float(os.getenv("MOM_MIN_RALLY_PCT", "0.03") or 0.03))
-MOM_MAX_EVENT_AGE_MIN = max(1, int(os.getenv("MOM_MAX_EVENT_AGE_MIN", "45") or 45))
+MOM_MAX_EVENT_AGE_MIN = max(1, int(os.getenv("MOM_MAX_EVENT_AGE_MIN", "90") or 90))
 
 MOM_VP_FILTER = env_truthy("MOM_VP_FILTER", default=True)
 MOM_VP_INTERVAL = (os.getenv("MOM_VP_INTERVAL", "5m") or "5m").strip().lower()
@@ -99,7 +99,7 @@ def mom_filter_enabled() -> bool:
 
 # ── 分档移动止盈（buou_trail 纸面版，默认开；MOM_TRAIL_ENABLED=0 关闭）────
 MOM_TRAIL_ENABLED = env_truthy("MOM_TRAIL_ENABLED", default=True)
-MOM_TRAIL_STOP_LOSS_PCT = max(0.0, float(os.getenv("MOM_TRAIL_STOP_LOSS_PCT", "2") or 2))
+MOM_TRAIL_STOP_LOSS_PCT = max(0.0, float(os.getenv("MOM_TRAIL_STOP_LOSS_PCT", "3") or 3))
 MOM_TRAIL_LOW_STOP_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_STOP_PCT", "0.3") or 0.3))
 MOM_TRAIL_TIER1_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER1_DRAWBACK", "0.2") or 0.2)))
 MOM_TRAIL_TIER2_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER2_DRAWBACK", "0.25") or 0.25)))
