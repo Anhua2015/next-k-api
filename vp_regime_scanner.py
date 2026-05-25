@@ -410,8 +410,8 @@ def _classify_on_closed(
     cv = 1.0
     if len(flat_seg) >= 3:
         m = float(flat_seg.mean())
-        s = float(flat_seg.std())
-        cv = (s / m) if m > 1e-9 else 1.0
+        flat_std = float(flat_seg.std())
+        cv = (flat_std / m) if m > 1e-9 else 1.0
     is_flat = cv <= s.flat_cv_max and not is_spike
 
     if is_spike:
