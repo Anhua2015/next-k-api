@@ -72,7 +72,7 @@ MOM_VERBOSE_LOG = env_truthy("MOM_VERBOSE_LOG", default=True)
 # ── 开仓过滤（topMovers 事件 + vp_regime 5m；不含费率）────────────────────────
 MOM_FILTER_ENABLED = env_truthy("MOM_FILTER_ENABLED", default=True)
 # priceChange 幅度门槛（pullback_small / rally_small）；=0 关闭，仍可做事件年龄等过滤
-MOM_PRICE_CHANGE_FILTER = env_truthy("MOM_PRICE_CHANGE_FILTER", default=False)
+MOM_PRICE_CHANGE_FILTER = env_truthy("MOM_PRICE_CHANGE_FILTER", default=True)
 MOM_EVENT_AGE_FILTER = env_truthy("MOM_EVENT_AGE_FILTER", default=False)
 MOM_MIN_PULLBACK_PCT = max(0.0, float(os.getenv("MOM_MIN_PULLBACK_PCT", "0.02") or 0.02))
 MOM_MIN_RALLY_PCT = max(0.0, float(os.getenv("MOM_MIN_RALLY_PCT", "0.02") or 0.02))
