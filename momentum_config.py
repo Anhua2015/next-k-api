@@ -17,7 +17,7 @@ MOM_SCAN_INTERVAL_MINUTES = max(
     1, int(os.getenv("MOM_SCAN_INTERVAL_MINUTES", "15") or 15)
 )
 
-# 移动止盈独立定时（与 topMovers 调仓分离，默认每 20 秒）
+# 移动止盈独立定时（与 topMovers 调仓分离，默认每 15 秒）
 MOM_TRAIL_SCHEDULER_ENABLED = env_truthy("MOM_TRAIL_SCHEDULER_ENABLED", default=True)
 
 
@@ -28,7 +28,7 @@ def _resolve_trail_scan_interval_sec() -> int:
     min_raw = os.getenv("MOM_TRAIL_SCAN_INTERVAL_MINUTES", "").strip()
     if min_raw:
         return max(5, int(min_raw or 1) * 60)
-    return 20
+    return 15
 
 
 MOM_TRAIL_SCAN_INTERVAL_SEC = _resolve_trail_scan_interval_sec()
@@ -129,8 +129,8 @@ MOM_TRAIL_STOP_LOSS_PCT = max(0.0, float(os.getenv("MOM_TRAIL_STOP_LOSS_PCT", "3
 MOM_TRAIL_LOW_STOP_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_STOP_PCT", "0.3") or 0.3))
 MOM_TRAIL_TIER1_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER1_DRAWBACK", "0.3") or 0.3)))
 MOM_TRAIL_TIER2_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER2_DRAWBACK", "0.25") or 0.25)))
-# 低档阈值与一档同为 2% 时，peak<2% 不进低档保护，避免强标的微利被洗出
-MOM_TRAIL_LOW_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_THRESHOLD_PCT", "2.0") or 2.0))
+# 低档 1%：peak≥1% 锁 0.3%；一档仍 2% 起移动止盈
+MOM_TRAIL_LOW_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_THRESHOLD_PCT", "1.0") or 1.0))
 MOM_TRAIL_TIER1_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_TIER1_THRESHOLD_PCT", "2.0") or 2.0))
 MOM_TRAIL_TIER2_THRESHOLD_PCT = max(0.0, float(os.getenv("MOM_TRAIL_TIER2_THRESHOLD_PCT", "4.0") or 4.0))
 
