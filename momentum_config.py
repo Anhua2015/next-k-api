@@ -71,8 +71,8 @@ MOM_VERBOSE_LOG = env_truthy("MOM_VERBOSE_LOG", default=True)
 
 # ── 开仓过滤（topMovers 事件 + vp_regime 5m；不含费率）────────────────────────
 MOM_FILTER_ENABLED = env_truthy("MOM_FILTER_ENABLED", default=True)
-MOM_MIN_PULLBACK_PCT = max(0.0, float(os.getenv("MOM_MIN_PULLBACK_PCT", "0.025") or 0.025))
-MOM_MIN_RALLY_PCT = max(0.0, float(os.getenv("MOM_MIN_RALLY_PCT", "0.03") or 0.03))
+MOM_MIN_PULLBACK_PCT = max(0.0, float(os.getenv("MOM_MIN_PULLBACK_PCT", "0.02") or 0.02))
+MOM_MIN_RALLY_PCT = max(0.0, float(os.getenv("MOM_MIN_RALLY_PCT", "0.02") or 0.02))
 MOM_MAX_EVENT_AGE_MIN = max(1, int(os.getenv("MOM_MAX_EVENT_AGE_MIN", "120") or 120))
 
 MOM_VP_FILTER = env_truthy("MOM_VP_FILTER", default=False)
