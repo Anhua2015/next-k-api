@@ -59,10 +59,9 @@ MOM_NOTIONAL_USDT = MOM_ACCOUNT_EQUITY_USDT * MOM_LEVERAGE
 MOM_LONG_EVENT = (os.getenv("MOM_LONG_EVENT", "PULLBACK") or "PULLBACK").strip()
 MOM_SHORT_EVENT = (os.getenv("MOM_SHORT_EVENT", "RALLY") or "RALLY").strip()
 
-_raw_bl = (os.getenv("MOM_BLACKLIST", "XNY") or "XNY").strip()
-MOM_BLACKLIST = tuple(
-    x.strip().upper() for x in _raw_bl.split(",") if x.strip()
-)
+from watchlist_symbols import symbol_blacklist
+
+MOM_BLACKLIST = symbol_blacklist()
 
 MOM_ALLOW_USDC = os.getenv("MOM_ALLOW_USDC", "").strip().lower() in (
     "1",
