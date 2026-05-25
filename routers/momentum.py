@@ -87,7 +87,7 @@ def _compute_summary(cur: sqlite3.Cursor) -> Dict[str, Any]:
         leverage = mom_cfg.MOM_LEVERAGE
         equity = mom_cfg.MOM_ACCOUNT_EQUITY_USDT
         interval = mom_cfg.MOM_SCAN_INTERVAL_MINUTES
-        trail_interval = mom_cfg.MOM_TRAIL_SCAN_INTERVAL_MINUTES
+        trail_interval_sec = mom_cfg.MOM_TRAIL_SCAN_INTERVAL_SEC
         trail_scheduler = mom_cfg.mom_trail_scheduler_enabled()
         long_event = mom_cfg.MOM_LONG_EVENT
         short_event = mom_cfg.MOM_SHORT_EVENT
@@ -96,7 +96,7 @@ def _compute_summary(cur: sqlite3.Cursor) -> Dict[str, Any]:
         leverage = 0.1
         equity = 10000.0
         interval = 15
-        trail_interval = 1
+        trail_interval_sec = 20
         trail_scheduler = True
         long_event = "PULLBACK"
         short_event = "RALLY"
@@ -114,7 +114,8 @@ def _compute_summary(cur: sqlite3.Cursor) -> Dict[str, Any]:
         "leverage": leverage,
         "equity_usdt": equity,
         "scan_interval_minutes": interval,
-        "trail_scan_interval_minutes": trail_interval,
+        "trail_scan_interval_seconds": trail_interval_sec,
+        "trail_scan_interval_minutes": max(1, (trail_interval_sec + 59) // 60),
         "trail_scheduler_enabled": trail_scheduler,
         "long_event": long_event,
         "short_event": short_event,

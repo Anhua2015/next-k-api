@@ -17,10 +17,24 @@ MOM_SCAN_INTERVAL_MINUTES = max(
     1, int(os.getenv("MOM_SCAN_INTERVAL_MINUTES", "15") or 15)
 )
 
-# 移动止盈独立定时（与 topMovers 调仓分离，默认每 1 分钟）
+# 移动止盈独立定时（与 topMovers 调仓分离，默认每 20 秒）
 MOM_TRAIL_SCHEDULER_ENABLED = env_truthy("MOM_TRAIL_SCHEDULER_ENABLED", default=True)
+
+
+def _resolve_trail_scan_interval_sec() -> int:
+    sec_raw = os.getenv("MOM_TRAIL_SCAN_INTERVAL_SEC", "").strip()
+    if sec_raw:
+        return max(5, int(sec_raw or 5))
+    min_raw = os.getenv("MOM_TRAIL_SCAN_INTERVAL_MINUTES", "").strip()
+    if min_raw:
+        return max(5, int(min_raw or 1) * 60)
+    return 20
+
+
+MOM_TRAIL_SCAN_INTERVAL_SEC = _resolve_trail_scan_interval_sec()
+# 兼容旧 API 字段（向上取整分钟，20s → 1）
 MOM_TRAIL_SCAN_INTERVAL_MINUTES = max(
-    1, int(os.getenv("MOM_TRAIL_SCAN_INTERVAL_MINUTES", "1") or 1)
+    1, (MOM_TRAIL_SCAN_INTERVAL_SEC + 59) // 60
 )
 
 
@@ -111,7 +125,7 @@ def mom_filter_enabled() -> bool:
 
 # ── 分档移动止盈（buou_trail 纸面版，默认开；MOM_TRAIL_ENABLED=0 关闭）────
 MOM_TRAIL_ENABLED = env_truthy("MOM_TRAIL_ENABLED", default=True)
-MOM_TRAIL_STOP_LOSS_PCT = max(0.0, float(os.getenv("MOM_TRAIL_STOP_LOSS_PCT", "3.5") or 3.5))
+MOM_TRAIL_STOP_LOSS_PCT = max(0.0, float(os.getenv("MOM_TRAIL_STOP_LOSS_PCT", "3.0") or 3.0))
 MOM_TRAIL_LOW_STOP_PCT = max(0.0, float(os.getenv("MOM_TRAIL_LOW_STOP_PCT", "0.3") or 0.3))
 MOM_TRAIL_TIER1_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER1_DRAWBACK", "0.3") or 0.3)))
 MOM_TRAIL_TIER2_DRAWBACK = min(1.0, max(0.0, float(os.getenv("MOM_TRAIL_TIER2_DRAWBACK", "0.25") or 0.25)))
