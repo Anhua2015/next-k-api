@@ -46,6 +46,7 @@ def mom_trail_scheduler_enabled() -> bool:
     """止盈扫描定时：分档移动止盈关时仍跑硬止损检查。"""
     return MOM_SCHEDULER_ENABLED and MOM_TRAIL_SCHEDULER_ENABLED
 
+
 # 纸面名义 = 权益 × 杠杆系数（与原脚本 LEVERAGE 语义一致）
 MOM_ACCOUNT_EQUITY_USDT = max(
     1.0, float(os.getenv("MOM_ACCOUNT_EQUITY_USDT", "10000") or 10000)

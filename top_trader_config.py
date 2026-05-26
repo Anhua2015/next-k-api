@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 VALID_PERIODS: Tuple[str, ...] = (
     "5m",
@@ -69,9 +69,9 @@ def top_trader_params() -> TopTraderParams:
     if universe not in VALID_UNIVERSES:
         universe = "trend_5m"
 
-    period = os.getenv("TOP_TRADER_PERIOD", "5m").strip().lower() or "5m"
+    period = os.getenv("TOP_TRADER_PERIOD", "15m").strip().lower() or "15m"
     if period not in VALID_PERIODS:
-        period = "5m"
+        period = "15m"
 
     explicit_raw = os.getenv("TOP_TRADER_SYMBOLS", "").strip()
     explicit = tuple(
@@ -94,6 +94,11 @@ def top_trader_params() -> TopTraderParams:
 
 def top_trader_scheduler_enabled() -> bool:
     return _env_truthy("TOP_TRADER_SCHEDULER_ENABLED", default=False)
+
+
+def top_trader_trend_note(period: Optional[str] = None) -> str:
+    p = (period or top_trader_params().period or "15m").strip().lower()
+    return f"{p} 趋势：PosLSR+Taker+OI/价；无 Smart Money 盈利/均价"
 
 
 def top_trader_snapshot_path_name() -> str:

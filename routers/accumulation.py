@@ -112,7 +112,7 @@ async def get_top_trader_snapshot(
     """
     大户多空 + Taker 快照（公开 fapi/futures/data）。
 
-    默认读磁盘 JSON；source=db 时读 SQLite 最新 run。成功时均重算 5m 趋势分组。
+    默认读磁盘 JSON；source=db 时读 SQLite 最新 run。成功时均重算趋势分组。
     """
     src = (source or "auto").strip().lower()
     try:
@@ -230,6 +230,25 @@ async def post_top_trader_refresh(
 
     threading.Thread(target=_work, daemon=True).start()
     return {"accepted": True, "busy": False}
+
+
+@router.post("/api/accumulation/maintenance/clear-top-trader")
+async def post_clear_top_trader(_: None = Depends(require_maintenance_token)):
+    """清空大户多空 SQLite 与 top_trader_snapshot.json；清后请手动「大户多空」或主界面刷新。"""
+    from accumulation_radar import init_db
+    from top_trader_radar import clear_top_trader_data
+
+    try:
+        conn = init_db()
+        try:
+            deleted = clear_top_trader_data(conn)
+        finally:
+            conn.close()
+        logger.warning("top_trader clear: %s", deleted)
+        return {"ok": True, **deleted}
+    except Exception as e:
+        logger.exception("top_trader clear failed: %s", e)
+        raise HTTPException(status_code=500, detail="top_trader_clear_failed") from e
 
 
 @router.get("/api/accumulation/oi-radar")

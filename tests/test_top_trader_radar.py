@@ -11,7 +11,7 @@ _API_ROOT = Path(__file__).resolve().parent.parent
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from top_trader_radar import derive_signal_tags, load_top_trader_snapshot_auto
+from top_trader_radar import clear_top_trader_data, derive_signal_tags, load_top_trader_snapshot_auto
 
 
 class TopTraderRadarTests(unittest.TestCase):
@@ -79,6 +79,41 @@ class TopTraderSnapshotAutoTests(unittest.TestCase):
         finally:
             mod.load_top_trader_snapshot_from_disk = orig_disk
             mod.load_latest_top_trader_from_db = orig_db
+
+
+class TopTraderClearTests(unittest.TestCase):
+    def test_clear_top_trader_data(self) -> None:
+        import sqlite3
+        import tempfile
+
+        import top_trader_radar as mod
+
+        conn = sqlite3.connect(":memory:")
+        mod.ensure_top_trader_schema(conn)
+        conn.execute(
+            """INSERT INTO top_trader_snapshots
+               (run_id, run_at_ms, generated_date, symbol, period, ts)
+               VALUES ('r1', 1, '2026-01-01', 'BTCUSDT', '15m', 1)"""
+        )
+        conn.commit()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = mod._data_dir
+            try:
+                mod._data_dir = lambda: Path(tmp)
+                snap = mod.snapshot_path()
+                snap.write_text('{"ok": true}', encoding="utf-8")
+                out = clear_top_trader_data(conn)
+                self.assertEqual(out["deleted_top_trader_rows"], 1)
+                self.assertTrue(out["disk_snapshot_removed"])
+                self.assertFalse(snap.is_file())
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM top_trader_snapshots").fetchone()[0],
+                    0,
+                )
+            finally:
+                mod._data_dir = orig
+        conn.close()
 
 
 if __name__ == "__main__":

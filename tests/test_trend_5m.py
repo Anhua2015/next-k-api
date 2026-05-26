@@ -14,6 +14,24 @@ if str(_API_ROOT) not in sys.path:
 from trend_5m import assess_trend_5m, partition_trend_items
 
 
+class ApplyTrendPayloadTests(unittest.TestCase):
+    def test_apply_trend_refreshes_note_from_period(self) -> None:
+        import top_trader_radar as mod
+
+        out = mod.apply_trend_5m_to_payload(
+            {
+                "ok": True,
+                "period": "15m",
+                "items": [],
+                "note": "5m 趋势：旧说明",
+            }
+        )
+        self.assertEqual(
+            out["note"],
+            "15m 趋势：PosLSR+Taker+OI/价；无 Smart Money 盈利/均价",
+        )
+
+
 def _snap(pos_lsr: float, taker: float, tags=None):
     return {
         "symbol": "TESTUSDT",

@@ -29,6 +29,7 @@ from top_trader_config import (
     VALID_UNIVERSES,
     top_trader_params,
     top_trader_snapshot_path_name,
+    top_trader_trend_note,
 )
 from trend_5m import (
     TREND_5M_SOURCE_TABLES,
@@ -448,15 +449,39 @@ def _write_disk_snapshot(payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def clear_top_trader_data(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """清空大户多空 SQLite 表与磁盘快照 top_trader_snapshot.json。"""
+    ensure_top_trader_schema(conn)
+    cur = conn.cursor()
+    count_row = cur.execute("SELECT COUNT(*) FROM top_trader_snapshots").fetchone()
+    deleted_rows = int(count_row[0] if count_row else 0)
+    cur.execute("DELETE FROM top_trader_snapshots")
+    conn.commit()
+
+    disk_removed = False
+    path = snapshot_path()
+    if path.is_file():
+        path.unlink()
+        disk_removed = True
+
+    return {
+        "deleted_top_trader_rows": deleted_rows,
+        "disk_snapshot_removed": disk_removed,
+    }
+
+
 def apply_trend_5m_to_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     """读快照时用最新 OI 上下文重算 trend 分组（GET 时调用）。"""
+    data = dict(data)
+    period = str(data.get("period") or top_trader_params().period or "15m")
+    data["note"] = top_trader_trend_note(period)
+
     items = data.get("items")
     if not isinstance(items, list) or not items:
         return data
     out_items = [dict(x) for x in items if isinstance(x, dict)]
     uni = data.get("universe") or top_trader_params().universe
     buckets = enrich_items_trend_5m(out_items, universe=uni)
-    data = dict(data)
     data["items"] = out_items
     data["trend_long"] = buckets["trend_long"]
     data["trend_short"] = buckets["trend_short"]
@@ -580,7 +605,7 @@ def run_top_trader_radar_once(
             "trend_short": buckets["trend_short"],
             "trend_avoid": buckets["trend_avoid"],
             "trend_neutral": buckets["trend_neutral"],
-            "note": "5m 趋势：PosLSR+Taker+OI/价；无 Smart Money 盈利/均价",
+            "note": top_trader_trend_note(p.period),
         }
         _write_disk_snapshot(payload)
         if not quiet:
@@ -688,7 +713,7 @@ def load_latest_top_trader_from_db(limit: int = 200) -> Dict[str, Any]:
             "captured": len(items),
             "items": items,
             "snapshot_source": "db",
-            "note": "5m 趋势：PosLSR+Taker+OI/价；无 Smart Money 盈利/均价",
+            "note": top_trader_trend_note(period),
         }
     finally:
         conn.close()
