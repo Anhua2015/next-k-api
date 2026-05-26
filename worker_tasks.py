@@ -329,15 +329,14 @@ def _push_momentum_signals_to_protocol() -> None:
     for r in rows:
         entry = float(r["entry_price"])
         side = r["side"]
+        # -2% 硬止损（仅 SL，TP 由 paper trail 退出处理）
         if side == "LONG":
             sl_price = round(entry * 0.98, 4)
-            tp_price = round(entry * 1.04, 4)
         else:
             sl_price = round(entry * 1.02, 4)
-            tp_price = round(entry * 0.96, 4)
         logger.info(
-            "_push_momentum: id=%s symbol=%s side=%s entry=%.4f sl=%.4f tp=%.4f",
-            r["id"], r["symbol"], side, entry, sl_price, tp_price,
+            "_push_momentum: id=%s symbol=%s side=%s entry=%.4f sl=%.4f",
+            r["id"], r["symbol"], side, entry, sl_price,
         )
         signals.append({
             "source": "momentum",
@@ -346,7 +345,6 @@ def _push_momentum_signals_to_protocol() -> None:
             "side": side,
             "entry_price": entry,
             "sl_price": sl_price,
-            "tp_price": tp_price,
             "confidence": None,
             "regime": None,
             "notional_usdt": r["virtual_notional_usdt"],
@@ -409,15 +407,14 @@ def _push_jiezhen_signals_to_protocol() -> None:
     for r in rows:
         entry = float(r["entry_price"])
         side = r["side"]
+        # -2% 硬止损（仅 SL，TP 由 paper trail 退出处理）
         if side == "LONG":
             sl_price = round(entry * 0.98, 4)
-            tp_price = round(entry * 1.04, 4)
         else:
             sl_price = round(entry * 1.02, 4)
-            tp_price = round(entry * 0.96, 4)
         logger.info(
-            "_push_jiezhen: id=%s symbol=%s side=%s entry=%.4f sl=%.4f tp=%.4f",
-            r["id"], r["symbol"], side, entry, sl_price, tp_price,
+            "_push_jiezhen: id=%s symbol=%s side=%s entry=%.4f sl=%.4f",
+            r["id"], r["symbol"], side, entry, sl_price,
         )
         signals.append({
             "source": "jiezhen",
@@ -426,7 +423,6 @@ def _push_jiezhen_signals_to_protocol() -> None:
             "side": side,
             "entry_price": entry,
             "sl_price": sl_price,
-            "tp_price": tp_price,
             "confidence": None,
             "regime": None,
             "notional_usdt": r["virtual_notional_usdt"],
