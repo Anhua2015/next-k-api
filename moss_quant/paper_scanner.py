@@ -94,6 +94,16 @@ def _scan_detail(
     return d
 
 
+def _margin_pnl_pct(side: str, entry: float, mark: float, leverage: float) -> float:
+    """相对保证金的收益率 %（与 hold 日志 pnl% 一致）。"""
+    if entry <= 0 or mark <= 0 or leverage <= 0:
+        return 0.0
+    side_u = side.upper()
+    if side_u in ("LONG", "BUY"):
+        return (mark - entry) / entry * leverage * 100.0
+    return (entry - mark) / entry * leverage * 100.0
+
+
 def _position_fields(
     *,
     side: str,
@@ -101,6 +111,7 @@ def _position_fields(
     mark: float,
     notional: float,
     upnl: float,
+    leverage: float = 10.0,
 ) -> Dict[str, Any]:
     return {
         "side": side,
@@ -108,6 +119,8 @@ def _position_fields(
         "mark_price": round(mark, 8),
         "notional": round(notional, 2),
         "upnl": round(upnl, 4),
+        "leverage": round(float(leverage), 2),
+        "pnl_pct": round(_margin_pnl_pct(side, entry, mark, leverage), 3),
     }
 
 
@@ -147,25 +160,54 @@ def fetch_open_positions_map(conn: sqlite3.Connection) -> Dict[int, Dict[str, An
     return out
 
 
-def refresh_open_map_marks(open_map: Dict[int, Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-    """用缓存 K 线最新价刷新持仓现价与浮盈（仅 API 展示，不写库）。"""
-    for pos in open_map.values():
+def refresh_open_map_marks(
+    open_map: Dict[int, Dict[str, Any]],
+    conn: Optional[sqlite3.Connection] = None,
+    *,
+    persist: bool = True,
+) -> Dict[int, Dict[str, Any]]:
+    """拉最新 K 线收盘价刷新现价、浮盈；可选写回 moss_signals。"""
+    from moss_quant.db import get_profile
+
+    now = _utc_now()
+    for pid, pos in open_map.items():
         sym = str(pos.get("symbol") or "").upper()
         if not sym:
             continue
+        lev = float(pos.get("leverage") or 10.0)
+        if conn is not None:
+            prof = get_profile(conn, int(pid))
+            if prof:
+                lev = float(_effective_params(prof).get("base_leverage", lev))
         try:
-            df = load_cached(sym, refresh=False)
+            df = load_cached(sym, refresh=True)
             mark = float(df["close"].iloc[-1])
         except Exception as e:
-            logger.debug("[moss] refresh mark %s failed: %s", sym, e)
+            logger.warning("[moss] refresh mark %s failed: %s", sym, e)
             continue
         entry = float(pos.get("entry_price") or 0)
         notional = float(pos.get("notional") or 0)
         side = str(pos.get("side") or "")
         if mark <= 0 or entry <= 0 or notional <= 0:
             continue
-        pos["mark_price"] = round(mark, 8)
-        pos["upnl"] = round(pnl_usdt(side, entry, mark, notional), 4)
+        upnl = round(pnl_usdt(side, entry, mark, notional), 4)
+        pos.update(
+            {
+                "leverage": round(lev, 2),
+                "mark_price": round(mark, 8),
+                "upnl": upnl,
+                "pnl_pct": round(_margin_pnl_pct(side, entry, mark, lev), 3),
+            }
+        )
+        if persist and conn is not None:
+            conn.execute(
+                """UPDATE moss_signals SET mark_price=?, unrealized_pnl_usdt=?,
+                   updated_at_utc=?
+                   WHERE profile_id=? AND outcome IS NULL AND side IN ('LONG','SHORT')""",
+                (pos["mark_price"], upnl, now, int(pid)),
+            )
+    if persist and conn is not None:
+        conn.commit()
     return open_map
 
 
@@ -244,6 +286,8 @@ def enrich_scan_details_with_positions(
                 "mark_price": pos["mark_price"],
                 "notional": pos.get("notional", row.get("notional")),
                 "upnl": pos["upnl"],
+                "leverage": pos.get("leverage", row.get("leverage")),
+                "pnl_pct": pos.get("pnl_pct", row.get("pnl_pct")),
             }
         )
         label = str(
@@ -254,6 +298,44 @@ def enrich_scan_details_with_positions(
         row["message"] = format_scan_detail_message(label, row)
         enriched.append(row)
     return enriched
+
+
+def refresh_live_open_signals(conn: sqlite3.Connection) -> Dict[int, Dict[str, Any]]:
+    """刷新所有未平仓纸面单的标记价与浮盈并写库。"""
+    return refresh_open_map_marks(
+        fetch_open_positions_map(conn), conn, persist=True
+    )
+
+
+def serialize_signal_rows(
+    conn: sqlite3.Connection, rows: List[Any]
+) -> List[Dict[str, Any]]:
+    """将 moss_signals 行转为 API dict，并为持仓补充 leverage / pnl_pct。"""
+    from moss_quant.db import get_profile
+
+    out: List[Dict[str, Any]] = []
+    prof_cache: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        d = dict(row)
+        if d.get("outcome"):
+            out.append(d)
+            continue
+        side = str(d.get("side") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            out.append(d)
+            continue
+        pid = int(d["profile_id"])
+        if pid not in prof_cache:
+            prof_cache[pid] = get_profile(conn, pid) or {}
+        lev = 10.0
+        if prof_cache[pid]:
+            lev = float(_effective_params(prof_cache[pid]).get("base_leverage", 10))
+        entry = float(d.get("entry_price") or 0)
+        mark = float(d.get("mark_price") or 0)
+        d["leverage"] = round(lev, 2)
+        d["pnl_pct"] = round(_margin_pnl_pct(side, entry, mark, lev), 3)
+        out.append(d)
+    return out
 
 
 def scan_detail_lines(details: List[Dict[str, Any]]) -> List[str]:
@@ -535,7 +617,6 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                             "symbol": symbol,
                             "action": "hold",
                             "template": profile.get("template"),
-                            "pnl_pct": snap.get("pnl_pct"),
                             "sl_thresh_pct": snap.get("sl_thresh_pct"),
                             "tp_thresh_pct": snap.get("tp_thresh_pct"),
                             "signal": snap.get("signal"),
@@ -545,6 +626,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                                 mark=mark,
                                 notional=notional,
                                 upnl=upnl,
+                                leverage=lev,
                             ),
                         },
                     )
@@ -629,6 +711,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                         mark=mark,
                         notional=notional,
                         upnl=0.0,
+                        leverage=lev,
                     ),
                 },
             )

@@ -680,14 +680,14 @@ async def get_paper_scan_latest():
     from moss_quant.paper_scanner import (
         append_missing_open_position_details,
         enrich_scan_details_with_positions,
-        fetch_open_positions_map,
-        refresh_open_map_marks,
+        refresh_live_open_signals,
         scan_detail_lines,
     )
 
     conn = _conn()
     try:
-        open_map = refresh_open_map_marks(fetch_open_positions_map(conn))
+        open_map = refresh_live_open_signals(conn)
+        open_hold_count = len(open_map)
         row = conn.execute(
             """SELECT id, ran_at_utc, profiles_scanned, opens, closes, detail_json
                FROM moss_paper_runs ORDER BY id DESC LIMIT 1"""
@@ -706,6 +706,7 @@ async def get_paper_scan_latest():
                 "lines": scan_detail_lines(details),
                 "details": details,
                 "open_positions": list(open_map.values()),
+                "open_hold_count": open_hold_count,
             }
         details: List[Dict[str, Any]] = []
         raw = row["detail_json"]
@@ -728,6 +729,7 @@ async def get_paper_scan_latest():
             "lines": lines,
             "details": details,
             "open_positions": list(open_map.values()),
+            "open_hold_count": open_hold_count,
         }
     except sqlite3.OperationalError:
         return {
@@ -747,8 +749,17 @@ async def get_paper_scan_latest():
 
 @router.get("/signals")
 async def get_signals(profile_id: Optional[int] = None):
+    from moss_quant.paper_scanner import (
+        refresh_live_open_signals,
+        serialize_signal_rows,
+    )
+
     conn = _conn()
     try:
+        try:
+            refresh_live_open_signals(conn)
+        except Exception as e:
+            logger.warning("[moss] signals refresh marks: %s", e)
         if profile_id:
             rows = conn.execute(
                 """SELECT * FROM moss_signals WHERE profile_id=?
@@ -761,7 +772,7 @@ async def get_signals(profile_id: Optional[int] = None):
                    ORDER BY CASE WHEN outcome IS NULL THEN 0 ELSE 1 END,
                             recorded_at_utc DESC LIMIT 200"""
             ).fetchall()
-        return {"signals": [dict(r) for r in rows]}
+        return {"signals": serialize_signal_rows(conn, rows)}
     except sqlite3.OperationalError:
         return {"signals": []}
     finally:

@@ -61,6 +61,19 @@ def fetch_and_cache(
     return df
 
 
+def _kline_stale(df: pd.DataFrame) -> bool:
+    """最后一根 K 线是否过旧（与 Hyperliquid 路径一致）。"""
+    if df is None or df.empty:
+        return True
+    last = pd.Timestamp(df["timestamp"].iloc[-1])
+    if last.tzinfo is None:
+        last = last.tz_localize("UTC")
+    else:
+        last = last.tz_convert("UTC")
+    age_min = (pd.Timestamp.now(tz="UTC") - last).total_seconds() / 60.0
+    return age_min > float(cfg.MOSS_QUANT_KLINE_STALE_MINUTES)
+
+
 def load_cached(
     symbol: str,
     *,
@@ -78,7 +91,7 @@ def load_cached(
     if refresh or not path.is_file():
         return fetch_and_cache(symbol, interval=interval)
     df = pd.read_csv(path, parse_dates=["timestamp"])
-    if df.empty:
+    if df.empty or _kline_stale(df):
         return fetch_and_cache(symbol, interval=interval)
     return df
 
