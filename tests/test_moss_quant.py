@@ -277,17 +277,12 @@ class TestMossQuant(unittest.TestCase):
         self.assertGreaterEqual(m, 0)
         self.assertLessEqual(m, 59)
 
-    def test_sync_daily_profiles_upsert(self):
+    def test_annotate_daily_batch_items(self):
         import json
         import sqlite3
 
-        from moss_quant.db import (
-            DAILY_PROFILE_SOURCE,
-            daily_profile_name,
-            get_daily_profile_by_symbol,
-            migrate_moss_tables,
-        )
-        from moss_quant.daily_optimize_service import sync_daily_profiles
+        from moss_quant.db import get_profile_by_symbol, migrate_moss_tables
+        from moss_quant.daily_optimize_service import annotate_daily_batch_items
 
         conn = sqlite3.connect(":memory:")
         migrate_moss_tables(conn.cursor())
@@ -315,13 +310,9 @@ class TestMossQuant(unittest.TestCase):
             ),
         )
         conn.commit()
-        out = sync_daily_profiles(conn, batch_id)
-        self.assertIn("BTCUSDT", out)
-        prof = get_daily_profile_by_symbol(conn, "BTCUSDT")
-        self.assertIsNotNone(prof)
-        self.assertEqual(prof["name"], daily_profile_name("BTCUSDT"))
-        self.assertEqual(prof["profile_source"], DAILY_PROFILE_SOURCE)
-        self.assertFalse(prof["enabled"])
+        stats = annotate_daily_batch_items(conn, batch_id)
+        self.assertEqual(stats["fail"], 1)
+        self.assertIsNone(get_profile_by_symbol(conn, "BTCUSDT"))
         item = conn.execute(
             "SELECT summary_json FROM moss_daily_optimize_items WHERE batch_id=?",
             (batch_id,),

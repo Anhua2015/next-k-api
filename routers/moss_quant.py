@@ -27,6 +27,13 @@ class ProfileCreate(BaseModel):
     param_overrides: Optional[dict] = None
 
 
+class ProfileFromDailyCreate(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    enabled: bool = True
+    update_existing: bool = True
+
+
 class ProfilePatch(BaseModel):
     name: Optional[str] = None
     enabled: Optional[bool] = None
@@ -155,6 +162,37 @@ async def list_profiles():
             "SELECT * FROM moss_profiles ORDER BY id DESC"
         ).fetchall()
         return {"profiles": [row_to_profile(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@router.post("/profiles/from-daily")
+async def create_profile_from_daily(body: ProfileFromDailyCreate):
+    """从最近一次每日寻优结果加入纸面 Profile（不自动删除、启用由用户决定）。"""
+    from moss_quant.daily_optimize_service import import_profile_from_daily
+
+    conn = _conn()
+    try:
+        try:
+            prof = import_profile_from_daily(
+                conn,
+                body.symbol,
+                enabled=body.enabled,
+                name=body.name,
+                update_existing=body.update_existing,
+            )
+        except ValueError as e:
+            code = str(e)
+            if code in (
+                "symbol_not_allowed",
+                "daily_item_not_found",
+                "profile_already_exists",
+                "max_active_profiles_reached",
+                "symbol_already_active",
+            ):
+                raise HTTPException(400, code) from e
+            raise HTTPException(400, "import_failed") from e
+        return {"ok": True, "profile": prof}
     finally:
         conn.close()
 
@@ -846,8 +884,8 @@ async def post_daily_optimize_run(body: DailyOptimizeRunRequest = DailyOptimizeR
 
 @router.post("/daily-optimize/apply-profiles/{batch_id}")
 async def post_daily_optimize_apply_profiles(batch_id: int):
-    """将指定批次寻优结果同步为 daily_auto Profile（不重新寻优）。"""
-    from moss_quant.daily_optimize_service import sync_daily_profiles
+    """为指定批次写入达标/不达标标注（不创建纸面 Profile）。"""
+    from moss_quant.daily_optimize_service import annotate_daily_batch_items
 
     conn = _conn()
     try:
@@ -859,8 +897,8 @@ async def post_daily_optimize_apply_profiles(batch_id: int):
             raise HTTPException(404, "batch_not_found")
         if str(row["status"]) == "running":
             raise HTTPException(409, "batch_still_running")
-        profiles = sync_daily_profiles(conn, int(batch_id))
-        return {"ok": True, "batch_id": int(batch_id), "profiles": profiles}
+        stats = annotate_daily_batch_items(conn, int(batch_id))
+        return {"ok": True, "batch_id": int(batch_id), "annotate": stats}
     finally:
         conn.close()
 

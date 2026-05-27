@@ -8,17 +8,13 @@ from typing import Any, Dict, List, Optional
 
 from moss_quant import config as cfg
 from moss_quant.db import (
-    DAILY_PROFILE_SOURCE,
+    FROM_DAILY_PROFILE_SOURCE,
     _utc_now,
-    daily_profile_name,
-    get_daily_profile_by_symbol,
     get_profile,
+    get_profile_by_symbol,
     row_to_profile,
 )
-from moss_quant.daily_auto_enable import (
-    evaluate_profile_auto_enable,
-    profile_enabled_from_gate,
-)
+from moss_quant.daily_auto_enable import evaluate_profile_auto_enable
 from moss_quant.optimize_service import run_strategy_optimize
 from moss_quant.params import build_initial_params
 from moss_quant.universe import list_universe
@@ -228,11 +224,11 @@ def run_daily_optimize_batch(
                 )
                 items.append({"symbol": sym, "error": str(e)})
 
-        profile_map: Dict[str, int] = {}
+        annotate_stats: Dict[str, Any] = {}
         if apply:
             conn = _open_db()
             try:
-                profile_map = sync_daily_profiles(conn, batch_id)
+                annotate_stats = annotate_daily_batch_items(conn, batch_id)
             finally:
                 conn.close()
 
@@ -250,7 +246,7 @@ def run_daily_optimize_batch(
             "symbols_total": len(symbols),
             "symbols_ok": symbols_ok,
             "items": items,
-            "profiles": profile_map,
+            "annotate": annotate_stats,
             "apply_profiles": apply,
         }
     except Exception as e:
@@ -266,23 +262,8 @@ def run_daily_optimize_batch(
         raise
 
 
-def _disable_daily_profile_for_symbol(
-    conn, symbol: str, now: str, *, reason: str = ""
-) -> None:
-    sym = str(symbol).strip().upper()
-    prof = get_daily_profile_by_symbol(conn, sym)
-    if not prof:
-        return
-    conn.execute(
-        "UPDATE moss_profiles SET enabled=0, updated_at_utc=? WHERE id=?",
-        (now, int(prof["id"])),
-    )
-    if reason:
-        logger.info("[moss] daily auto OFF %s: %s", sym, reason)
-
-
-def sync_daily_profiles(conn, batch_id: int) -> Dict[str, int]:
-    """根据 batch 结果为每个标的 upsert daily_auto Profile，并按回测质量自动开/关纸面。"""
+def annotate_daily_batch_items(conn, batch_id: int) -> Dict[str, Any]:
+    """为寻优批次写入达标/不达标与原因；不创建或修改纸面 Profile。"""
     import sqlite3
 
     conn.row_factory = sqlite3.Row
@@ -291,124 +272,152 @@ def sync_daily_profiles(conn, batch_id: int) -> Dict[str, int]:
            WHERE batch_id = ? AND summary_json IS NOT NULL""",
         (int(batch_id),),
     ).fetchall()
-    out: Dict[str, int] = {}
-    enabled_count = 0
-    disabled_count = 0
-    now = _utc_now()
+    pass_n = 0
+    fail_n = 0
     for row in rows:
         sym = str(row["symbol"]).upper()
         summary = json.loads(row["summary_json"] or "{}")
-        if summary.get("error"):
-            _disable_daily_profile_for_symbol(conn, sym, now, reason=summary.get("error", "寻优失败"))
-            disabled_count += 1
-            conn.execute(
-                """UPDATE moss_daily_optimize_items SET summary_json=?
-                   WHERE id=?""",
-                (
-                    json.dumps(
-                        {
-                            **summary,
-                            **evaluate_profile_auto_enable(summary),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    int(row["id"]),
-                ),
-            )
-            continue
-
         gate = evaluate_profile_auto_enable(summary)
         summary = {**summary, **gate}
-        enabled_flag = profile_enabled_from_gate(gate)
-        if enabled_flag:
-            enabled_count += 1
+        if gate.get("auto_enabled"):
+            pass_n += 1
         else:
-            disabled_count += 1
-
-        template = str(row["template"] or "balanced")
-        tactical = json.loads(row["tactical_params_json"] or "{}")
-        initial = build_initial_params(template=template)
-
-        existing = get_daily_profile_by_symbol(conn, sym)
-        if not existing:
-            any_row = conn.execute(
-                "SELECT * FROM moss_profiles WHERE symbol = ? ORDER BY id DESC LIMIT 1",
-                (sym,),
-            ).fetchone()
-            existing = row_to_profile(any_row) if any_row else None
-        equity = cfg.MOSS_QUANT_DEFAULT_CAPITAL
-        if existing:
-            conn.execute(
-                """UPDATE moss_profiles SET
-                   name=?, symbol=?, template=?, enabled=?, profile_source=?,
-                   initial_params_json=?, tactical_params_json=?,
-                   updated_at_utc=?
-                   WHERE id=?""",
-                (
-                    daily_profile_name(sym),
-                    sym,
-                    template,
-                    1 if enabled_flag else 0,
-                    DAILY_PROFILE_SOURCE,
-                    json.dumps(initial, ensure_ascii=False),
-                    json.dumps(tactical, ensure_ascii=False),
-                    now,
-                    int(existing["id"]),
-                ),
-            )
-            pid = int(existing["id"])
-        else:
-            cur = conn.execute(
-                """INSERT INTO moss_profiles(
-                       name, symbol, template, enabled, profile_source,
-                       initial_params_json, tactical_params_json,
-                       virtual_equity_usdt, evolution_enabled,
-                       created_at_utc, updated_at_utc)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    daily_profile_name(sym),
-                    sym,
-                    template,
-                    1 if enabled_flag else 0,
-                    DAILY_PROFILE_SOURCE,
-                    json.dumps(initial, ensure_ascii=False),
-                    json.dumps(tactical, ensure_ascii=False),
-                    float(equity),
-                    0,
-                    now,
-                    now,
-                ),
-            )
-            pid = int(cur.lastrowid)
-        conn.execute(
-            """UPDATE moss_profiles SET enabled=0, updated_at_utc=?
-               WHERE symbol=? AND id<>? AND enabled=1""",
-            (now, sym, pid),
-        )
+            fail_n += 1
+        linked = get_profile_by_symbol(conn, sym)
+        profile_id = int(linked["id"]) if linked else None
         conn.execute(
             """UPDATE moss_daily_optimize_items
-               SET profile_id=?, summary_json=? WHERE id=?""",
+               SET summary_json=?, profile_id=? WHERE id=?""",
             (
-                pid,
                 json.dumps(summary, ensure_ascii=False),
+                profile_id,
                 int(row["id"]),
             ),
         )
-        out[sym] = pid
-        logger.info(
-            "[moss] daily profile %s %s (%s)",
-            sym,
-            gate.get("auto_enable_label"),
-            gate.get("auto_enable_reason"),
-        )
         conn.commit()
     logger.info(
-        "[moss] daily auto-enable batch=%s on=%s off=%s",
+        "[moss] daily annotate batch=%s pass=%s fail=%s",
         batch_id,
-        enabled_count,
-        disabled_count,
+        pass_n,
+        fail_n,
     )
-    return out
+    return {"pass": pass_n, "fail": fail_n, "total": pass_n + fail_n}
+
+
+def get_latest_daily_item_for_symbol(
+    conn, symbol: str
+) -> Optional[Dict[str, Any]]:
+    import sqlite3
+
+    sym = str(symbol).strip().upper()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """SELECT i.* FROM moss_daily_optimize_items i
+           INNER JOIN moss_daily_optimize_batches b ON b.id = i.batch_id
+           WHERE i.symbol = ? AND b.status = 'completed'
+             AND i.summary_json IS NOT NULL
+           ORDER BY b.id DESC, i.id DESC LIMIT 1""",
+        (sym,),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
+    d["summary"] = json.loads(d.pop("summary_json") or "{}")
+    return d
+
+
+def import_profile_from_daily(
+    conn,
+    symbol: str,
+    *,
+    enabled: bool = True,
+    name: Optional[str] = None,
+    update_existing: bool = True,
+) -> Dict[str, Any]:
+    """从最近一次每日寻优结果创建或更新纸面 Profile（用户主动操作）。"""
+    from moss_quant import config as mq_cfg
+    from moss_quant.universe import active_symbols_taken, is_symbol_allowed
+
+    sym = str(symbol).strip().upper()
+    if not is_symbol_allowed(sym):
+        raise ValueError("symbol_not_allowed")
+    item = get_latest_daily_item_for_symbol(conn, sym)
+    if not item or item.get("summary", {}).get("error"):
+        raise ValueError("daily_item_not_found")
+    template = str(item.get("template") or "balanced")
+    tactical = item.get("tactical_params") or {}
+    initial = build_initial_params(template=template)
+    now = _utc_now()
+    equity = float(mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    prof_name = (name or "").strip() or ("from-daily-" + sym)
+
+    existing = get_profile_by_symbol(conn, sym)
+    if existing and not update_existing:
+        raise ValueError("profile_already_exists")
+
+    if enabled:
+        from moss_quant.db import count_enabled_profiles
+
+        if not existing or not existing.get("enabled"):
+            if count_enabled_profiles(conn) >= mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES:
+                raise ValueError("max_active_profiles_reached")
+        taken = active_symbols_taken(
+            conn, exclude_profile_id=int(existing["id"]) if existing else None
+        )
+        if sym in taken and (not existing or not existing.get("enabled")):
+            raise ValueError("symbol_already_active")
+
+    if existing:
+        conn.execute(
+            """UPDATE moss_profiles SET
+               name=?, template=?, profile_source=?,
+               initial_params_json=?, tactical_params_json=?,
+               enabled=?, updated_at_utc=?
+               WHERE id=?""",
+            (
+                prof_name,
+                template,
+                FROM_DAILY_PROFILE_SOURCE,
+                json.dumps(initial, ensure_ascii=False),
+                json.dumps(tactical, ensure_ascii=False),
+                1 if enabled else 0,
+                now,
+                int(existing["id"]),
+            ),
+        )
+        pid = int(existing["id"])
+    else:
+        cur = conn.execute(
+            """INSERT INTO moss_profiles(
+                   name, symbol, template, enabled, profile_source,
+                   initial_params_json, tactical_params_json,
+                   virtual_equity_usdt, evolution_enabled,
+                   created_at_utc, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                prof_name,
+                sym,
+                template,
+                1 if enabled else 0,
+                FROM_DAILY_PROFILE_SOURCE,
+                json.dumps(initial, ensure_ascii=False),
+                json.dumps(tactical, ensure_ascii=False),
+                equity,
+                0,
+                now,
+                now,
+            ),
+        )
+        pid = int(cur.lastrowid)
+
+    conn.execute(
+        """UPDATE moss_daily_optimize_items SET profile_id=?
+           WHERE id=?""",
+        (pid, int(item["id"])),
+    )
+    conn.commit()
+    return get_profile(conn, pid) or {}
 
 
 def get_latest_daily_batch(conn) -> Optional[Dict[str, Any]]:

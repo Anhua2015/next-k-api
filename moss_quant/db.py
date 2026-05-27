@@ -162,7 +162,9 @@ def _ensure_profile_source_column(c: sqlite3.Cursor) -> None:
         )
 
 
-DAILY_PROFILE_SOURCE = "daily_auto"
+DAILY_PROFILE_SOURCE = "daily_auto"  # 历史遗留；新逻辑不再自动创建
+FROM_DAILY_PROFILE_SOURCE = "from_daily"
+MANUAL_PROFILE_SOURCE = "manual"
 DAILY_PROFILE_NAME_PREFIX = "daily-"
 
 
@@ -212,6 +214,35 @@ def list_enabled_profiles(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT * FROM moss_profiles WHERE enabled = 1 ORDER BY id ASC"
+    ).fetchall()
+    return [row_to_profile(r) for r in rows]
+
+
+def get_profile_by_symbol(
+    conn: sqlite3.Connection, symbol: str
+) -> Optional[Dict[str, Any]]:
+    sym = str(symbol).strip().upper()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM moss_profiles WHERE symbol = ? ORDER BY id DESC LIMIT 1",
+        (sym,),
+    ).fetchone()
+    return row_to_profile(row) if row else None
+
+
+def list_profiles_for_paper_scan(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """纸面扫描：已启用 Profile + 仍有持仓的 Profile（便于平仓）。"""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT DISTINCT p.* FROM moss_profiles p
+           WHERE p.enabled = 1
+              OR EXISTS (
+                  SELECT 1 FROM moss_signals s
+                  WHERE s.profile_id = p.id
+                    AND s.outcome IS NULL
+                    AND s.side IN ('LONG','SHORT')
+              )
+           ORDER BY p.id ASC"""
     ).fetchall()
     return [row_to_profile(r) for r in rows]
 

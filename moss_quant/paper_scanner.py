@@ -15,7 +15,7 @@ from moss_quant import config as cfg
 from moss_quant.core.decision import DecisionParams, compute_last_composite, compute_signals
 from moss_quant.core.indicators import atr as compute_atr
 from moss_quant.core.regime import classify_regime
-from moss_quant.db import _utc_now, list_enabled_profiles
+from moss_quant.db import _utc_now, list_profiles_for_paper_scan
 from moss_quant.kline_cache import load_cached
 from moss_quant.params import cap_leverage_for_symbol, resolve_params_dict
 
@@ -479,7 +479,7 @@ def _notional(profile: Dict[str, Any], params: dict) -> float:
 
 def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
     conn.row_factory = sqlite3.Row
-    profiles = list_enabled_profiles(conn)
+    profiles = list_profiles_for_paper_scan(conn)
     stats: Dict[str, Any] = {
         "profiles_scanned": len(profiles),
         "opens": 0,
