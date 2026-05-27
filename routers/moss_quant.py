@@ -677,24 +677,35 @@ async def get_summary():
 @router.get("/paper-scan/latest")
 async def get_paper_scan_latest():
     """最近一次 15m 纸面扫描摘要（与 Railway `[moss]` 日志同风格）。"""
-    from moss_quant.paper_scanner import format_scan_detail_message
+    from moss_quant.paper_scanner import (
+        append_missing_open_position_details,
+        enrich_scan_details_with_positions,
+        fetch_open_positions_map,
+        refresh_open_map_marks,
+        scan_detail_lines,
+    )
 
     conn = _conn()
     try:
+        open_map = refresh_open_map_marks(fetch_open_positions_map(conn))
         row = conn.execute(
             """SELECT id, ran_at_utc, profiles_scanned, opens, closes, detail_json
                FROM moss_paper_runs ORDER BY id DESC LIMIT 1"""
         ).fetchone()
         if not row:
+            details = append_missing_open_position_details(conn, [], open_map)
+            details = enrich_scan_details_with_positions(details, open_map)
             return {
                 "ok": True,
                 "has_run": False,
+                "has_open_positions": bool(open_map),
                 "ran_at_utc": None,
                 "profiles_scanned": 0,
                 "opens": 0,
                 "closes": 0,
-                "lines": [],
-                "details": [],
+                "lines": scan_detail_lines(details),
+                "details": details,
+                "open_positions": list(open_map.values()),
             }
         details: List[Dict[str, Any]] = []
         raw = row["detail_json"]
@@ -703,18 +714,9 @@ async def get_paper_scan_latest():
                 details = json.loads(raw)
             except json.JSONDecodeError:
                 details = []
-        lines: List[str] = []
-        for d in details:
-            if not isinstance(d, dict):
-                continue
-            label = str(
-                d.get("label")
-                or ("p%s:%s" % (d.get("profile_id", "?"), d.get("symbol", "")))
-            )
-            msg = d.get("message")
-            if not msg:
-                msg = format_scan_detail_message(label, d)
-            lines.append(str(msg))
+        details = append_missing_open_position_details(conn, details, open_map)
+        details = enrich_scan_details_with_positions(details, open_map)
+        lines = scan_detail_lines(details)
         return {
             "ok": True,
             "has_run": True,
@@ -725,6 +727,7 @@ async def get_paper_scan_latest():
             "closes": int(row["closes"] or 0),
             "lines": lines,
             "details": details,
+            "open_positions": list(open_map.values()),
         }
     except sqlite3.OperationalError:
         return {
@@ -736,6 +739,7 @@ async def get_paper_scan_latest():
             "closes": 0,
             "lines": [],
             "details": [],
+            "open_positions": [],
         }
     finally:
         conn.close()

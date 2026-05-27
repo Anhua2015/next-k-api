@@ -136,6 +136,94 @@ class TestMossQuant(unittest.TestCase):
         self.assertIn("SIDEWAYS", msg)
         self.assertIn(label, msg)
 
+    def test_enrich_scan_details_with_positions(self):
+        from moss_quant.paper_scanner import enrich_scan_details_with_positions
+
+        details = [
+            {
+                "profile_id": 1,
+                "label": "p1:SEIUSDT:trend",
+                "action": "hold",
+                "side": "LONG",
+                "upnl": 0,
+            },
+        ]
+        open_map = {
+            1: {
+                "entry_price": 0.3125,
+                "mark_price": 0.318,
+                "upnl": 176.0,
+                "side": "LONG",
+                "notional": 10000.0,
+            }
+        }
+        out = enrich_scan_details_with_positions(details, open_map)
+        self.assertEqual(out[0]["entry_price"], 0.3125)
+        self.assertEqual(out[0]["upnl"], 176.0)
+        self.assertIn("entry=0.3125", out[0]["message"])
+
+    def test_enrich_wait_becomes_hold_when_position(self):
+        from moss_quant.paper_scanner import enrich_scan_details_with_positions
+
+        details = [
+            {
+                "profile_id": 2,
+                "label": "p2:TIAUSDT:balanced",
+                "action": "wait",
+                "composite": 0.5,
+            },
+        ]
+        open_map = {
+            2: {
+                "profile_id": 2,
+                "side": "SHORT",
+                "symbol": "TIAUSDT",
+                "entry_price": 5.1,
+                "mark_price": 5.0,
+                "notional": 10000.0,
+                "upnl": 196.08,
+            }
+        }
+        out = enrich_scan_details_with_positions(details, open_map)
+        self.assertEqual(out[0]["action"], "hold")
+        self.assertEqual(out[0]["upnl"], 196.08)
+
+    def test_fetch_open_positions_includes_profile_id(self):
+        from accumulation_radar import init_db
+        from moss_quant.db import _utc_now
+        from moss_quant.paper_scanner import fetch_open_positions_map
+
+        conn = init_db()
+        conn.row_factory = __import__("sqlite3").Row
+        now = _utc_now()
+        conn.execute(
+            """INSERT INTO moss_profiles(
+                   name, symbol, template, enabled, profile_source,
+                   initial_params_json, tactical_params_json,
+                   virtual_equity_usdt, evolution_enabled, created_at_utc, updated_at_utc)
+               VALUES ('t','TESTUSDT','balanced',1,'manual','{}','{}',10000,0,?,?)""",
+            (now, now),
+        )
+        pid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """INSERT INTO moss_signals(
+                   profile_id, recorded_at_utc, side, symbol, entry_price,
+                   virtual_notional_usdt, mark_price, composite, regime,
+                   unrealized_pnl_usdt, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (pid, now, "LONG", "TESTUSDT", 1.0, 10000, 1.1, 0.5, "BULL", 1000, now),
+        )
+        conn.commit()
+        try:
+            m = fetch_open_positions_map(conn)
+            self.assertIn(pid, m)
+            self.assertEqual(m[pid]["profile_id"], pid)
+        finally:
+            conn.execute("DELETE FROM moss_signals WHERE profile_id=?", (pid,))
+            conn.execute("DELETE FROM moss_profiles WHERE id=?", (pid,))
+            conn.commit()
+            conn.close()
+
     def test_symbol_to_ccxt(self):
         from moss_quant.hyperliquid_klines import symbol_to_ccxt
 

@@ -65,9 +65,11 @@ def format_scan_detail_message(label: str, detail: Dict[str, Any]) -> str:
         )
     if act == "hold":
         return (
-            f"[moss] {label} HOLD {detail.get('side', '')} upnl={detail.get('upnl')}U "
-            f"pnl%={detail.get('pnl_pct')} sl<={detail.get('sl_thresh_pct')}% "
-            f"tp>={detail.get('tp_thresh_pct')}% sig={detail.get('signal')}"
+            f"[moss] {label} HOLD {detail.get('side', '')} "
+            f"entry={detail.get('entry_price')} mark={detail.get('mark_price')} "
+            f"upnl={detail.get('upnl')}U pnl%={detail.get('pnl_pct')} "
+            f"sl<={detail.get('sl_thresh_pct')}% tp>={detail.get('tp_thresh_pct')}% "
+            f"sig={detail.get('signal')}"
         )
     if act == "close":
         return (
@@ -77,7 +79,8 @@ def format_scan_detail_message(label: str, detail: Dict[str, Any]) -> str:
     if act == "open":
         return (
             f"[moss] {label} OPEN {detail.get('side', '')} "
-            f"notional={detail.get('notional')}U composite={detail.get('composite')} "
+            f"entry={detail.get('entry_price')} notional={detail.get('notional')}U "
+            f"upnl={detail.get('upnl', 0)}U composite={detail.get('composite')} "
             f"regime={detail.get('regime', '')}"
         )
     return f"[moss] {label} {act}"
@@ -89,6 +92,181 @@ def _scan_detail(
     d = {"profile_id": int(profile["id"]), "label": label, **payload}
     d["message"] = format_scan_detail_message(label, d)
     return d
+
+
+def _position_fields(
+    *,
+    side: str,
+    entry: float,
+    mark: float,
+    notional: float,
+    upnl: float,
+) -> Dict[str, Any]:
+    return {
+        "side": side,
+        "entry_price": round(entry, 8),
+        "mark_price": round(mark, 8),
+        "notional": round(notional, 2),
+        "upnl": round(upnl, 4),
+    }
+
+
+def fetch_open_positions_map(conn: sqlite3.Connection) -> Dict[int, Dict[str, Any]]:
+    """profile_id → 当前未平仓纸面单（每 profile 仅最新一条）。"""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT s.profile_id, s.side, s.symbol, s.entry_price, s.mark_price,
+                  s.unrealized_pnl_usdt, s.virtual_notional_usdt
+           FROM moss_signals s
+           INNER JOIN (
+               SELECT profile_id, MAX(id) AS max_id
+               FROM moss_signals
+               WHERE outcome IS NULL AND side IN ('LONG','SHORT')
+               GROUP BY profile_id
+           ) t ON s.id = t.max_id"""
+    ).fetchall()
+    out: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        pid = int(row["profile_id"])
+        entry = float(row["entry_price"] or 0)
+        mark = float(row["mark_price"] or 0)
+        notional = float(row["virtual_notional_usdt"] or 0)
+        side = str(row["side"])
+        upnl = float(row["unrealized_pnl_usdt"] or 0)
+        if mark > 0 and entry > 0 and notional > 0:
+            upnl = pnl_usdt(side, entry, mark, notional)
+        out[pid] = {
+            "profile_id": pid,
+            "side": side,
+            "symbol": str(row["symbol"] or "").upper(),
+            "entry_price": round(entry, 8),
+            "mark_price": round(mark, 8),
+            "notional": round(notional, 2),
+            "upnl": round(upnl, 4),
+        }
+    return out
+
+
+def refresh_open_map_marks(open_map: Dict[int, Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    """用缓存 K 线最新价刷新持仓现价与浮盈（仅 API 展示，不写库）。"""
+    for pos in open_map.values():
+        sym = str(pos.get("symbol") or "").upper()
+        if not sym:
+            continue
+        try:
+            df = load_cached(sym, refresh=False)
+            mark = float(df["close"].iloc[-1])
+        except Exception as e:
+            logger.debug("[moss] refresh mark %s failed: %s", sym, e)
+            continue
+        entry = float(pos.get("entry_price") or 0)
+        notional = float(pos.get("notional") or 0)
+        side = str(pos.get("side") or "")
+        if mark <= 0 or entry <= 0 or notional <= 0:
+            continue
+        pos["mark_price"] = round(mark, 8)
+        pos["upnl"] = round(pnl_usdt(side, entry, mark, notional), 4)
+    return open_map
+
+
+def append_missing_open_position_details(
+    conn: sqlite3.Connection,
+    details: List[Dict[str, Any]],
+    open_map: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """上次扫描未包含的持仓（如当次 K 线失败）补一条 hold 明细。"""
+    if not open_map:
+        return details
+    from moss_quant.db import get_profile
+
+    seen = {
+        int(d["profile_id"])
+        for d in details
+        if isinstance(d, dict) and d.get("profile_id") is not None
+    }
+    out = list(details)
+    for pid, pos in open_map.items():
+        if pid in seen:
+            continue
+        prof = get_profile(conn, int(pid))
+        if not prof:
+            continue
+        label = _profile_label(prof)
+        out.append(
+            _scan_detail(
+                label,
+                prof,
+                {
+                    "symbol": pos.get("symbol") or prof.get("symbol"),
+                    "action": "hold",
+                    "template": prof.get("template"),
+                    **_position_fields(
+                        side=str(pos["side"]),
+                        entry=float(pos["entry_price"]),
+                        mark=float(pos["mark_price"]),
+                        notional=float(pos["notional"]),
+                        upnl=float(pos["upnl"]),
+                    ),
+                },
+            )
+        )
+    return out
+
+
+def enrich_scan_details_with_positions(
+    details: List[Dict[str, Any]],
+    open_map: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """用库内最新持仓覆盖/补全扫描明细中的开仓价与浮盈。"""
+    if not open_map:
+        return details
+    enriched: List[Dict[str, Any]] = []
+    for d in details:
+        if not isinstance(d, dict):
+            enriched.append(d)
+            continue
+        row = dict(d)
+        pid = row.get("profile_id")
+        if pid is None:
+            enriched.append(row)
+            continue
+        pos = open_map.get(int(pid))
+        if not pos:
+            enriched.append(row)
+            continue
+        act = str(row.get("action") or "").lower()
+        if act not in ("hold", "open", "close"):
+            row["action"] = "hold"
+        row.update(
+            {
+                "side": pos.get("side") or row.get("side"),
+                "entry_price": pos["entry_price"],
+                "mark_price": pos["mark_price"],
+                "notional": pos.get("notional", row.get("notional")),
+                "upnl": pos["upnl"],
+            }
+        )
+        label = str(
+            row.get("label")
+            or ("p%s:%s" % (pid, pos.get("symbol") or row.get("symbol") or ""))
+        )
+        row["label"] = label
+        row["message"] = format_scan_detail_message(label, row)
+        enriched.append(row)
+    return enriched
+
+
+def scan_detail_lines(details: List[Dict[str, Any]]) -> List[str]:
+    lines: List[str] = []
+    for d in details:
+        if not isinstance(d, dict):
+            continue
+        label = str(
+            d.get("label")
+            or ("p%s:%s" % (d.get("profile_id", "?"), d.get("symbol", "")))
+        )
+        lines.append(format_scan_detail_message(label, d))
+    return lines
 
 
 def compute_current_signal(df: pd.DataFrame, params: DecisionParams) -> int:
@@ -356,12 +534,18 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                         {
                             "symbol": symbol,
                             "action": "hold",
-                            "side": side,
-                            "upnl": round(upnl, 4),
+                            "template": profile.get("template"),
                             "pnl_pct": snap.get("pnl_pct"),
                             "sl_thresh_pct": snap.get("sl_thresh_pct"),
                             "tp_thresh_pct": snap.get("tp_thresh_pct"),
                             "signal": snap.get("signal"),
+                            **_position_fields(
+                                side=side,
+                                entry=entry,
+                                mark=mark,
+                                notional=notional,
+                                upnl=upnl,
+                            ),
                         },
                     )
                 )
@@ -436,10 +620,16 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                 {
                     "symbol": symbol,
                     "action": "open",
-                    "side": side,
-                    "notional": round(notional, 2),
+                    "template": profile.get("template"),
                     "composite": composite,
                     "regime": regime_label,
+                    **_position_fields(
+                        side=side,
+                        entry=mark,
+                        mark=mark,
+                        notional=notional,
+                        upnl=0.0,
+                    ),
                 },
             )
         )
