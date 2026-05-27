@@ -22,6 +22,15 @@ from moss_quant.params import cap_leverage_for_symbol, resolve_params_dict
 logger = logging.getLogger(__name__)
 
 
+def _py_scalar(v: Any) -> Any:
+    """numpy 标量 → Python float/int，便于 JSON 日志。"""
+    if isinstance(v, np.floating):
+        return float(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    return v
+
+
 def _verbose() -> bool:
     return bool(getattr(cfg, "MOSS_QUANT_VERBOSE_LOG", True))
 
@@ -134,12 +143,12 @@ def entry_snapshot(
     else:
         reason = "no_discrete_signal"
     return {
-        "signal": sig,
-        "composite": round(composite, 4),
-        "entry_threshold": th,
+        "signal": int(sig),
+        "composite": round(float(composite), 4),
+        "entry_threshold": round(float(_py_scalar(th)), 4),
         "regime": regime_label,
         "reason": reason,
-        "bars": len(df),
+        "bars": int(len(df)),
     }
 
 
@@ -384,7 +393,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
             mark,
         )
 
-    detail_json = json.dumps(stats["details"], ensure_ascii=False)
+    detail_json = json.dumps(stats["details"], ensure_ascii=False, default=_py_scalar)
     conn.execute(
         """INSERT INTO moss_paper_runs(ran_at_utc, profiles_scanned, opens, closes, detail_json)
            VALUES (?,?,?,?,?)""",
