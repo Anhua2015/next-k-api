@@ -67,6 +67,17 @@ class ApplyFinalParamsRequest(BaseModel):
     run_id: Optional[int] = None
 
 
+class OptimizeRequest(BaseModel):
+    """网格搜索模板 + 战术参数（按回测收益排序）。"""
+    profile_id: Optional[int] = None
+    symbol: Optional[str] = None
+    capital: Optional[float] = None
+    refresh_klines: bool = False
+    top_n: int = Field(15, ge=1, le=50)
+    max_combinations: int = Field(96, ge=4, le=200)
+    apply_best_tactical_to_profile_id: Optional[int] = None
+
+
 def _conn():
     from accumulation_radar import init_db
 
@@ -340,6 +351,64 @@ async def post_backtest(body: BacktestRequest):
     finally:
         conn.close()
     return {"ok": True, "run_id": run_id, **result}
+
+
+@router.post("/optimize")
+async def post_optimize(body: OptimizeRequest):
+    """遍历 4 模板 × 战术网格，返回收益最高的策略+参数列表。"""
+    from moss_quant.optimize_service import run_strategy_optimize
+    from moss_quant.db import _utc_now, get_profile
+    from moss_quant.universe import is_symbol_allowed
+
+    if body.profile_id:
+        sym, _, _prof = _resolve_symbol_params(
+            None, None, None, body.profile_id
+        )
+    else:
+        sym = (body.symbol or "").strip().upper()
+        if not sym or not is_symbol_allowed(sym):
+            raise HTTPException(400, "symbol_not_allowed")
+
+    try:
+        out = run_strategy_optimize(
+            symbol=sym,
+            capital=body.capital,
+            refresh_klines=body.refresh_klines,
+            top_n=body.top_n,
+            max_combinations=body.max_combinations,
+        )
+    except Exception as e:
+        logger.exception("moss optimize failed")
+        raise HTTPException(500, f"optimize_failed: {e}") from e
+
+    applied = None
+    pid = body.apply_best_tactical_to_profile_id
+    best = out.get("best")
+    if pid and best and best.get("tactical_params"):
+        conn = _conn()
+        try:
+            if not get_profile(conn, int(pid)):
+                raise HTTPException(404, "profile_not_found")
+            now = _utc_now()
+            conn.execute(
+                """UPDATE moss_profiles SET tactical_params_json=?, updated_at_utc=? WHERE id=?""",
+                (
+                    json.dumps(best["tactical_params"], ensure_ascii=False),
+                    now,
+                    int(pid),
+                ),
+            )
+            conn.commit()
+            applied = {
+                "profile_id": int(pid),
+                "tactical_params": best["tactical_params"],
+                "note": "template_unchanged_create_new_profile_if_needed",
+                "suggested_template": best.get("template"),
+            }
+        finally:
+            conn.close()
+
+    return {**out, "applied": applied}
 
 
 @router.post("/evolve/baseline")

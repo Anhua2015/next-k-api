@@ -136,6 +136,25 @@ class TestMossQuant(unittest.TestCase):
         self.assertIn("SIDEWAYS", msg)
         self.assertIn(label, msg)
 
+    def test_optimize_returns_ranking(self):
+        from moss_quant.optimize_service import run_strategy_optimize
+
+        out = run_strategy_optimize(
+            symbol="BTCUSDT",
+            capital=10000,
+            refresh_klines=False,
+            max_combinations=8,
+            entry_thresholds=[0.40, 0.50],
+            sl_atr_mults=[2.0],
+            tp_rr_ratios=[2.0, 3.0],
+            top_n=5,
+        )
+        self.assertTrue(out.get("ok"))
+        self.assertGreaterEqual(out.get("combinations_tested", 0), 1)
+        self.assertIn("ranking", out)
+        if out.get("combinations_ok", 0) > 0:
+            self.assertIsNotNone(out.get("best"))
+
     def test_delete_profile_blocks_open_position(self):
         import sqlite3
 
