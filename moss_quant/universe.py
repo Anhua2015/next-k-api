@@ -114,10 +114,36 @@ def list_universe() -> List[Dict[str, Any]]:
     return out
 
 
+def normalize_usdt_perp_symbol(symbol: str) -> str:
+    """规范为 XXXUSDT（去空格/斜杠，无后缀则补 USDT）。"""
+    s = str(symbol or "").strip().upper().replace("/", "").replace("-", "")
+    if not s:
+        return ""
+    if not s.endswith("USDT"):
+        s += "USDT"
+    return s
+
+
 def is_symbol_allowed(symbol: str) -> bool:
-    sym = str(symbol or "").strip().upper()
+    """纸面 Profile / 每日寻优宇宙：仅 Moss 内置 ∩ 币安永续。"""
+    sym = normalize_usdt_perp_symbol(symbol)
     allowed = {u["symbol"] for u in list_universe()}
     return sym in allowed
+
+
+def is_research_symbol_allowed(symbol: str) -> bool:
+    """回测 / 寻优 / 进化：默认任意 XXXUSDT；可关闭 relax 后仅允许币安永续 TRADING。"""
+    from moss_quant import config as cfg
+
+    sym = normalize_usdt_perp_symbol(symbol)
+    if not sym or len(sym) < 6:
+        return False
+    if not re.fullmatch(r"[A-Z0-9]+USDT", sym):
+        return False
+    if cfg.MOSS_QUANT_RESEARCH_RELAX_SYMBOL_CHECK:
+        return True
+    kept = filter_symbols_to_binance_usdt_perps([sym])
+    return bool(kept)
 
 
 def active_symbols_taken(conn, *, exclude_profile_id: Optional[int] = None) -> set[str]:

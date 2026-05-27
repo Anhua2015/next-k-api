@@ -192,7 +192,10 @@ def run_daily_optimize_batch(
                 if kline_start is None and out.get("kline_start"):
                     kline_start = out.get("kline_start")
                     kline_end = out.get("kline_end")
-                summary = best["summary"]
+                summary = {
+                    **best["summary"],
+                    **evaluate_profile_auto_enable(best["summary"]),
+                }
                 tact = best.get("tactical_params") or {}
                 score = float(best.get("score") or 0)
                 _insert_batch_item(

@@ -64,6 +64,10 @@ MOSS_QUANT_BINANCE_KLINE_MIN_INTERVAL_SEC = max(
 MOSS_QUANT_DAILY_OPTIMIZE_BINANCE_REFRESH_ALL = env_truthy(
     "MOSS_QUANT_DAILY_OPTIMIZE_BINANCE_REFRESH_ALL", default=False
 )
+# 回测/寻优：默认接受任意 XXXUSDT 格式；设为 0 则强制校验币安永续 TRADING 名单
+MOSS_QUANT_RESEARCH_RELAX_SYMBOL_CHECK = env_truthy(
+    "MOSS_QUANT_RESEARCH_RELAX_SYMBOL_CHECK", default=True
+)
 
 
 def data_source_label() -> str:

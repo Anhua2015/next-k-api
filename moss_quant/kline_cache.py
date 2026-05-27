@@ -74,19 +74,22 @@ def _kline_stale(df: pd.DataFrame) -> bool:
     return age_min > float(cfg.MOSS_QUANT_KLINE_STALE_MINUTES)
 
 
-def load_cached(
+def _use_binance_klines(symbol: str) -> bool:
+    """全局 binance 源，或非 Moss 内置标的（回测任意币安永续默认走币安 K 线）。"""
+    if cfg.MOSS_QUANT_DATA_SOURCE == "binance":
+        return True
+    from moss_quant.universe import is_symbol_allowed, normalize_usdt_perp_symbol
+
+    sym = normalize_usdt_perp_symbol(symbol)
+    return bool(sym) and not is_symbol_allowed(sym)
+
+
+def _load_binance_cached(
     symbol: str,
     *,
-    interval: Optional[str] = None,
-    refresh: bool = False,
+    interval: str,
+    refresh: bool,
 ) -> pd.DataFrame:
-    if cfg.MOSS_QUANT_DATA_SOURCE == "hyperliquid":
-        from moss_quant.hyperliquid_klines import load_hyperliquid_cached
-
-        return load_hyperliquid_cached(
-            symbol, interval=interval, refresh=refresh
-        )
-    interval = interval or cfg.MOSS_QUANT_KLINE_INTERVAL
     path = _cache_path(symbol, interval)
     if refresh or not path.is_file():
         return fetch_and_cache(symbol, interval=interval)
@@ -94,6 +97,24 @@ def load_cached(
     if df.empty or _kline_stale(df):
         return fetch_and_cache(symbol, interval=interval)
     return df
+
+
+def load_cached(
+    symbol: str,
+    *,
+    interval: Optional[str] = None,
+    refresh: bool = False,
+) -> pd.DataFrame:
+    interval = interval or cfg.MOSS_QUANT_KLINE_INTERVAL
+    if _use_binance_klines(symbol):
+        return _load_binance_cached(symbol, interval=interval, refresh=refresh)
+    if cfg.MOSS_QUANT_DATA_SOURCE == "hyperliquid":
+        from moss_quant.hyperliquid_klines import load_hyperliquid_cached
+
+        return load_hyperliquid_cached(
+            symbol, interval=interval, refresh=refresh
+        )
+    return _load_binance_cached(symbol, interval=interval, refresh=refresh)
 
 
 def catalog_entry(symbol: str, df: pd.DataFrame) -> Dict[str, Any]:

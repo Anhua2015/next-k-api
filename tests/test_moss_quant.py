@@ -14,7 +14,10 @@ from moss_quant.core.regime import classify_regime
 from moss_quant.universe import (
     active_symbols_taken,
     base_to_binance_symbol,
+    is_research_symbol_allowed,
+    is_symbol_allowed,
     list_universe,
+    normalize_usdt_perp_symbol,
 )
 
 
@@ -262,6 +265,33 @@ class TestMossQuant(unittest.TestCase):
         self.assertIn("ranking", out)
         if out.get("combinations_ok", 0) > 0:
             self.assertIsNotNone(out.get("best"))
+
+    def test_normalize_usdt_perp_symbol(self):
+        self.assertEqual(normalize_usdt_perp_symbol("xvg"), "XVGUSDT")
+        self.assertEqual(normalize_usdt_perp_symbol("XVG/USDT"), "XVGUSDT")
+
+    def test_research_symbol_default_accepts_any_usdt_format(self):
+        self.assertTrue(is_research_symbol_allowed("XVGUSDT"))
+        self.assertTrue(is_research_symbol_allowed("xvg"))
+        self.assertFalse(is_research_symbol_allowed(""))
+
+    def test_research_symbol_strict_uses_binance_perp_filter(self):
+        from unittest.mock import patch
+
+        from moss_quant import config as cfg
+
+        with patch.object(cfg, "MOSS_QUANT_RESEARCH_RELAX_SYMBOL_CHECK", False):
+            with patch(
+                "moss_quant.universe.filter_symbols_to_binance_usdt_perps",
+                return_value=["XVGUSDT"],
+            ) as m:
+                self.assertTrue(is_research_symbol_allowed("xvg"))
+                m.assert_called_with(["XVGUSDT"])
+            with patch(
+                "moss_quant.universe.filter_symbols_to_binance_usdt_perps",
+                return_value=[],
+            ):
+                self.assertFalse(is_research_symbol_allowed("XVGUSDT"))
 
     def test_daily_profile_name(self):
         from moss_quant.db import daily_profile_name

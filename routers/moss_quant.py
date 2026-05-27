@@ -104,7 +104,7 @@ def _resolve_symbol_params(body_symbol, body_params, body_template, profile_id):
     from moss_quant import config as cfg
     from moss_quant.db import get_profile
     from moss_quant.params import build_initial_params
-    from moss_quant.universe import is_symbol_allowed
+    from moss_quant.universe import is_research_symbol_allowed, normalize_usdt_perp_symbol
 
     if profile_id:
         conn = _conn()
@@ -118,9 +118,12 @@ def _resolve_symbol_params(body_symbol, body_params, body_template, profile_id):
         params = dict(prof["initial_params"])
         params.update(prof.get("tactical_params") or {})
         return sym, params, prof
-    sym = (body_symbol or "").strip().upper()
-    if not sym or not is_symbol_allowed(sym):
-        raise HTTPException(400, "symbol_not_allowed")
+    sym = normalize_usdt_perp_symbol(body_symbol or "")
+    if not sym or not is_research_symbol_allowed(sym):
+        raise HTTPException(
+            400,
+            "symbol_not_allowed: 需为合法 XXXUSDT 代码",
+        )
     params = build_initial_params(
         template=body_template or "balanced",
         overrides=body_params,
@@ -405,16 +408,19 @@ async def post_optimize(body: OptimizeRequest):
     """遍历 4 模板 × 战术网格，返回收益最高的策略+参数列表。"""
     from moss_quant.optimize_service import run_strategy_optimize
     from moss_quant.db import _utc_now, get_profile
-    from moss_quant.universe import is_symbol_allowed
+    from moss_quant.universe import is_research_symbol_allowed, normalize_usdt_perp_symbol
 
     if body.profile_id:
         sym, _, _prof = _resolve_symbol_params(
             None, None, None, body.profile_id
         )
     else:
-        sym = (body.symbol or "").strip().upper()
-        if not sym or not is_symbol_allowed(sym):
-            raise HTTPException(400, "symbol_not_allowed")
+        sym = normalize_usdt_perp_symbol(body.symbol or "")
+        if not sym or not is_research_symbol_allowed(sym):
+            raise HTTPException(
+                400,
+                "symbol_not_allowed: 需为合法 XXXUSDT 代码",
+            )
 
     try:
         out = run_strategy_optimize(
