@@ -113,7 +113,7 @@ MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES = env_truthy(
 )
 # 首次部署（尚无 daily_auto Profile）时自动跑一次全市场寻优
 MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP = env_truthy(
-    "MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP", default=True
+    "MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP", default=False
 )
 # 启动后延迟再跑 bootstrap，避免与首屏 API 抢库（秒）
 MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC = max(

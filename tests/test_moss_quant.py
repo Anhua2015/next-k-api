@@ -245,7 +245,7 @@ class TestMossQuant(unittest.TestCase):
         from moss_quant import config as cfg
 
         self.assertTrue(cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED)
-        self.assertTrue(cfg.MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP)
+        self.assertFalse(cfg.MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP)
         self.assertTrue(cfg.MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES)
         self.assertTrue(cfg.daily_optimize_scheduler_enabled())
 
