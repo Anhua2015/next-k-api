@@ -92,6 +92,11 @@ class DailyOptimizeRunRequest(BaseModel):
     apply_profiles: Optional[bool] = None
 
 
+class DailyCoreSymbolAdd(BaseModel):
+    symbol: str = Field(..., min_length=2, max_length=24)
+    note: Optional[str] = Field(None, max_length=128)
+
+
 class McapScanRunRequest(BaseModel):
     capital: Optional[float] = None
     refresh_klines: Optional[bool] = None
@@ -134,6 +139,59 @@ def _resolve_symbol_params(body_symbol, body_params, body_template, profile_id):
         overrides=body_params,
     )
     return sym, params, None
+
+
+@router.get("/daily-core-universe")
+async def get_daily_core_universe():
+    """每日寻优必扫标的（moss_daily_core_symbols，默认 25：主板 23 + ICP + TON）。"""
+    from moss_quant.db import list_daily_core_symbols
+    from moss_quant.universe import list_daily_core_universe
+
+    conn = _conn()
+    try:
+        rows = list_daily_core_symbols(conn)
+        items = list_daily_core_universe(conn)
+        return {
+            "ok": True,
+            "count": len(items),
+            "items": items,
+            "rows": rows,
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/daily-core-symbols")
+async def post_daily_core_symbol(body: DailyCoreSymbolAdd):
+    """将标的加入每日寻优表 moss_daily_core_symbols（扩展寻优看盘可点选）。"""
+    from moss_quant.db import add_symbol_to_daily_core, list_daily_core_symbols
+    from moss_quant.universe import is_research_symbol_allowed, normalize_usdt_perp_symbol
+
+    sym = normalize_usdt_perp_symbol(body.symbol)
+    if not sym or not is_research_symbol_allowed(sym):
+        raise HTTPException(400, "symbol_not_allowed")
+
+    conn = _conn()
+    try:
+        try:
+            out = add_symbol_to_daily_core(
+                conn,
+                sym,
+                note=(body.note or "from_ui"),
+            )
+        except ValueError as e:
+            code = str(e)
+            if code in ("invalid_symbol", "symbol_not_on_binance_perp"):
+                raise HTTPException(400, code) from e
+            raise HTTPException(400, "add_daily_core_failed") from e
+        enabled = [r["symbol"] for r in list_daily_core_symbols(conn)]
+        return {
+            **out,
+            "daily_core_count": len(enabled),
+            "daily_core_symbols": enabled,
+        }
+    finally:
+        conn.close()
 
 
 @router.get("/universe")
@@ -757,15 +815,32 @@ async def get_mcap_scan_latest():
         reconcile_stale_mcap_batches,
     )
 
+    from moss_quant.db import list_daily_core_symbols
+
     conn = _conn()
     try:
         reconcile_stale_mcap_batches(conn)
         batch = get_latest_mcap_scan_batch(conn)
+        daily_core_symbols = [
+            str(r["symbol"]).upper()
+            for r in list_daily_core_symbols(conn)
+            if int(r.get("enabled") or 0) and r.get("symbol")
+        ]
         if not batch:
-            return {"ok": True, "has_batch": False, "batch": None}
-        return {"ok": True, "has_batch": True, "batch": batch}
+            return {
+                "ok": True,
+                "has_batch": False,
+                "batch": None,
+                "daily_core_symbols": daily_core_symbols,
+            }
+        return {
+            "ok": True,
+            "has_batch": True,
+            "batch": batch,
+            "daily_core_symbols": daily_core_symbols,
+        }
     except sqlite3.OperationalError:
-        return {"ok": True, "has_batch": False, "batch": None}
+        return {"ok": True, "has_batch": False, "batch": None, "daily_core_symbols": []}
     finally:
         conn.close()
 
@@ -923,7 +998,7 @@ async def get_signals(profile_id: Optional[int] = None):
 
 @router.get("/daily-optimize/latest")
 async def get_daily_optimize_latest():
-    """最近一次每日全市场寻优批次（含 23 标的明细）。"""
+    """最近一次每日核心寻优批次（moss_daily_core_symbols，默认 25 标的）。"""
     from moss_quant.daily_optimize_service import (
         get_latest_daily_batch,
         reconcile_stale_daily_batches,

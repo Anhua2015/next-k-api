@@ -185,6 +185,20 @@ def migrate_moss_tables(c: sqlite3.Cursor) -> None:
     c.execute(
         "CREATE INDEX IF NOT EXISTS ix_moss_mcap_items_batch ON moss_mcap_scan_items(batch_id)"
     )
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS moss_daily_core_symbols (
+        symbol TEXT PRIMARY KEY,
+        base TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        note TEXT,
+        updated_at_utc TEXT NOT NULL
+    )"""
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS ix_moss_daily_core_enabled ON moss_daily_core_symbols(enabled, sort_order)"
+    )
+    seed_moss_daily_core_symbols(c)
     _ensure_profile_source_column(c)
 
 
@@ -194,6 +208,133 @@ def _ensure_profile_source_column(c: sqlite3.Cursor) -> None:
         c.execute(
             "ALTER TABLE moss_profiles ADD COLUMN profile_source TEXT NOT NULL DEFAULT 'manual'"
         )
+
+
+def seed_moss_daily_core_symbols(c: sqlite3.Cursor) -> None:
+    """写入每日核心币（INSERT OR IGNORE，不覆盖已有行；缺行自动补 ICP/TON 等）。"""
+    from moss_quant.universe import MOSS_DAILY_CORE_BASES, base_to_binance_symbol
+
+    now = _utc_now()
+    for i, base in enumerate(MOSS_DAILY_CORE_BASES):
+        sym = base_to_binance_symbol(base)
+        if not sym:
+            continue
+        c.execute(
+            """INSERT OR IGNORE INTO moss_daily_core_symbols(
+                   symbol, base, sort_order, enabled, note, updated_at_utc)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                sym,
+                base,
+                i + 1,
+                1,
+                "daily_core",
+                now,
+            ),
+        )
+
+
+def list_daily_core_bases(conn: sqlite3.Connection) -> List[str]:
+    """enabled=1 的每日核心 base 列表（按 sort_order）。"""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT base FROM moss_daily_core_symbols
+           WHERE enabled = 1
+           ORDER BY sort_order ASC, symbol ASC"""
+    ).fetchall()
+    bases = [str(r["base"]).upper() for r in rows if r["base"]]
+    if bases:
+        return bases
+    from moss_quant.universe import MOSS_DAILY_CORE_BASES
+
+    return list(MOSS_DAILY_CORE_BASES)
+
+
+def daily_core_symbol_set(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(r["symbol"]).upper()
+        for r in list_daily_core_symbols(conn)
+        if r.get("symbol")
+    }
+
+
+def add_symbol_to_daily_core(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    note: str = "from_mcap_scan",
+) -> Dict[str, Any]:
+    """将标的加入 moss_daily_core_symbols（每日寻优必扫表）。"""
+    from moss_quant.universe import base_to_binance_symbol, symbol_to_base
+
+    from watchlist_symbols import filter_symbols_to_binance_usdt_perps
+
+    sym = base_to_binance_symbol(str(symbol or "").strip().upper())
+    if not sym:
+        raise ValueError("invalid_symbol")
+    if not filter_symbols_to_binance_usdt_perps([sym]):
+        raise ValueError("symbol_not_on_binance_perp")
+    base = symbol_to_base(sym)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT symbol, enabled FROM moss_daily_core_symbols WHERE symbol=?",
+        (sym,),
+    ).fetchone()
+    now = _utc_now()
+    if row:
+        if int(row["enabled"] or 0):
+            return {
+                "ok": True,
+                "symbol": sym,
+                "base": base,
+                "added": False,
+                "already_in_daily_core": True,
+            }
+        conn.execute(
+            """UPDATE moss_daily_core_symbols
+               SET enabled=1, note=?, updated_at_utc=?
+               WHERE symbol=?""",
+            (note, now, sym),
+        )
+        conn.commit()
+        return {
+            "ok": True,
+            "symbol": sym,
+            "base": base,
+            "added": True,
+            "re_enabled": True,
+        }
+    max_order = int(
+        conn.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) FROM moss_daily_core_symbols"
+        ).fetchone()[0]
+        or 0
+    )
+    conn.execute(
+        """INSERT INTO moss_daily_core_symbols(
+               symbol, base, sort_order, enabled, note, updated_at_utc)
+           VALUES (?,?,?,?,?,?)""",
+        (sym, base, max_order + 1, 1, note, now),
+    )
+    conn.commit()
+    return {
+        "ok": True,
+        "symbol": sym,
+        "base": base,
+        "added": True,
+        "sort_order": max_order + 1,
+    }
+
+
+def list_daily_core_symbols(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT symbol, base, sort_order, enabled, note, updated_at_utc
+           FROM moss_daily_core_symbols
+           WHERE enabled = 1
+           ORDER BY sort_order ASC, symbol ASC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 DAILY_PROFILE_SOURCE = "daily_auto"  # 历史遗留；新逻辑不再自动创建

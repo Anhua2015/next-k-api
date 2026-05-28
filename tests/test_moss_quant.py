@@ -557,6 +557,32 @@ class TestMossQuant(unittest.TestCase):
         self.assertAlmostEqual(json.loads(row[1])["entry_threshold"], 0.44)
         self.assertEqual(row[2], 0)
 
+    def test_mcap_candidates_exclude_symbol_added_to_daily_core_db(self):
+        import sqlite3
+        from unittest.mock import patch
+
+        from moss_quant.binance_mcap_universe import build_mcap_scan_candidates
+        from moss_quant.db import add_symbol_to_daily_core, migrate_moss_tables
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        add_symbol_to_daily_core(conn, "RENDERUSDT", note="test")
+        mcap = {
+            "RENDER": 5e9,
+            "BTC": 1e12,
+            "ETH": 4e11,
+            "SOL": 8e10,
+        }
+        with patch("accumulation_radar.init_db", return_value=conn):
+            candidates = build_mcap_scan_candidates(
+                mcap_limit=10, mcap_map=mcap
+            )
+        bases = {c["base"] for c in candidates}
+        syms = {c["symbol"] for c in candidates}
+        self.assertNotIn("RENDER", bases)
+        self.assertNotIn("RENDERUSDT", syms)
+
     def test_build_mcap_scan_candidates_excludes_daily_and_stables(self):
         from moss_quant.binance_mcap_universe import build_mcap_scan_candidates
         from moss_quant.universe import list_universe
@@ -616,12 +642,92 @@ class TestMossQuant(unittest.TestCase):
         self.assertEqual(kline_request_weight(1500), 10)
         self.assertEqual(kline_request_weight(100), 1)
 
-    def test_universe_includes_new_alts(self):
-        from moss_quant.universe import list_universe
+    def test_universe_is_daily_core_25_by_default(self):
+        from moss_quant.universe import MOSS_DAILY_CORE_BASES, list_universe
 
         syms = {u["base"] for u in list_universe()}
-        for base in ("TON", "PEPE", "ENA", "OP", "SUI"):
+        self.assertEqual(len(syms), len(MOSS_DAILY_CORE_BASES))
+        self.assertEqual(len(MOSS_DAILY_CORE_BASES), 25)
+        for base in ("BTC", "ETH", "HYPE", "ARB", "SUI", "ICP", "TON"):
             self.assertIn(base, syms, msg=f"missing {base}")
+        for base in ("PEPE",):
+            self.assertNotIn(base, syms, msg=f"extended {base} should be excluded")
+
+    def test_top_qualified_mcap_items_filters_and_limits(self):
+        from moss_quant.mcap_scan_service import top_qualified_mcap_items
+
+        items = [
+            {
+                "symbol": "AAAUSDT",
+                "score": 10,
+                "summary": {
+                    "total_return": 0.2,
+                    "total_trades": 10,
+                    "max_drawdown": 0.1,
+                    "blowup_count": 0,
+                    "auto_enabled": True,
+                },
+            },
+            {
+                "symbol": "BBBUSDT",
+                "score": 20,
+                "summary": {
+                    "total_return": -0.1,
+                    "total_trades": 10,
+                    "max_drawdown": 0.1,
+                    "blowup_count": 0,
+                    "auto_enabled": False,
+                },
+            },
+            {
+                "symbol": "CCCUSDT",
+                "score": 5,
+                "summary": {
+                    "total_return": 0.5,
+                    "total_trades": 12,
+                    "max_drawdown": 0.2,
+                    "blowup_count": 0,
+                },
+            },
+        ]
+        top = top_qualified_mcap_items(items, 15)
+        self.assertEqual(len(top), 2)
+        self.assertEqual(top[0]["symbol"], "AAAUSDT")
+        self.assertEqual(top[1]["symbol"], "CCCUSDT")
+
+    def test_add_symbol_to_daily_core(self):
+        import sqlite3
+
+        from moss_quant.db import (
+            add_symbol_to_daily_core,
+            list_daily_core_symbols,
+            migrate_moss_tables,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        out = add_symbol_to_daily_core(conn, "RENDERUSDT", note="test")
+        self.assertTrue(out["added"])
+        rows = list_daily_core_symbols(conn)
+        syms = {r["symbol"] for r in rows if int(r.get("enabled") or 0)}
+        self.assertIn("RENDERUSDT", syms)
+        out2 = add_symbol_to_daily_core(conn, "RENDERUSDT")
+        self.assertFalse(out2.get("added"))
+        self.assertTrue(out2.get("already_in_daily_core"))
+
+    def test_daily_core_symbols_table_seeded(self):
+        import sqlite3
+
+        from moss_quant.db import list_daily_core_bases, migrate_moss_tables
+        from moss_quant.universe import MOSS_DAILY_CORE_BASES
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        bases = list_daily_core_bases(conn)
+        self.assertEqual(len(bases), len(MOSS_DAILY_CORE_BASES))
+        self.assertEqual(set(bases), set(MOSS_DAILY_CORE_BASES))
 
     def test_daily_optimize_defaults_on(self):
         from moss_quant import config as cfg
