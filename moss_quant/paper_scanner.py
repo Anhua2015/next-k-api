@@ -169,6 +169,10 @@ def _protocol_position_notional(pos: Dict[str, Any]) -> float:
     return abs(qty * entry)
 
 
+def can_send_live_open(sender: Any, live_opens_allowed: bool) -> bool:
+    return sender is None or bool(live_opens_allowed)
+
+
 def fetch_open_positions_map(conn: sqlite3.Connection) -> Dict[int, Dict[str, Any]]:
     """profile_id → 当前未平仓纸面单（每 profile 仅最新一条）。"""
     conn.row_factory = sqlite3.Row
@@ -813,35 +817,40 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                         and pnl_pct > params.rolling_trigger_pct * 100
                     ):
                         roll_notional = notional * params.rolling_reinvest_pct
-                        sender = _get_sender()
-                        if sender:
-                            atr_series = compute_atr(df, 14)
-                            atr_val = float(atr_series.iloc[-1])
-                            if np.isnan(atr_val) or atr_val <= 0:
-                                atr_val = mark * 0.02
-                            sl_dist = params.sl_atr_mult * atr_val
-                            tp_dist = sl_dist * params.tp_rr_ratio
-                            roll_sl = mark - sl_dist if side == "LONG" else mark + sl_dist
-                            roll_tp = mark + tp_dist if side == "LONG" else mark - tp_dist
-                            sender.send_rolling(
-                                symbol=symbol,
-                                side=side,
-                                notional=roll_notional,
-                                profile_id=pid,
-                                play=profile.get("template", ""),
-                                sl_price=round(roll_sl, 6),
-                                tp_price=round(roll_tp, 6),
-                                rolling_count=roll_count + 1,
+                        if can_send_live_open(sender, live_opens_allowed):
+                            if sender:
+                                atr_series = compute_atr(df, 14)
+                                atr_val = float(atr_series.iloc[-1])
+                                if np.isnan(atr_val) or atr_val <= 0:
+                                    atr_val = mark * 0.02
+                                sl_dist = params.sl_atr_mult * atr_val
+                                tp_dist = sl_dist * params.tp_rr_ratio
+                                roll_sl = mark - sl_dist if side == "LONG" else mark + sl_dist
+                                roll_tp = mark + tp_dist if side == "LONG" else mark - tp_dist
+                                sender.send_rolling(
+                                    symbol=symbol,
+                                    side=side,
+                                    notional=roll_notional,
+                                    profile_id=pid,
+                                    play=profile.get("template", ""),
+                                    sl_price=round(roll_sl, 6),
+                                    tp_price=round(roll_tp, 6),
+                                    rolling_count=roll_count + 1,
+                                )
+                            meta["rolling_count"] = roll_count + 1
+                            conn.execute(
+                                "UPDATE moss_signals SET meta_json=? WHERE id=?",
+                                (json.dumps(meta), row["id"]),
                             )
-                        meta["rolling_count"] = roll_count + 1
-                        conn.execute(
-                            "UPDATE moss_signals SET meta_json=? WHERE id=?",
-                            (json.dumps(meta), row["id"]),
-                        )
-                        logger.info(
-                            "[moss] %s ROLLING #%s notional=%.2fU pnl%%=%.2f",
-                            label, roll_count + 1, roll_notional, pnl_pct,
-                        )
+                            logger.info(
+                                "[moss] %s ROLLING #%s notional=%.2fU pnl%%=%.2f",
+                                label, roll_count + 1, roll_notional, pnl_pct,
+                            )
+                        else:
+                            logger.warning(
+                                "[moss] %s rolling skipped: protocol truth unavailable",
+                                label,
+                            )
 
                 # 移动止损更新：周期性上移 SL 价格
                 if params.trailing_enabled:

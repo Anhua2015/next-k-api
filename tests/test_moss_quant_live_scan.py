@@ -17,6 +17,16 @@ def test_positions_map_prefers_protocol_profile_id():
     assert by_profile[4][0]["symbol"] == "ETHUSDT"
 
 
+def test_can_send_live_open_blocks_real_mode_when_protocol_truth_unavailable():
+    from moss_quant.paper_scanner import can_send_live_open
+
+    sender = object()
+
+    assert can_send_live_open(None, live_opens_allowed=False)
+    assert can_send_live_open(sender, live_opens_allowed=True)
+    assert not can_send_live_open(sender, live_opens_allowed=False)
+
+
 def test_mark_profile_open_signals_external_closed_only_open_positions():
     from moss_quant.db import (
         mark_profile_open_signals_external_closed,
