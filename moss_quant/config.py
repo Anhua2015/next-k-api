@@ -20,9 +20,21 @@ MOSS_QUANT_SCHEDULER_ENABLED = env_truthy("MOSS_QUANT_SCHEDULER_ENABLED", defaul
 MOSS_QUANT_SCAN_INTERVAL_MINUTES = max(
     1, int(os.getenv("MOSS_QUANT_SCAN_INTERVAL_MINUTES", "15") or 15)
 )
-MOSS_QUANT_DEFAULT_CAPITAL = max(
-    100.0, float(os.getenv("MOSS_QUANT_DEFAULT_CAPITAL", "10000") or 10000)
+MOSS_QUANT_PROFILE_CAPITAL = max(
+    100.0,
+    float(
+        os.getenv(
+            "MOSS_QUANT_PROFILE_CAPITAL",
+            os.getenv("MOSS_QUANT_DEFAULT_CAPITAL", "10000") or 10000,
+        )
+        or 10000
+    ),
 )
+MOSS_QUANT_WALLET_INITIAL = max(
+    100.0, float(os.getenv("MOSS_QUANT_WALLET_INITIAL", "100000") or 100000)
+)
+# 回测 / 寻优 / 单 bot 纸面 sizing 本金（与 MOSS_QUANT_PROFILE_CAPITAL 相同）
+MOSS_QUANT_DEFAULT_CAPITAL = MOSS_QUANT_PROFILE_CAPITAL
 MOSS_QUANT_SEGMENT_BARS = max(
     96, int(os.getenv("MOSS_QUANT_SEGMENT_BARS", "672") or 672)
 )

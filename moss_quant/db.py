@@ -202,6 +202,52 @@ def migrate_moss_tables(c: sqlite3.Cursor) -> None:
     _ensure_profile_source_column(c)
     _ensure_moss_wallet_table(c)
     _upgrade_profiles_spot_sizing(c)
+    _sync_capital_config(c)
+
+
+def _sync_capital_config(c: sqlite3.Cursor) -> None:
+    """全账户钱包初始（如 10 万）与各 Profile 算仓本金（如 1 万）对齐环境配置。"""
+    from moss_quant import config as cfg
+
+    wallet_initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
+    profile_initial = float(cfg.MOSS_QUANT_PROFILE_CAPITAL)
+    now = _utc_now()
+    try:
+        settled_all = float(
+            c.execute(
+                "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements"
+            ).fetchone()[0]
+            or 0
+        )
+    except sqlite3.OperationalError:
+        settled_all = 0.0
+    wallet_balance = wallet_initial + settled_all
+    c.execute(
+        """INSERT INTO moss_wallet(id, initial_capital_usdt, balance_usdt, updated_at_utc)
+           VALUES (1, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             initial_capital_usdt=excluded.initial_capital_usdt,
+             balance_usdt=excluded.balance_usdt,
+             updated_at_utc=excluded.updated_at_utc""",
+        (wallet_initial, wallet_balance, now),
+    )
+    try:
+        profile_rows = c.execute("SELECT id FROM moss_profiles").fetchall()
+    except sqlite3.OperationalError:
+        return
+    for (pid,) in profile_rows:
+        settled_p = float(
+            c.execute(
+                "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements WHERE profile_id = ?",
+                (int(pid),),
+            ).fetchone()[0]
+            or 0
+        )
+        c.execute(
+            """UPDATE moss_profiles SET virtual_equity_usdt=?, updated_at_utc=?
+               WHERE id=?""",
+            (round(profile_initial + settled_p, 4), now, int(pid)),
+        )
 
 
 def _upgrade_profiles_spot_sizing(c: sqlite3.Cursor) -> None:
@@ -240,7 +286,7 @@ def _ensure_moss_wallet_table(c: sqlite3.Cursor) -> None:
     )"""
     )
     row = c.execute("SELECT id FROM moss_wallet WHERE id = 1").fetchone()
-    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
     now = _utc_now()
     if not row:
         try:
@@ -417,16 +463,16 @@ def get_moss_wallet(
     row = conn.execute(
         "SELECT initial_capital_usdt, balance_usdt, updated_at_utc FROM moss_wallet WHERE id = 1"
     ).fetchone()
-    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
     if not row:
-        initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+        initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
         return {
             "initial_capital_usdt": initial,
             "balance_usdt": initial,
             "realized_pnl_usdt": 0.0,
             "updated_at_utc": _utc_now(),
         }
-    initial = float(row["initial_capital_usdt"] or cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(row["initial_capital_usdt"] or cfg.MOSS_QUANT_WALLET_INITIAL)
     settled = float(
         conn.execute("SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements").fetchone()[
             0
@@ -451,10 +497,10 @@ def get_moss_wallet(
 def profile_wallet_balance(
     conn: sqlite3.Connection, profile_id: int, *, sync: bool = True
 ) -> float:
-    """单 bot 钱包余额（原工程 wallet_balance）：初始资金 + 该 Profile 已实现盈亏。"""
+    """单 bot 钱包余额（原工程 wallet_balance）：Profile 初始 + 该 Profile 已实现盈亏。"""
     from moss_quant import config as cfg
 
-    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(cfg.MOSS_QUANT_PROFILE_CAPITAL)
     pid = int(profile_id)
     settled = float(
         conn.execute(
@@ -565,7 +611,14 @@ def reset_moss_wallet(conn: sqlite3.Connection) -> None:
     from moss_quant import config as cfg
 
     _ensure_moss_wallet_table(conn.cursor())
-    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
+    settled_all = float(
+        conn.execute(
+            "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements"
+        ).fetchone()[0]
+        or 0
+    )
+    balance = initial + settled_all
     now = _utc_now()
     conn.execute(
         """INSERT INTO moss_wallet(id, initial_capital_usdt, balance_usdt, updated_at_utc)
@@ -574,7 +627,7 @@ def reset_moss_wallet(conn: sqlite3.Connection) -> None:
              initial_capital_usdt=excluded.initial_capital_usdt,
              balance_usdt=excluded.balance_usdt,
              updated_at_utc=excluded.updated_at_utc""",
-        (initial, initial, now),
+        (initial, balance, now),
     )
 
 

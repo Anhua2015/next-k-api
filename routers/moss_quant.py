@@ -287,7 +287,7 @@ async def create_profile(body: ProfileCreate):
         )
         now = _utc_now()
         equity = float(
-            body.virtual_equity_usdt or cfg.MOSS_QUANT_DEFAULT_CAPITAL
+            body.virtual_equity_usdt or cfg.MOSS_QUANT_PROFILE_CAPITAL
         )
         cur = conn.execute(
             """INSERT INTO moss_profiles(
@@ -776,6 +776,7 @@ async def get_summary():
             "total_pnl_usdt": total_pnl,
             "wallet_initial_usdt": wallet_initial,
             "wallet_balance_usdt": wallet_balance,
+            "profile_capital_usdt": mq_cfg.MOSS_QUANT_PROFILE_CAPITAL,
             "per_profile": per_profile,
             "per_symbol": per_symbol,
             "open_by_profile": open_by_profile,
@@ -800,8 +801,9 @@ async def get_summary():
             "open_positions": 0,
             "settled_count": 0,
             "total_pnl_usdt": 0.0,
-            "wallet_initial_usdt": mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL,
-            "wallet_balance_usdt": mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL,
+            "wallet_initial_usdt": mq_cfg.MOSS_QUANT_WALLET_INITIAL,
+            "wallet_balance_usdt": mq_cfg.MOSS_QUANT_WALLET_INITIAL,
+            "profile_capital_usdt": mq_cfg.MOSS_QUANT_PROFILE_CAPITAL,
             "enabled_profiles": 0,
             "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
             "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,

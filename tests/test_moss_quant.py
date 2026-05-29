@@ -921,6 +921,35 @@ class TestMossQuant(unittest.TestCase):
         )
         conn.close()
 
+    def test_wallet_and_profile_capital_split(self):
+        import sqlite3
+
+        from moss_quant import config as cfg
+        from moss_quant.db import get_moss_wallet, migrate_moss_tables, profile_wallet_balance
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        wallet = get_moss_wallet(conn, reconcile=False)
+        self.assertAlmostEqual(
+            wallet["initial_capital_usdt"], float(cfg.MOSS_QUANT_WALLET_INITIAL), places=2
+        )
+        self.assertAlmostEqual(wallet["balance_usdt"], float(cfg.MOSS_QUANT_WALLET_INITIAL), places=2)
+        now = "2024-01-01T00:00:00Z"
+        conn.execute(
+            """INSERT INTO moss_profiles(
+                   id, name, symbol, template, enabled, initial_params_json,
+                   tactical_params_json, virtual_equity_usdt, created_at_utc, updated_at_utc)
+               VALUES (1, 't', 'BTCUSDT', 'balanced', 1, '{}', '{}', 10000, ?, ?)""",
+            (now, now),
+        )
+        conn.commit()
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        bal = profile_wallet_balance(conn, 1, sync=False)
+        self.assertAlmostEqual(bal, float(cfg.MOSS_QUANT_PROFILE_CAPITAL), places=2)
+        conn.close()
+
     def test_paper_sizing_profiles_independent_not_global_wallet(self):
         import sqlite3
 
@@ -952,7 +981,7 @@ class TestMossQuant(unittest.TestCase):
         conn.commit()
         sync_moss_wallet_from_settlements(conn)
         global_bal = get_moss_wallet(conn, reconcile=False)["balance_usdt"]
-        self.assertAlmostEqual(global_bal, 15000.0, places=2)
+        self.assertAlmostEqual(global_bal, 105000.0, places=2)
         params = {
             "base_leverage": 1,
             "max_leverage": 1,

@@ -508,7 +508,7 @@ def import_profile_from_daily(
     tactical = item.get("tactical_params") or {}
     initial = build_initial_params(template=template)
     now = _utc_now()
-    equity = float(mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    equity = float(mq_cfg.MOSS_QUANT_PROFILE_CAPITAL)
     prof_name = (name or "").strip() or ("from-daily-" + sym)
 
     existing = get_profile_by_symbol(conn, sym)
