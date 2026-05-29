@@ -520,6 +520,26 @@ def _notional(
     return max(n, 10.0)
 
 
+def live_notional_from_account(
+    *,
+    wallet_balance_usdt: float,
+    enabled_profile_count: int,
+    protocol_leverage: float,
+    params: Dict[str, Any],
+) -> float:
+    if wallet_balance_usdt <= 0:
+        raise ValueError("wallet_balance_usdt must be positive")
+    if enabled_profile_count <= 0:
+        raise ValueError("enabled_profile_count must be positive")
+    if protocol_leverage <= 0:
+        raise ValueError("protocol_leverage must be positive")
+    per_robot_equity = float(wallet_balance_usdt) / int(enabled_profile_count)
+    risk = float(params.get("risk_per_trade", 0.1))
+    max_pct = float(params.get("max_position_pct", 0.5))
+    margin = min(per_robot_equity * risk, per_robot_equity * max_pct)
+    return round(max(margin * float(protocol_leverage), 0.0), 2)
+
+
 def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
     conn.row_factory = sqlite3.Row
     profiles = list_profiles_for_paper_scan(conn)
