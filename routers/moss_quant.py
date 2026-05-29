@@ -760,12 +760,17 @@ async def get_summary():
 
         running = False
         mcap_running = False
+        daily_pools: dict = {}
         try:
-            from moss_quant.daily_optimize_service import is_daily_optimize_in_progress
+            from moss_quant.daily_optimize_service import (
+                is_daily_optimize_in_progress,
+                summarize_latest_daily_pools,
+            )
             from moss_quant.mcap_scan_service import is_mcap_scan_in_progress
 
             running = is_daily_optimize_in_progress(conn)
             mcap_running = is_mcap_scan_in_progress(conn)
+            daily_pools = summarize_latest_daily_pools(conn)
         except Exception:
             pass
         return {
@@ -791,6 +796,18 @@ async def get_summary():
             "daily_optimize_running": running,
             "mcap_scan_running": mcap_running,
             "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
+            "optimize_policy": {
+                "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
+                "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
+                "min_train_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES,
+                "min_val_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_VAL_TRADES,
+                "max_train_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_TRAIN_DRAWDOWN,
+                "max_val_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_VAL_DRAWDOWN,
+                "validation_top_k": mq_cfg.MOSS_QUANT_OPTIMIZE_VALIDATION_TOP_K,
+                "full_risk_slots": mq_cfg.MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS,
+                "mcap_observation_days": mq_cfg.MOSS_QUANT_MCAP_OBSERVATION_DAYS,
+            },
+            "daily_optimize_pools": daily_pools,
         }
     except sqlite3.OperationalError:
         from moss_quant import config as mq_cfg
@@ -815,6 +832,11 @@ async def get_summary():
             "daily_optimize_running": False,
             "mcap_scan_running": False,
             "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
+            "optimize_policy": {
+                "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
+                "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
+            },
+            "daily_optimize_pools": {},
         }
     finally:
         conn.close()

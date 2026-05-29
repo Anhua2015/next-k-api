@@ -415,7 +415,18 @@ class TestMossQuant(unittest.TestCase):
                 "HYPEUSDT",
                 "momentum",
                 json.dumps({"entry_threshold": 0.48, "sl_atr_mult": 2.5}),
-                json.dumps({"total_return": 0.5, "total_trades": 20}),
+                json.dumps(
+                    {
+                        "total_return": 0.5,
+                        "total_trades": 20,
+                        "max_drawdown": -0.08,
+                        "blowup_count": 0,
+                        "win_rate": 0.55,
+                        "validation_passed": True,
+                        "validation_reason": "验证通过",
+                        "val_return": 0.1,
+                    }
+                ),
                 0.5,
             ),
         )
@@ -429,7 +440,17 @@ class TestMossQuant(unittest.TestCase):
                 "BTCUSDT",
                 "momentum",
                 json.dumps({"entry_threshold": 0.48, "sl_atr_mult": 2.5}),
-                json.dumps({"total_return": 0.2, "total_trades": 12}),
+                json.dumps(
+                    {
+                        "total_return": 0.2,
+                        "total_trades": 12,
+                        "max_drawdown": -0.1,
+                        "blowup_count": 0,
+                        "win_rate": 0.5,
+                        "validation_passed": True,
+                        "validation_reason": "验证通过",
+                    }
+                ),
                 0.2,
             ),
         )
@@ -516,7 +537,17 @@ class TestMossQuant(unittest.TestCase):
                 "SOLUSDT",
                 "trend",
                 json.dumps({"entry_threshold": 0.44}),
-                json.dumps({"total_return": 0.2, "total_trades": 10}),
+                json.dumps(
+                    {
+                        "total_return": 0.2,
+                        "total_trades": 10,
+                        "max_drawdown": -0.1,
+                        "blowup_count": 0,
+                        "win_rate": 0.5,
+                        "validation_passed": True,
+                        "validation_reason": "验证通过",
+                    }
+                ),
                 0.2,
             ),
         )
@@ -1016,6 +1047,87 @@ class TestMossQuant(unittest.TestCase):
         with self.assertRaises(ValueError):
             delete_profile(conn, 1)
         conn.close()
+
+    def test_optimize_policy_composite_and_pool(self):
+        from moss_quant.optimize_policy import (
+            can_sync_profile_params,
+            classify_pool_tier,
+            composite_optimize_score,
+            enrich_summary,
+            hard_reject_reason,
+        )
+
+        good = {
+            "total_return": 0.12,
+            "sharpe": 1.2,
+            "max_drawdown": -0.08,
+            "total_trades": 10,
+            "blowup_count": 0,
+            "validation_passed": True,
+            "validation_reason": "验证通过",
+        }
+        self.assertIsNone(hard_reject_reason(good))
+        self.assertGreater(composite_optimize_score(good), 0)
+        enriched = enrich_summary(good)
+        self.assertEqual(enriched.get("pool_tier"), "A")
+        self.assertTrue(can_sync_profile_params(enriched))
+
+        weak_val = {**good, "validation_passed": False, "validation_reason": "验证收益≤0"}
+        tier_b = classify_pool_tier(weak_val)
+        self.assertEqual(tier_b["pool_tier"], "B")
+        self.assertFalse(can_sync_profile_params(enrich_summary(weak_val)))
+
+        bad = {**good, "total_return": -0.01}
+        self.assertIsNotNone(hard_reject_reason(bad))
+        self.assertEqual(composite_optimize_score(bad), -999.0)
+
+    def test_optimize_train_val_split(self):
+        import pandas as pd
+
+        from moss_quant.optimize_policy import split_train_validation_df
+
+        n = 500
+        df = pd.DataFrame({"timestamp": range(n), "close": [1.0] * n})
+        train, val = split_train_validation_df(df, train_ratio=0.7)
+        self.assertGreater(len(train), 0)
+        self.assertGreater(len(val), 0)
+        self.assertEqual(len(train) + len(val), n)
+
+    def test_optimize_trailing_in_tactical_params(self):
+        from moss_quant.optimize_service import _run_one, _trailing_for_template
+        import pandas as pd
+
+        from moss_quant.core.regime import classify_regime
+
+        self.assertTrue(_trailing_for_template("momentum"))
+        self.assertFalse(_trailing_for_template("mean_revert"))
+        n = 120
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=n, freq="15min"),
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.0 + (i % 5) * 0.1 for i in range(n)],
+                "volume": [1000.0] * n,
+            }
+        )
+        regime = classify_regime(df)
+        row = _run_one(
+            df,
+            regime,
+            symbol="BTCUSDT",
+            template="momentum",
+            tactical={
+                "entry_threshold": 0.48,
+                "sl_atr_mult": 2.5,
+                "tp_rr_ratio": 2.5,
+                "exit_threshold": 0.12,
+                "regime_sensitivity": 0.55,
+            },
+            capital=10000.0,
+        )
+        self.assertTrue(row.get("tactical_params", {}).get("trailing_enabled"))
 
 
 if __name__ == "__main__":
