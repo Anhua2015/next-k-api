@@ -200,6 +200,185 @@ def migrate_moss_tables(c: sqlite3.Cursor) -> None:
     )
     seed_moss_daily_core_symbols(c)
     _ensure_profile_source_column(c)
+    _ensure_moss_wallet_table(c)
+
+
+def _ensure_moss_wallet_table(c: sqlite3.Cursor) -> None:
+    from moss_quant import config as cfg
+
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS moss_wallet (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        initial_capital_usdt REAL NOT NULL,
+        balance_usdt REAL NOT NULL,
+        updated_at_utc TEXT NOT NULL
+    )"""
+    )
+    row = c.execute("SELECT id FROM moss_wallet WHERE id = 1").fetchone()
+    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    now = _utc_now()
+    if not row:
+        try:
+            settled = float(
+                c.execute(
+                    "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements"
+                ).fetchone()[0]
+                or 0
+            )
+        except sqlite3.OperationalError:
+            settled = 0.0
+        balance = initial + settled
+        c.execute(
+            """INSERT INTO moss_wallet(id, initial_capital_usdt, balance_usdt, updated_at_utc)
+               VALUES (1, ?, ?, ?)""",
+            (initial, balance, now),
+        )
+
+
+def get_moss_wallet(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """全局纸面钱包（与 Profile 解耦）；余额 = 初始 + 全部已结算盈亏。"""
+    from moss_quant import config as cfg
+
+    _ensure_moss_wallet_table(conn.cursor())
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT initial_capital_usdt, balance_usdt, updated_at_utc FROM moss_wallet WHERE id = 1"
+    ).fetchone()
+    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    if not row:
+        initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+        return {
+            "initial_capital_usdt": initial,
+            "balance_usdt": initial,
+            "realized_pnl_usdt": 0.0,
+            "updated_at_utc": _utc_now(),
+        }
+    initial = float(row["initial_capital_usdt"] or cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    settled = float(
+        conn.execute("SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements").fetchone()[
+            0
+        ]
+        or 0
+    )
+    balance = initial + settled
+    stored = float(row["balance_usdt"] or balance)
+    if abs(stored - balance) > 0.01:
+        conn.execute(
+            "UPDATE moss_wallet SET balance_usdt=?, updated_at_utc=? WHERE id=1",
+            (balance, _utc_now()),
+        )
+    return {
+        "initial_capital_usdt": round(initial, 4),
+        "balance_usdt": round(balance, 4),
+        "realized_pnl_usdt": round(settled, 4),
+        "updated_at_utc": str(row["updated_at_utc"] or _utc_now()),
+    }
+
+
+def wallet_equity_for_sizing(conn: sqlite3.Connection) -> float:
+    """开仓名义仓位按全局钱包余额计算。"""
+    return float(get_moss_wallet(conn)["balance_usdt"])
+
+
+def sync_moss_wallet_from_settlements(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """按全部结算记录重算钱包余额（平仓后调用；删除 Profile 不影响已实现）。"""
+    _ensure_moss_wallet_table(conn.cursor())
+    wallet = get_moss_wallet(conn)
+    now = _utc_now()
+    conn.execute(
+        "UPDATE moss_wallet SET balance_usdt=?, updated_at_utc=? WHERE id=1",
+        (wallet["balance_usdt"], now),
+    )
+    return wallet
+
+
+def list_settlement_stats_by_profile(
+    conn: sqlite3.Connection,
+) -> List[Dict[str, Any]]:
+    """按 Profile 汇总已结算盈亏（删 Profile 后历史结算仍保留 profile_id）。"""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT profile_id, symbol,
+                  COUNT(*) AS settled_count,
+                  COALESCE(SUM(pnl_usdt), 0) AS total_pnl_usdt
+           FROM moss_settlements
+           GROUP BY profile_id, symbol
+           ORDER BY profile_id ASC"""
+    ).fetchall()
+    return [
+        {
+            "profile_id": int(r["profile_id"]),
+            "symbol": str(r["symbol"] or "").upper(),
+            "settled_count": int(r["settled_count"] or 0),
+            "total_pnl_usdt": round(float(r["total_pnl_usdt"] or 0), 4),
+        }
+        for r in rows
+    ]
+
+
+def list_open_unrealized_by_profile(
+    conn: sqlite3.Connection,
+) -> List[Dict[str, Any]]:
+    """各 Profile 当前持仓浮盈（未平仓）。"""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT profile_id, symbol,
+                  COUNT(*) AS open_count,
+                  COALESCE(SUM(unrealized_pnl_usdt), 0) AS unrealized_pnl_usdt
+           FROM moss_signals
+           WHERE outcome IS NULL AND side IN ('LONG', 'SHORT')
+           GROUP BY profile_id, symbol
+           ORDER BY profile_id ASC"""
+    ).fetchall()
+    return [
+        {
+            "profile_id": int(r["profile_id"]),
+            "symbol": str(r["symbol"] or "").upper(),
+            "open_count": int(r["open_count"] or 0),
+            "unrealized_pnl_usdt": round(float(r["unrealized_pnl_usdt"] or 0), 4),
+        }
+        for r in rows
+    ]
+
+
+def list_settlement_stats_by_symbol(
+    conn: sqlite3.Connection,
+) -> List[Dict[str, Any]]:
+    """按标的汇总已结算盈亏。"""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT symbol,
+                  COUNT(*) AS settled_count,
+                  COALESCE(SUM(pnl_usdt), 0) AS total_pnl_usdt
+           FROM moss_settlements
+           GROUP BY symbol
+           ORDER BY symbol ASC"""
+    ).fetchall()
+    return [
+        {
+            "symbol": str(r["symbol"] or "").upper(),
+            "settled_count": int(r["settled_count"] or 0),
+            "total_pnl_usdt": round(float(r["total_pnl_usdt"] or 0), 4),
+        }
+        for r in rows
+    ]
+
+
+def reset_moss_wallet(conn: sqlite3.Connection) -> None:
+    from moss_quant import config as cfg
+
+    _ensure_moss_wallet_table(conn.cursor())
+    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    now = _utc_now()
+    conn.execute(
+        """INSERT INTO moss_wallet(id, initial_capital_usdt, balance_usdt, updated_at_utc)
+           VALUES (1, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             initial_capital_usdt=excluded.initial_capital_usdt,
+             balance_usdt=excluded.balance_usdt,
+             updated_at_utc=excluded.updated_at_utc""",
+        (initial, initial, now),
+    )
 
 
 def _ensure_profile_source_column(c: sqlite3.Cursor) -> None:
@@ -485,7 +664,7 @@ def delete_profile(conn: sqlite3.Connection, profile_id: int) -> Optional[Dict[s
             or 0
         ),
     }
-    conn.execute("DELETE FROM moss_settlements WHERE profile_id = ?", (pid,))
+    # 保留 moss_settlements：全局已实现盈亏不随 Profile 删除而减少
     conn.execute("DELETE FROM moss_signals WHERE profile_id = ?", (pid,))
     conn.execute("DELETE FROM moss_backtest_runs WHERE profile_id = ?", (pid,))
     conn.execute("DELETE FROM moss_profiles WHERE id = ?", (pid,))

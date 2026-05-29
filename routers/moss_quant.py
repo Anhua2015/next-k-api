@@ -724,10 +724,20 @@ async def get_summary():
         settled = int(
             cur.execute("SELECT COUNT(*) FROM moss_settlements").fetchone()[0] or 0
         )
-        pnl_row = cur.execute(
-            "SELECT COALESCE(SUM(pnl_usdt),0) FROM moss_settlements"
-        ).fetchone()
-        total_pnl = float(pnl_row[0] or 0)
+        from moss_quant.db import (
+            get_moss_wallet,
+            list_open_unrealized_by_profile,
+            list_settlement_stats_by_profile,
+            list_settlement_stats_by_symbol,
+        )
+
+        wallet = get_moss_wallet(conn)
+        total_pnl = float(wallet["realized_pnl_usdt"])
+        wallet_balance = float(wallet["balance_usdt"])
+        wallet_initial = float(wallet["initial_capital_usdt"])
+        per_profile = list_settlement_stats_by_profile(conn)
+        per_symbol = list_settlement_stats_by_symbol(conn)
+        open_by_profile = list_open_unrealized_by_profile(conn)
         profiles = int(
             cur.execute("SELECT COUNT(*) FROM moss_profiles WHERE enabled=1").fetchone()[0]
             or 0
@@ -750,6 +760,11 @@ async def get_summary():
             "open_positions": open_n,
             "settled_count": settled,
             "total_pnl_usdt": total_pnl,
+            "wallet_initial_usdt": wallet_initial,
+            "wallet_balance_usdt": wallet_balance,
+            "per_profile": per_profile,
+            "per_symbol": per_symbol,
+            "open_by_profile": open_by_profile,
             "enabled_profiles": profiles,
             "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
             "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,
@@ -771,6 +786,8 @@ async def get_summary():
             "open_positions": 0,
             "settled_count": 0,
             "total_pnl_usdt": 0.0,
+            "wallet_initial_usdt": mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL,
+            "wallet_balance_usdt": mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL,
             "enabled_profiles": 0,
             "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
             "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,
@@ -1119,6 +1136,9 @@ async def clear_db(_: None = Depends(require_maintenance_token)):
                 deleted[key] = int(n or 0)
             except sqlite3.OperationalError:
                 deleted[key] = 0
+        from moss_quant.db import reset_moss_wallet
+
+        reset_moss_wallet(conn)
         conn.commit()
     finally:
         conn.close()
