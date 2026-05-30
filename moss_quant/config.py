@@ -45,7 +45,7 @@ MOSS_QUANT_KLINE_LIMIT = max(
     200, int(os.getenv("MOSS_QUANT_KLINE_LIMIT", "1500") or 1500)
 )
 MOSS_QUANT_MAX_ACTIVE_PROFILES = max(
-    1, int(os.getenv("MOSS_QUANT_MAX_ACTIVE_PROFILES", "25") or 25)
+    1, int(os.getenv("MOSS_QUANT_MAX_ACTIVE_PROFILES", "5") or 5)
 )
 MOSS_QUANT_EXTENDED_UNIVERSE = env_truthy(
     "MOSS_QUANT_EXTENDED_UNIVERSE", default=False
@@ -198,6 +198,42 @@ MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC = max(
     60,
     int(os.getenv("MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC", "1200") or 1200),
 )
+
+# --- 纸面池子治理：每日寻优后自动停/启 Profile（防抖 + TopN 补位）---
+MOSS_QUANT_POOL_GOVERNANCE_ENABLED = env_truthy(
+    "MOSS_QUANT_POOL_GOVERNANCE_ENABLED", default=True
+)
+MOSS_QUANT_POOL_AUTO_DISABLE = env_truthy("MOSS_QUANT_POOL_AUTO_DISABLE", default=True)
+MOSS_QUANT_POOL_AUTO_ENABLE = env_truthy("MOSS_QUANT_POOL_AUTO_ENABLE", default=True)
+MOSS_QUANT_POOL_DEGRADE_STREAK_B = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_DEGRADE_STREAK_B", "2") or 2)
+)
+MOSS_QUANT_POOL_DEGRADE_STREAK_C = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_DEGRADE_STREAK_C", "1") or 1)
+)
+MOSS_QUANT_POOL_UPGRADE_STREAK = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_UPGRADE_STREAK", "2") or 2)
+)
+MOSS_QUANT_POOL_AUTO_ADD_TOP_N = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_AUTO_ADD_TOP_N", "5") or 5)
+)
+MOSS_QUANT_POOL_MAX_AUTO_ENABLED = max(
+    1,
+    int(
+        os.getenv(
+            "MOSS_QUANT_POOL_MAX_AUTO_ENABLED",
+            os.getenv("MOSS_QUANT_MAX_ACTIVE_PROFILES", "5") or 5,
+        )
+        or 5
+    ),
+)
+MOSS_QUANT_POOL_RESPECT_MANUAL_DISABLE = env_truthy(
+    "MOSS_QUANT_POOL_RESPECT_MANUAL_DISABLE", default=True
+)
+
+
+def pool_governance_enabled() -> bool:
+    return MOSS_QUANT_POOL_GOVERNANCE_ENABLED and MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES
 
 
 def daily_optimize_scheduler_enabled() -> bool:

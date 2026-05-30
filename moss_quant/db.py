@@ -200,6 +200,8 @@ def migrate_moss_tables(c: sqlite3.Cursor) -> None:
     )
     seed_moss_daily_core_symbols(c)
     _ensure_profile_source_column(c)
+    _ensure_governance_columns(c)
+    _ensure_pool_governance_tables(c)
     _ensure_moss_wallet_table(c)
     _upgrade_profiles_spot_sizing(c)
     _upgrade_profiles_trailing_off(c)
@@ -683,6 +685,46 @@ def _ensure_profile_source_column(c: sqlite3.Cursor) -> None:
         )
 
 
+def _ensure_governance_columns(c: sqlite3.Cursor) -> None:
+    cols = {row[1] for row in c.execute("PRAGMA table_info(moss_profiles)").fetchall()}
+    if "governance_manual_lock" not in cols:
+        c.execute(
+            "ALTER TABLE moss_profiles ADD COLUMN governance_manual_lock INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _ensure_pool_governance_tables(c: sqlite3.Cursor) -> None:
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS moss_symbol_pool_streak (
+        symbol TEXT PRIMARY KEY,
+        last_pool_tier TEXT,
+        last_batch_id INTEGER,
+        degrade_streak INTEGER NOT NULL DEFAULT 0,
+        upgrade_streak INTEGER NOT NULL DEFAULT 0,
+        last_action TEXT,
+        last_action_at_utc TEXT,
+        updated_at_utc TEXT NOT NULL
+    )"""
+    )
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS moss_pool_governance_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL,
+        symbol TEXT NOT NULL,
+        action TEXT NOT NULL,
+        pool_tier TEXT,
+        degrade_streak INTEGER,
+        upgrade_streak INTEGER,
+        profile_id INTEGER,
+        detail_json TEXT,
+        created_at_utc TEXT NOT NULL
+    )"""
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS ix_moss_pool_gov_log_batch ON moss_pool_governance_log(batch_id)"
+    )
+
+
 def seed_moss_daily_core_symbols(c: sqlite3.Cursor) -> None:
     """写入每日核心币（INSERT OR IGNORE，不覆盖已有行；缺行自动补 ICP/TON 等）。"""
     from moss_quant.universe import MOSS_DAILY_CORE_BASES, base_to_binance_symbol
@@ -812,6 +854,7 @@ def list_daily_core_symbols(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
 
 DAILY_PROFILE_SOURCE = "daily_auto"  # 历史遗留；新逻辑不再自动创建
 FROM_DAILY_PROFILE_SOURCE = "from_daily"
+GOVERNANCE_PROFILE_SOURCE = "governance_auto"
 MANUAL_PROFILE_SOURCE = "manual"
 DAILY_PROFILE_NAME_PREFIX = "daily-"
 
@@ -837,10 +880,141 @@ def row_to_profile(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
     d["enabled"] = bool(d.get("enabled"))
     d["evolution_enabled"] = bool(d.get("evolution_enabled"))
+    d["governance_manual_lock"] = bool(d.get("governance_manual_lock"))
     d["profile_source"] = str(d.get("profile_source") or "manual")
     d["initial_params"] = json.loads(d.pop("initial_params_json") or "{}")
     d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
     return d
+
+
+def get_symbol_pool_streak(
+    conn: sqlite3.Connection, symbol: str
+) -> Optional[Dict[str, Any]]:
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM moss_symbol_pool_streak WHERE symbol = ?", (sym,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_symbol_pool_streak(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    last_pool_tier: str,
+    last_batch_id: int,
+    degrade_streak: int,
+    upgrade_streak: int,
+    last_action: Optional[str] = None,
+    last_action_at_utc: Optional[str] = None,
+    commit: bool = True,
+) -> Dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    now = _utc_now()
+    conn.execute(
+        """INSERT INTO moss_symbol_pool_streak(
+               symbol, last_pool_tier, last_batch_id,
+               degrade_streak, upgrade_streak,
+               last_action, last_action_at_utc, updated_at_utc)
+           VALUES (?,?,?,?,?,?,?,?)
+           ON CONFLICT(symbol) DO UPDATE SET
+               last_pool_tier=excluded.last_pool_tier,
+               last_batch_id=excluded.last_batch_id,
+               degrade_streak=excluded.degrade_streak,
+               upgrade_streak=excluded.upgrade_streak,
+               last_action=COALESCE(excluded.last_action, moss_symbol_pool_streak.last_action),
+               last_action_at_utc=COALESCE(excluded.last_action_at_utc, moss_symbol_pool_streak.last_action_at_utc),
+               updated_at_utc=excluded.updated_at_utc""",
+        (
+            sym,
+            last_pool_tier,
+            int(last_batch_id),
+            int(degrade_streak),
+            int(upgrade_streak),
+            last_action,
+            last_action_at_utc,
+            now,
+        ),
+    )
+    if commit:
+        conn.commit()
+    out = get_symbol_pool_streak(conn, sym)
+    return out or {}
+
+
+def insert_pool_governance_log(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: int,
+    symbol: str,
+    action: str,
+    pool_tier: Optional[str] = None,
+    degrade_streak: Optional[int] = None,
+    upgrade_streak: Optional[int] = None,
+    profile_id: Optional[int] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO moss_pool_governance_log(
+               batch_id, symbol, action, pool_tier,
+               degrade_streak, upgrade_streak, profile_id,
+               detail_json, created_at_utc)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (
+            int(batch_id),
+            str(symbol).strip().upper(),
+            action,
+            pool_tier,
+            degrade_streak,
+            upgrade_streak,
+            profile_id,
+            json.dumps(detail or {}, ensure_ascii=False),
+            _utc_now(),
+        ),
+    )
+
+
+def list_symbol_pool_streaks(
+    conn: sqlite3.Connection, symbols: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    conn.row_factory = sqlite3.Row
+    if symbols:
+        syms = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        if not syms:
+            return []
+        placeholders = ",".join("?" for _ in syms)
+        rows = conn.execute(
+            f"SELECT * FROM moss_symbol_pool_streak WHERE symbol IN ({placeholders})",
+            syms,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM moss_symbol_pool_streak ORDER BY symbol ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_recent_pool_governance_logs(
+    conn: sqlite3.Connection, *, limit: int = 30
+) -> List[Dict[str, Any]]:
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT * FROM moss_pool_governance_log
+           ORDER BY id DESC LIMIT ?""",
+        (max(1, int(limit)),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["detail"] = json.loads(d.pop("detail_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            d["detail"] = {}
+        out.append(d)
+    return out
 
 
 def get_profile(conn: sqlite3.Connection, profile_id: int) -> Optional[Dict[str, Any]]:

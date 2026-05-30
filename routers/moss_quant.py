@@ -343,6 +343,12 @@ async def patch_profile(profile_id: int, body: ProfilePatch):
         if body.enabled is not None:
             sets.append("enabled=?")
             vals.append(1 if body.enabled else 0)
+            if body.enabled is False:
+                sets.append("governance_manual_lock=?")
+                vals.append(1)
+            elif body.enabled is True:
+                sets.append("governance_manual_lock=?")
+                vals.append(0)
         if body.virtual_equity_usdt is not None:
             sets.append("virtual_equity_usdt=?")
             vals.append(float(body.virtual_equity_usdt))
@@ -723,6 +729,15 @@ async def reconcile_wallet():
         conn.close()
 
 
+def _pool_governance_summary(conn) -> dict:
+    try:
+        from moss_quant.pool_governance import summarize_pool_governance
+
+        return summarize_pool_governance(conn)
+    except Exception:
+        return {}
+
+
 @router.get("/summary")
 async def get_summary():
     conn = _conn()
@@ -808,6 +823,7 @@ async def get_summary():
                 "mcap_observation_days": mq_cfg.MOSS_QUANT_MCAP_OBSERVATION_DAYS,
             },
             "daily_optimize_pools": daily_pools,
+            "pool_governance": _pool_governance_summary(conn),
         }
     except sqlite3.OperationalError:
         from moss_quant import config as mq_cfg
@@ -837,6 +853,7 @@ async def get_summary():
                 "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
             },
             "daily_optimize_pools": {},
+            "pool_governance": {},
         }
     finally:
         conn.close()
@@ -1126,6 +1143,7 @@ async def post_daily_optimize_apply_profiles(batch_id: int):
         annotate_daily_batch_items,
         sync_enabled_profiles_from_batch,
     )
+    from moss_quant.pool_governance import apply_pool_governance
 
     conn = _conn()
     try:
@@ -1140,11 +1158,13 @@ async def post_daily_optimize_apply_profiles(batch_id: int):
         bid = int(batch_id)
         annotate_stats = annotate_daily_batch_items(conn, bid)
         sync_stats = sync_enabled_profiles_from_batch(conn, bid)
+        governance_stats = apply_pool_governance(conn, bid)
         return {
             "ok": True,
             "batch_id": bid,
             "annotate": annotate_stats,
             "sync_profiles": sync_stats,
+            "pool_governance": governance_stats,
         }
     finally:
         conn.close()

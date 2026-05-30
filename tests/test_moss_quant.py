@@ -668,11 +668,212 @@ class TestMossQuant(unittest.TestCase):
         )
         self.assertFalse(gate["auto_enabled"])
 
-    def test_max_active_profiles_matches_universe(self):
+    def test_max_active_profiles_default_five(self):
         from moss_quant import config as cfg
-        from moss_quant.universe import moss_catalog_bases
 
-        self.assertEqual(cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES, len(moss_catalog_bases()))
+        self.assertEqual(cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES, 5)
+        self.assertEqual(cfg.MOSS_QUANT_POOL_MAX_AUTO_ENABLED, 5)
+        self.assertTrue(cfg.pool_governance_enabled())
+
+    def test_pool_governance_auto_disable_c_tier(self):
+        import json
+        import sqlite3
+
+        from moss_quant.db import migrate_moss_tables
+        from moss_quant.pool_governance import apply_pool_governance
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        now = "2024-01-01T00:00:00Z"
+        cur = conn.execute(
+            """INSERT INTO moss_daily_optimize_batches(
+                   ran_at_utc, status, symbols_total, capital, data_source)
+               VALUES (?,?,?,?,?)""",
+            (now, "completed", 1, 10000.0, "hyperliquid"),
+        )
+        batch_id = int(cur.lastrowid)
+        conn.execute(
+            """INSERT INTO moss_daily_optimize_items(
+                   batch_id, symbol, template, tactical_params_json,
+                   summary_json, score)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                batch_id,
+                "NEARUSDT",
+                "trend",
+                json.dumps({"entry_threshold": 0.44}),
+                json.dumps(
+                    {
+                        "total_return": -0.05,
+                        "total_trades": 10,
+                        "max_drawdown": -0.1,
+                        "blowup_count": 0,
+                        "win_rate": 0.4,
+                    }
+                ),
+                -999.0,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO moss_profiles(
+                   name, symbol, template, enabled, profile_source,
+                   initial_params_json, tactical_params_json,
+                   virtual_equity_usdt, evolution_enabled,
+                   created_at_utc, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "near",
+                "NEARUSDT",
+                "trend",
+                1,
+                "manual",
+                json.dumps({}),
+                json.dumps({}),
+                10000.0,
+                0,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        stats = apply_pool_governance(conn, batch_id, trigger_paper_scan=False)
+        self.assertEqual(stats["disabled"], 1)
+        row = conn.execute(
+            "SELECT enabled FROM moss_profiles WHERE symbol='NEARUSDT'"
+        ).fetchone()
+        self.assertEqual(int(row[0]), 0)
+
+    def test_pool_governance_auto_add_a_pool(self):
+        import json
+        import sqlite3
+        from unittest.mock import patch
+
+        from moss_quant import config as cfg
+        from moss_quant.db import migrate_moss_tables
+        from moss_quant.pool_governance import apply_pool_governance
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        now = "2024-01-01T00:00:00Z"
+        cur = conn.execute(
+            """INSERT INTO moss_daily_optimize_batches(
+                   ran_at_utc, status, symbols_total, capital, data_source)
+               VALUES (?,?,?,?,?)""",
+            (now, "completed", 1, 10000.0, "hyperliquid"),
+        )
+        batch_id = int(cur.lastrowid)
+        good_summary = {
+            "total_return": 0.2,
+            "total_trades": 12,
+            "max_drawdown": -0.08,
+            "blowup_count": 0,
+            "win_rate": 0.55,
+            "validation_passed": True,
+            "validation_reason": "验证通过",
+            "val_return": 0.05,
+        }
+        conn.execute(
+            """INSERT INTO moss_daily_optimize_items(
+                   batch_id, symbol, template, tactical_params_json,
+                   summary_json, score)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                batch_id,
+                "HYPEUSDT",
+                "momentum",
+                json.dumps({"entry_threshold": 0.48, "sl_atr_mult": 2.5}),
+                json.dumps(good_summary),
+                0.9,
+            ),
+        )
+        conn.commit()
+        with patch.object(cfg, "MOSS_QUANT_POOL_UPGRADE_STREAK", 1):
+            stats = apply_pool_governance(conn, batch_id, trigger_paper_scan=False)
+        self.assertEqual(stats["added"], 1)
+        self.assertEqual(stats["enabled_auto"], 1)
+        row = conn.execute(
+            "SELECT enabled, profile_source FROM moss_profiles WHERE symbol='HYPEUSDT'"
+        ).fetchone()
+        self.assertEqual(int(row[0]), 1)
+        self.assertEqual(row[1], "governance_auto")
+
+    def test_pool_governance_manual_lock_blocks_auto_enable(self):
+        import json
+        import sqlite3
+        from unittest.mock import patch
+
+        from moss_quant import config as cfg
+        from moss_quant.db import migrate_moss_tables
+        from moss_quant.pool_governance import apply_pool_governance
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        now = "2024-01-01T00:00:00Z"
+        cur = conn.execute(
+            """INSERT INTO moss_daily_optimize_batches(
+                   ran_at_utc, status, symbols_total, capital, data_source)
+               VALUES (?,?,?,?,?)""",
+            (now, "completed", 1, 10000.0, "hyperliquid"),
+        )
+        batch_id = int(cur.lastrowid)
+        good_summary = {
+            "total_return": 0.2,
+            "total_trades": 12,
+            "max_drawdown": -0.08,
+            "blowup_count": 0,
+            "win_rate": 0.55,
+            "validation_passed": True,
+            "validation_reason": "验证通过",
+            "val_return": 0.05,
+        }
+        conn.execute(
+            """INSERT INTO moss_daily_optimize_items(
+                   batch_id, symbol, template, tactical_params_json,
+                   summary_json, score)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                batch_id,
+                "HYPEUSDT",
+                "momentum",
+                json.dumps({"entry_threshold": 0.48}),
+                json.dumps(good_summary),
+                0.9,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO moss_profiles(
+                   name, symbol, template, enabled, profile_source,
+                   initial_params_json, tactical_params_json,
+                   virtual_equity_usdt, evolution_enabled,
+                   governance_manual_lock, created_at_utc, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "hype",
+                "HYPEUSDT",
+                "momentum",
+                0,
+                "manual",
+                json.dumps({}),
+                json.dumps({}),
+                10000.0,
+                0,
+                1,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        with patch.object(cfg, "MOSS_QUANT_POOL_UPGRADE_STREAK", 1):
+            stats = apply_pool_governance(conn, batch_id, trigger_paper_scan=False)
+        self.assertEqual(stats["skipped_manual_lock"], 1)
+        self.assertEqual(stats["enabled_auto"], 0)
+        row = conn.execute(
+            "SELECT enabled FROM moss_profiles WHERE symbol='HYPEUSDT'"
+        ).fetchone()
+        self.assertEqual(int(row[0]), 0)
 
     def test_binance_kline_weight_for_1500(self):
         from binance_fapi import kline_request_weight

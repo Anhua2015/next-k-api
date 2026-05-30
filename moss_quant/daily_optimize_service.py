@@ -234,11 +234,15 @@ def run_daily_optimize_batch(
 
         annotate_stats: Dict[str, Any] = {}
         sync_stats: Dict[str, Any] = {}
+        governance_stats: Dict[str, Any] = {}
         if apply:
             conn = _open_db()
             try:
                 annotate_stats = annotate_daily_batch_items(conn, batch_id)
                 sync_stats = sync_enabled_profiles_from_batch(conn, batch_id)
+                from moss_quant.pool_governance import apply_pool_governance
+
+                governance_stats = apply_pool_governance(conn, batch_id)
             finally:
                 conn.close()
 
@@ -264,6 +268,7 @@ def run_daily_optimize_batch(
             "items": items,
             "annotate": annotate_stats,
             "sync_profiles": sync_stats,
+            "pool_governance": governance_stats,
             "apply_profiles": apply,
         }
     except Exception as e:
@@ -367,7 +372,7 @@ def _batch_items_by_symbol(conn, batch_id: int) -> Dict[str, Dict[str, Any]]:
             continue
         d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
         summary = json.loads(d.pop("summary_json") or "{}")
-        if summary and not summary.get("error") and not summary.get("pool_tier"):
+        if summary and not summary.get("error"):
             summary = enrich_summary(summary)
         d["summary"] = summary
         out[sym] = d
@@ -543,18 +548,44 @@ def import_profile_from_daily(
     enabled: bool = True,
     name: Optional[str] = None,
     update_existing: bool = True,
+    profile_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """从最近一次每日寻优结果创建或更新纸面 Profile（用户主动操作）。"""
+    item = get_latest_daily_item_for_symbol(conn, str(symbol).strip().upper())
+    if not item:
+        raise ValueError("daily_item_not_found")
+    return import_profile_from_batch_item(
+        conn,
+        item,
+        enabled=enabled,
+        name=name,
+        update_existing=update_existing,
+        profile_source=profile_source or FROM_DAILY_PROFILE_SOURCE,
+    )
+
+
+def import_profile_from_batch_item(
+    conn,
+    item: Dict[str, Any],
+    *,
+    enabled: bool = True,
+    name: Optional[str] = None,
+    update_existing: bool = True,
+    profile_source: Optional[str] = None,
+    commit: bool = True,
+) -> Dict[str, Any]:
+    """从指定每日寻优 item 创建或更新纸面 Profile。"""
     from moss_quant import config as mq_cfg
     from moss_quant.universe import active_symbols_taken, is_symbol_allowed
 
-    sym = str(symbol).strip().upper()
+    sym = str(item.get("symbol") or "").strip().upper()
+    if not sym:
+        raise ValueError("invalid_symbol")
     if not is_symbol_allowed(sym, conn=conn):
         raise ValueError("symbol_not_allowed")
-    item = get_latest_daily_item_for_symbol(conn, sym)
-    if not item or item.get("summary", {}).get("error"):
-        raise ValueError("daily_item_not_found")
     summary = item.get("summary") or {}
+    if summary.get("error"):
+        raise ValueError("daily_item_not_found")
     if str(summary.get("pool_tier") or "C") == "C":
         raise ValueError("daily_pool_rejected")
     template = str(item.get("template") or "balanced")
@@ -563,6 +594,7 @@ def import_profile_from_daily(
     now = _utc_now()
     equity = float(mq_cfg.MOSS_QUANT_PROFILE_CAPITAL)
     prof_name = (name or "").strip() or ("from-daily-" + sym)
+    src = profile_source or FROM_DAILY_PROFILE_SOURCE
 
     existing = get_profile_by_symbol(conn, sym)
     if existing and not update_existing:
@@ -585,12 +617,12 @@ def import_profile_from_daily(
             """UPDATE moss_profiles SET
                name=?, template=?, profile_source=?,
                initial_params_json=?, tactical_params_json=?,
-               enabled=?, updated_at_utc=?
+               enabled=?, governance_manual_lock=0, updated_at_utc=?
                WHERE id=?""",
             (
                 prof_name,
                 template,
-                FROM_DAILY_PROFILE_SOURCE,
+                src,
                 json.dumps(initial, ensure_ascii=False),
                 json.dumps(tactical, ensure_ascii=False),
                 1 if enabled else 0,
@@ -605,17 +637,18 @@ def import_profile_from_daily(
                    name, symbol, template, enabled, profile_source,
                    initial_params_json, tactical_params_json,
                    virtual_equity_usdt, evolution_enabled,
-                   created_at_utc, updated_at_utc)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   governance_manual_lock, created_at_utc, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 prof_name,
                 sym,
                 template,
                 1 if enabled else 0,
-                FROM_DAILY_PROFILE_SOURCE,
+                src,
                 json.dumps(initial, ensure_ascii=False),
                 json.dumps(tactical, ensure_ascii=False),
                 equity,
+                0,
                 0,
                 now,
                 now,
@@ -623,12 +656,15 @@ def import_profile_from_daily(
         )
         pid = int(cur.lastrowid)
 
-    conn.execute(
-        """UPDATE moss_daily_optimize_items SET profile_id=?
-           WHERE id=?""",
-        (pid, int(item["id"])),
-    )
-    conn.commit()
+    item_id = item.get("id")
+    if item_id is not None:
+        conn.execute(
+            """UPDATE moss_daily_optimize_items SET profile_id=?
+               WHERE id=?""",
+            (pid, int(item_id)),
+        )
+    if commit:
+        conn.commit()
     return get_profile(conn, pid) or {}
 
 
