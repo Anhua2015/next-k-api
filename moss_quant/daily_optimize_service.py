@@ -14,7 +14,11 @@ from moss_quant.db import (
     get_profile_by_symbol,
     row_to_profile,
 )
-from moss_quant.daily_auto_enable import evaluate_profile_auto_enable
+from moss_quant.optimize_policy import (
+    can_sync_profile_params,
+    enrich_summary,
+    risk_scale_for_rank,
+)
 from moss_quant.optimize_service import run_strategy_optimize
 from moss_quant.params import TACTICAL_FLOAT_FIELDS, build_initial_params
 from moss_quant.universe import list_daily_core_universe
@@ -196,12 +200,9 @@ def run_daily_optimize_batch(
                 if kline_start is None and out.get("kline_start"):
                     kline_start = out.get("kline_start")
                     kline_end = out.get("kline_end")
-                summary = {
-                    **best["summary"],
-                    **evaluate_profile_auto_enable(best["summary"]),
-                }
+                summary = dict(best.get("summary") or {})
                 tact = best.get("tactical_params") or {}
-                score = float(best.get("score") or 0)
+                score = float(best.get("score") or summary.get("train_score") or 0)
                 _insert_batch_item(
                     batch_id,
                     symbol=sym,
@@ -233,15 +234,25 @@ def run_daily_optimize_batch(
 
         annotate_stats: Dict[str, Any] = {}
         sync_stats: Dict[str, Any] = {}
+        governance_stats: Dict[str, Any] = {}
         if apply:
             conn = _open_db()
             try:
                 annotate_stats = annotate_daily_batch_items(conn, batch_id)
                 sync_stats = sync_enabled_profiles_from_batch(conn, batch_id)
+                from moss_quant.pool_governance import apply_pool_governance
+
+                governance_stats = apply_pool_governance(conn, batch_id)
             finally:
                 conn.close()
 
-        symbols_ok = len([x for x in items if x.get("summary")])
+        symbols_ok = len(
+            [
+                x
+                for x in items
+                if x.get("summary") and not (x.get("summary") or {}).get("error")
+            ]
+        )
         _finalize_batch(
             batch_id,
             status="completed",
@@ -257,6 +268,7 @@ def run_daily_optimize_batch(
             "items": items,
             "annotate": annotate_stats,
             "sync_profiles": sync_stats,
+            "pool_governance": governance_stats,
             "apply_profiles": apply,
         }
     except Exception as e:
@@ -264,7 +276,13 @@ def run_daily_optimize_batch(
         _finalize_batch(
             batch_id,
             status="failed",
-            symbols_ok=len([x for x in items if x.get("summary")]),
+            symbols_ok=len(
+                [
+                    x
+                    for x in items
+                    if x.get("summary") and not (x.get("summary") or {}).get("error")
+                ]
+            ),
             kline_start=kline_start,
             kline_end=kline_end,
             error=str(e),
@@ -286,10 +304,8 @@ def annotate_daily_batch_items(conn, batch_id: int) -> Dict[str, Any]:
     fail_n = 0
     for row in rows:
         sym = str(row["symbol"]).upper()
-        summary = json.loads(row["summary_json"] or "{}")
-        gate = evaluate_profile_auto_enable(summary)
-        summary = {**summary, **gate}
-        if gate.get("auto_enabled"):
+        summary = enrich_summary(json.loads(row["summary_json"] or "{}"))
+        if summary.get("auto_enabled"):
             pass_n += 1
         else:
             fail_n += 1
@@ -333,9 +349,11 @@ def _profile_matches_batch_optimal(
     cur_tpl = str(profile.get("template") or "").strip().lower()
     if opt_tpl != cur_tpl:
         return False
-    return _norm_tactical_for_compare(profile.get("tactical_params")) == _norm_tactical_for_compare(
-        item.get("tactical_params")
-    )
+    prof_tact = profile.get("tactical_params") or {}
+    item_tact = item.get("tactical_params") or {}
+    if bool(prof_tact.get("trailing_enabled")) != bool(item_tact.get("trailing_enabled")):
+        return False
+    return _norm_tactical_for_compare(prof_tact) == _norm_tactical_for_compare(item_tact)
 
 
 def _batch_items_by_symbol(conn, batch_id: int) -> Dict[str, Dict[str, Any]]:
@@ -353,7 +371,10 @@ def _batch_items_by_symbol(conn, batch_id: int) -> Dict[str, Dict[str, Any]]:
         if not sym:
             continue
         d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
-        d["summary"] = json.loads(d.pop("summary_json") or "{}")
+        summary = json.loads(d.pop("summary_json") or "{}")
+        if summary and not summary.get("error"):
+            summary = enrich_summary(summary)
+        d["summary"] = summary
         out[sym] = d
     return out
 
@@ -378,6 +399,29 @@ def _run_paper_scan_after_param_sync(
         return {"error": str(e)}
 
 
+def _build_initial_for_sync(template: str, risk_scale: float = 1.0) -> dict:
+    initial = build_initial_params(template=template)
+    scale = max(0.1, min(1.0, float(risk_scale)))
+    if scale < 1.0:
+        for key in ("risk_per_trade", "max_position_pct"):
+            if key in initial:
+                initial[key] = round(float(initial[key]) * scale, 4)
+    return initial
+
+
+def _sync_rank_index(items_by_sym: Dict[str, Dict[str, Any]], sym: str) -> int:
+    syncable = [
+        (s, float((items_by_sym[s].get("summary") or {}).get("train_score") or items_by_sym[s].get("score") or 0))
+        for s in items_by_sym
+        if can_sync_profile_params(items_by_sym[s].get("summary") or {})
+    ]
+    syncable.sort(key=lambda x: -x[1])
+    for i, (s, _) in enumerate(syncable):
+        if s == sym:
+            return i
+    return 999
+
+
 def sync_enabled_profiles_from_batch(
     conn, batch_id: int, *, trigger_paper_scan: bool = True
 ) -> Dict[str, Any]:
@@ -393,6 +437,7 @@ def sync_enabled_profiles_from_batch(
         "already_optimal": 0,
         "no_batch_item": 0,
         "invalid_batch_item": 0,
+        "skipped_sync_gate": 0,
         "updated_with_open_position": 0,
         "updated_profiles": [],
     }
@@ -408,12 +453,17 @@ def sync_enabled_profiles_from_batch(
         if summary.get("error") or not item.get("template"):
             stats["invalid_batch_item"] += 1
             continue
+        if not can_sync_profile_params(summary):
+            stats["skipped_sync_gate"] += 1
+            continue
         if _profile_matches_batch_optimal(prof, item):
             stats["already_optimal"] += 1
             continue
         template = str(item.get("template") or "balanced")
         tactical = dict(item.get("tactical_params") or {})
-        initial = build_initial_params(template=template)
+        rank_idx = _sync_rank_index(items_by_sym, sym)
+        risk_scale = risk_scale_for_rank(rank_idx)
+        initial = _build_initial_for_sync(template, risk_scale)
         conn.execute(
             """UPDATE moss_profiles SET
                template=?, initial_params_json=?, tactical_params_json=?,
@@ -443,6 +493,8 @@ def sync_enabled_profiles_from_batch(
                 "template": template,
                 "tactical_params": tactical,
                 "had_open_position": had_open,
+                "risk_scale": risk_scale,
+                "pool_tier": summary.get("pool_tier"),
             }
         )
     if stats["updated"]:
@@ -482,7 +534,10 @@ def get_latest_daily_item_for_symbol(
         return None
     d = dict(row)
     d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
-    d["summary"] = json.loads(d.pop("summary_json") or "{}")
+    summary = json.loads(d.pop("summary_json") or "{}")
+    if summary and not summary.get("error"):
+        summary = enrich_summary(summary)
+    d["summary"] = summary
     return d
 
 
@@ -493,23 +548,53 @@ def import_profile_from_daily(
     enabled: bool = True,
     name: Optional[str] = None,
     update_existing: bool = True,
+    profile_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """从最近一次每日寻优结果创建或更新纸面 Profile（用户主动操作）。"""
+    item = get_latest_daily_item_for_symbol(conn, str(symbol).strip().upper())
+    if not item:
+        raise ValueError("daily_item_not_found")
+    return import_profile_from_batch_item(
+        conn,
+        item,
+        enabled=enabled,
+        name=name,
+        update_existing=update_existing,
+        profile_source=profile_source or FROM_DAILY_PROFILE_SOURCE,
+    )
+
+
+def import_profile_from_batch_item(
+    conn,
+    item: Dict[str, Any],
+    *,
+    enabled: bool = True,
+    name: Optional[str] = None,
+    update_existing: bool = True,
+    profile_source: Optional[str] = None,
+    commit: bool = True,
+) -> Dict[str, Any]:
+    """从指定每日寻优 item 创建或更新纸面 Profile。"""
     from moss_quant import config as mq_cfg
     from moss_quant.universe import active_symbols_taken, is_symbol_allowed
 
-    sym = str(symbol).strip().upper()
+    sym = str(item.get("symbol") or "").strip().upper()
+    if not sym:
+        raise ValueError("invalid_symbol")
     if not is_symbol_allowed(sym, conn=conn):
         raise ValueError("symbol_not_allowed")
-    item = get_latest_daily_item_for_symbol(conn, sym)
-    if not item or item.get("summary", {}).get("error"):
+    summary = item.get("summary") or {}
+    if summary.get("error"):
         raise ValueError("daily_item_not_found")
+    if str(summary.get("pool_tier") or "C") == "C":
+        raise ValueError("daily_pool_rejected")
     template = str(item.get("template") or "balanced")
     tactical = item.get("tactical_params") or {}
     initial = build_initial_params(template=template)
     now = _utc_now()
-    equity = float(mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    equity = float(mq_cfg.MOSS_QUANT_PROFILE_CAPITAL)
     prof_name = (name or "").strip() or ("from-daily-" + sym)
+    src = profile_source or FROM_DAILY_PROFILE_SOURCE
 
     existing = get_profile_by_symbol(conn, sym)
     if existing and not update_existing:
@@ -532,12 +617,12 @@ def import_profile_from_daily(
             """UPDATE moss_profiles SET
                name=?, template=?, profile_source=?,
                initial_params_json=?, tactical_params_json=?,
-               enabled=?, updated_at_utc=?
+               enabled=?, governance_manual_lock=0, updated_at_utc=?
                WHERE id=?""",
             (
                 prof_name,
                 template,
-                FROM_DAILY_PROFILE_SOURCE,
+                src,
                 json.dumps(initial, ensure_ascii=False),
                 json.dumps(tactical, ensure_ascii=False),
                 1 if enabled else 0,
@@ -552,17 +637,18 @@ def import_profile_from_daily(
                    name, symbol, template, enabled, profile_source,
                    initial_params_json, tactical_params_json,
                    virtual_equity_usdt, evolution_enabled,
-                   created_at_utc, updated_at_utc)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                   governance_manual_lock, created_at_utc, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 prof_name,
                 sym,
                 template,
                 1 if enabled else 0,
-                FROM_DAILY_PROFILE_SOURCE,
+                src,
                 json.dumps(initial, ensure_ascii=False),
                 json.dumps(tactical, ensure_ascii=False),
                 equity,
+                0,
                 0,
                 now,
                 now,
@@ -570,12 +656,15 @@ def import_profile_from_daily(
         )
         pid = int(cur.lastrowid)
 
-    conn.execute(
-        """UPDATE moss_daily_optimize_items SET profile_id=?
-           WHERE id=?""",
-        (pid, int(item["id"])),
-    )
-    conn.commit()
+    item_id = item.get("id")
+    if item_id is not None:
+        conn.execute(
+            """UPDATE moss_daily_optimize_items SET profile_id=?
+               WHERE id=?""",
+            (pid, int(item_id)),
+        )
+    if commit:
+        conn.commit()
     return get_profile(conn, pid) or {}
 
 
@@ -599,7 +688,10 @@ def get_latest_daily_batch(conn) -> Optional[Dict[str, Any]]:
     for r in items:
         d = dict(r)
         d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
-        d["summary"] = json.loads(d.pop("summary_json") or "{}")
+        summary = json.loads(d.pop("summary_json") or "{}")
+        if summary and not summary.get("error") and not summary.get("pool_tier"):
+            summary = enrich_summary(summary)
+        d["summary"] = summary
         if d.get("profile_id"):
             prof = get_profile(conn, int(d["profile_id"]))
             d["profile"] = prof
@@ -655,6 +747,46 @@ def reconcile_stale_daily_batches(conn) -> int:
         conn.commit()
         logger.warning("[moss] reconciled %s stale daily optimize batch(es)", n)
     return n
+
+
+def summarize_latest_daily_pools(conn) -> Dict[str, Any]:
+    """最新每日寻优批次的币池 / 验证 KPI（供 summary API）。"""
+    batch = get_latest_daily_batch(conn)
+    if not batch:
+        return {}
+    pools = {"A": 0, "B": 0, "C": 0}
+    val_pass = val_fail = sync_ok = 0
+    for it in batch.get("items") or []:
+        s = it.get("summary") or {}
+        if s.get("error"):
+            pools["C"] += 1
+            continue
+        tier = str(s.get("pool_tier") or "C")
+        pools[tier] = pools.get(tier, 0) + 1
+        if s.get("validation_passed"):
+            val_pass += 1
+        elif "validation_passed" in s:
+            val_fail += 1
+        if s.get("sync_allowed"):
+            sync_ok += 1
+    return {
+        "batch_id": int(batch.get("id") or 0),
+        "batch_status": batch.get("status"),
+        "symbols_total": int(batch.get("symbols_total") or 0),
+        "symbols_ok": int(batch.get("symbols_ok") or 0),
+        "pool_counts": pools,
+        "validation_passed": val_pass,
+        "validation_failed": val_fail,
+        "sync_allowed": sync_ok,
+        "train_bars": next(
+            (
+                (it.get("summary") or {}).get("train_bars")
+                for it in batch.get("items") or []
+                if (it.get("summary") or {}).get("train_bars")
+            ),
+            None,
+        ),
+    }
 
 
 def is_daily_optimize_in_progress(conn) -> bool:

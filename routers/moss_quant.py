@@ -438,7 +438,7 @@ async def create_profile(body: ProfileCreate):
         )
         now = _utc_now()
         equity = float(
-            body.virtual_equity_usdt or cfg.MOSS_QUANT_DEFAULT_CAPITAL
+            body.virtual_equity_usdt or cfg.MOSS_QUANT_PROFILE_CAPITAL
         )
         cur = conn.execute(
             """INSERT INTO moss_profiles(
@@ -494,6 +494,12 @@ async def patch_profile(profile_id: int, body: ProfilePatch):
         if body.enabled is not None:
             sets.append("enabled=?")
             vals.append(1 if body.enabled else 0)
+            if body.enabled is False:
+                sets.append("governance_manual_lock=?")
+                vals.append(1)
+            elif body.enabled is True:
+                sets.append("governance_manual_lock=?")
+                vals.append(0)
         if body.virtual_equity_usdt is not None:
             sets.append("virtual_equity_usdt=?")
             vals.append(float(body.virtual_equity_usdt))
@@ -874,6 +880,15 @@ async def reconcile_wallet():
         conn.close()
 
 
+def _pool_governance_summary(conn) -> dict:
+    try:
+        from moss_quant.pool_governance import summarize_pool_governance
+
+        return summarize_pool_governance(conn)
+    except Exception:
+        return {}
+
+
 @router.get("/summary")
 async def get_summary():
     conn = _conn()
@@ -951,12 +966,17 @@ async def get_summary():
 
         running = False
         mcap_running = False
+        daily_pools: dict = {}
         try:
-            from moss_quant.daily_optimize_service import is_daily_optimize_in_progress
+            from moss_quant.daily_optimize_service import (
+                is_daily_optimize_in_progress,
+                summarize_latest_daily_pools,
+            )
             from moss_quant.mcap_scan_service import is_mcap_scan_in_progress
 
             running = is_daily_optimize_in_progress(conn)
             mcap_running = is_mcap_scan_in_progress(conn)
+            daily_pools = summarize_latest_daily_pools(conn)
         except Exception:
             pass
         return {
@@ -967,6 +987,7 @@ async def get_summary():
             "total_pnl_usdt": total_pnl,
             "wallet_initial_usdt": wallet_initial,
             "wallet_balance_usdt": wallet_balance,
+            "profile_capital_usdt": mq_cfg.MOSS_QUANT_PROFILE_CAPITAL,
             "per_profile": per_profile,
             "per_symbol": per_symbol,
             "open_by_profile": open_by_profile,
@@ -981,6 +1002,19 @@ async def get_summary():
             "daily_optimize_running": running,
             "mcap_scan_running": mcap_running,
             "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
+            "optimize_policy": {
+                "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
+                "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
+                "min_train_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES,
+                "min_val_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_VAL_TRADES,
+                "max_train_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_TRAIN_DRAWDOWN,
+                "max_val_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_VAL_DRAWDOWN,
+                "validation_top_k": mq_cfg.MOSS_QUANT_OPTIMIZE_VALIDATION_TOP_K,
+                "full_risk_slots": mq_cfg.MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS,
+                "mcap_observation_days": mq_cfg.MOSS_QUANT_MCAP_OBSERVATION_DAYS,
+            },
+            "daily_optimize_pools": daily_pools,
+            "pool_governance": _pool_governance_summary(conn),
         }
     except sqlite3.OperationalError:
         from moss_quant import config as mq_cfg
@@ -991,8 +1025,9 @@ async def get_summary():
             "open_positions": 0,
             "settled_count": 0,
             "total_pnl_usdt": 0.0,
-            "wallet_initial_usdt": mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL,
-            "wallet_balance_usdt": mq_cfg.MOSS_QUANT_DEFAULT_CAPITAL,
+            "wallet_initial_usdt": mq_cfg.MOSS_QUANT_WALLET_INITIAL,
+            "wallet_balance_usdt": mq_cfg.MOSS_QUANT_WALLET_INITIAL,
+            "profile_capital_usdt": mq_cfg.MOSS_QUANT_PROFILE_CAPITAL,
             "enabled_profiles": 0,
             "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
             "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,
@@ -1004,6 +1039,12 @@ async def get_summary():
             "daily_optimize_running": False,
             "mcap_scan_running": False,
             "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
+            "optimize_policy": {
+                "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
+                "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
+            },
+            "daily_optimize_pools": {},
+            "pool_governance": {},
         }
     finally:
         conn.close()
@@ -1342,6 +1383,7 @@ async def post_daily_optimize_apply_profiles(batch_id: int):
         annotate_daily_batch_items,
         sync_enabled_profiles_from_batch,
     )
+    from moss_quant.pool_governance import apply_pool_governance
 
     conn = _conn()
     try:
@@ -1356,11 +1398,13 @@ async def post_daily_optimize_apply_profiles(batch_id: int):
         bid = int(batch_id)
         annotate_stats = annotate_daily_batch_items(conn, bid)
         sync_stats = sync_enabled_profiles_from_batch(conn, bid)
+        governance_stats = apply_pool_governance(conn, bid)
         return {
             "ok": True,
             "batch_id": bid,
             "annotate": annotate_stats,
             "sync_profiles": sync_stats,
+            "pool_governance": governance_stats,
         }
     finally:
         conn.close()

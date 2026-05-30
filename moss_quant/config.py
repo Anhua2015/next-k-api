@@ -20,9 +20,21 @@ MOSS_QUANT_SCHEDULER_ENABLED = env_truthy("MOSS_QUANT_SCHEDULER_ENABLED", defaul
 MOSS_QUANT_SCAN_INTERVAL_MINUTES = max(
     1, int(os.getenv("MOSS_QUANT_SCAN_INTERVAL_MINUTES", "15") or 15)
 )
-MOSS_QUANT_DEFAULT_CAPITAL = max(
-    100.0, float(os.getenv("MOSS_QUANT_DEFAULT_CAPITAL", "10000") or 10000)
+MOSS_QUANT_PROFILE_CAPITAL = max(
+    100.0,
+    float(
+        os.getenv(
+            "MOSS_QUANT_PROFILE_CAPITAL",
+            os.getenv("MOSS_QUANT_DEFAULT_CAPITAL", "10000") or 10000,
+        )
+        or 10000
+    ),
 )
+MOSS_QUANT_WALLET_INITIAL = max(
+    100.0, float(os.getenv("MOSS_QUANT_WALLET_INITIAL", "100000") or 100000)
+)
+# 回测 / 寻优 / 单 bot 纸面 sizing 本金（与 MOSS_QUANT_PROFILE_CAPITAL 相同）
+MOSS_QUANT_DEFAULT_CAPITAL = MOSS_QUANT_PROFILE_CAPITAL
 MOSS_QUANT_SEGMENT_BARS = max(
     96, int(os.getenv("MOSS_QUANT_SEGMENT_BARS", "672") or 672)
 )
@@ -33,7 +45,7 @@ MOSS_QUANT_KLINE_LIMIT = max(
     200, int(os.getenv("MOSS_QUANT_KLINE_LIMIT", "1500") or 1500)
 )
 MOSS_QUANT_MAX_ACTIVE_PROFILES = max(
-    1, int(os.getenv("MOSS_QUANT_MAX_ACTIVE_PROFILES", "25") or 25)
+    1, int(os.getenv("MOSS_QUANT_MAX_ACTIVE_PROFILES", "5") or 5)
 )
 MOSS_QUANT_EXTENDED_UNIVERSE = env_truthy(
     "MOSS_QUANT_EXTENDED_UNIVERSE", default=False
@@ -128,6 +140,48 @@ MOSS_QUANT_DAILY_OPTIMIZE_REFRESH = env_truthy(
 MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES = env_truthy(
     "MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES", default=True
 )
+
+# --- 寻优：训练/验证窗、评分、同步门控 ---
+MOSS_QUANT_OPTIMIZE_TRAIN_RATIO = max(
+    0.5, min(0.85, float(os.getenv("MOSS_QUANT_OPTIMIZE_TRAIN_RATIO", "0.7") or 0.7))
+)
+MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION = env_truthy(
+    "MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION", default=True
+)
+MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES = max(
+    1, int(os.getenv("MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES", "8") or 8)
+)
+MOSS_QUANT_OPTIMIZE_MIN_VAL_TRADES = max(
+    1, int(os.getenv("MOSS_QUANT_OPTIMIZE_MIN_VAL_TRADES", "3") or 3)
+)
+MOSS_QUANT_OPTIMIZE_MAX_TRAIN_DRAWDOWN = max(
+    0.05,
+    min(0.95, float(os.getenv("MOSS_QUANT_OPTIMIZE_MAX_TRAIN_DRAWDOWN", "0.35") or 0.35)),
+)
+MOSS_QUANT_OPTIMIZE_MAX_VAL_DRAWDOWN = max(
+    0.05,
+    min(0.95, float(os.getenv("MOSS_QUANT_OPTIMIZE_MAX_VAL_DRAWDOWN", "0.40") or 0.40)),
+)
+MOSS_QUANT_OPTIMIZE_VALIDATION_TOP_K = max(
+    1, int(os.getenv("MOSS_QUANT_OPTIMIZE_VALIDATION_TOP_K", "5") or 5)
+)
+MOSS_QUANT_OPTIMIZE_MIN_BARS = max(
+    200, int(os.getenv("MOSS_QUANT_OPTIMIZE_MIN_BARS", "400") or 400)
+)
+MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS = max(
+    1, int(os.getenv("MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS", "5") or 5)
+)
+MOSS_QUANT_OPTIMIZE_REDUCED_RISK_SCALE = max(
+    0.1,
+    min(1.0, float(os.getenv("MOSS_QUANT_OPTIMIZE_REDUCED_RISK_SCALE", "0.5") or 0.5)),
+)
+MOSS_QUANT_OPTIMIZE_TRAILING_FOR_TREND = env_truthy(
+    "MOSS_QUANT_OPTIMIZE_TRAILING_FOR_TREND", default=False
+)
+MOSS_QUANT_MCAP_OBSERVATION_DAYS = max(
+    1, int(os.getenv("MOSS_QUANT_MCAP_OBSERVATION_DAYS", "3") or 3)
+)
+
 # 市值扩展寻优：币安市值池大小、展示 Top N
 MOSS_QUANT_MCAP_SCAN_POOL_LIMIT = max(
     10, int(os.getenv("MOSS_QUANT_MCAP_SCAN_POOL_LIMIT", "100") or 100)
@@ -144,6 +198,42 @@ MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC = max(
     60,
     int(os.getenv("MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC", "1200") or 1200),
 )
+
+# --- 纸面池子治理：每日寻优后自动停/启 Profile（防抖 + TopN 补位）---
+MOSS_QUANT_POOL_GOVERNANCE_ENABLED = env_truthy(
+    "MOSS_QUANT_POOL_GOVERNANCE_ENABLED", default=True
+)
+MOSS_QUANT_POOL_AUTO_DISABLE = env_truthy("MOSS_QUANT_POOL_AUTO_DISABLE", default=True)
+MOSS_QUANT_POOL_AUTO_ENABLE = env_truthy("MOSS_QUANT_POOL_AUTO_ENABLE", default=True)
+MOSS_QUANT_POOL_DEGRADE_STREAK_B = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_DEGRADE_STREAK_B", "2") or 2)
+)
+MOSS_QUANT_POOL_DEGRADE_STREAK_C = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_DEGRADE_STREAK_C", "1") or 1)
+)
+MOSS_QUANT_POOL_UPGRADE_STREAK = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_UPGRADE_STREAK", "2") or 2)
+)
+MOSS_QUANT_POOL_AUTO_ADD_TOP_N = max(
+    1, int(os.getenv("MOSS_QUANT_POOL_AUTO_ADD_TOP_N", "5") or 5)
+)
+MOSS_QUANT_POOL_MAX_AUTO_ENABLED = max(
+    1,
+    int(
+        os.getenv(
+            "MOSS_QUANT_POOL_MAX_AUTO_ENABLED",
+            os.getenv("MOSS_QUANT_MAX_ACTIVE_PROFILES", "5") or 5,
+        )
+        or 5
+    ),
+)
+MOSS_QUANT_POOL_RESPECT_MANUAL_DISABLE = env_truthy(
+    "MOSS_QUANT_POOL_RESPECT_MANUAL_DISABLE", default=True
+)
+
+
+def pool_governance_enabled() -> bool:
+    return MOSS_QUANT_POOL_GOVERNANCE_ENABLED and MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES
 
 
 def daily_optimize_scheduler_enabled() -> bool:

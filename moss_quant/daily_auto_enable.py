@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-# 内置默认门槛（与 MOSS_QUANT_DAILY_OPTIMIZE_APPLY 同步生效）
-MIN_RETURN = 0.0          # 收益须 > 0
-MIN_TRADES = 8            # 回测回合 ≥ 8
-MAX_DRAWDOWN = 0.45       # 最大回撤 ≤ 45%
-REQUIRE_NO_BLOWUP = True  # 无回测爆仓
+from moss_quant import config as cfg
+
+MIN_RETURN = 0.0
+MIN_TRADES = int(cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES)
+MAX_DRAWDOWN = float(cfg.MOSS_QUANT_OPTIMIZE_MAX_TRAIN_DRAWDOWN)
+REQUIRE_NO_BLOWUP = True
 
 
 def evaluate_profile_auto_enable(summary: Dict[str, Any]) -> Dict[str, Any]:

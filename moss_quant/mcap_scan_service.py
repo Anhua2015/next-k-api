@@ -10,6 +10,7 @@ from moss_quant import config as cfg
 from moss_quant.binance_mcap_universe import build_mcap_scan_candidates
 from moss_quant.daily_auto_enable import evaluate_profile_auto_enable
 from moss_quant.db import _utc_now
+from moss_quant.optimize_policy import enrich_summary
 from moss_quant.optimize_service import run_strategy_optimize
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,7 @@ def run_mcap_scan_batch(
                     capital=capital,
                     refresh_klines=sym_refresh,
                     top_n=1,
+                    mcap_observation=True,
                 )
                 best = out.get("best")
                 if not best or not best.get("summary"):
@@ -199,10 +201,7 @@ def run_mcap_scan_batch(
                 if kline_start is None and out.get("kline_start"):
                     kline_start = out.get("kline_start")
                     kline_end = out.get("kline_end")
-                summary = {
-                    **best["summary"],
-                    **evaluate_profile_auto_enable(best["summary"]),
-                }
+                summary = enrich_summary(dict(best["summary"]))
                 tact = best.get("tactical_params") or {}
                 score = float(best.get("score") or 0)
                 _insert_item(
@@ -294,6 +293,8 @@ def _item_passes_daily_gate(item: Dict[str, Any]) -> bool:
     summary = item.get("summary") or {}
     if summary.get("error"):
         return False
+    if summary.get("pool_tier"):
+        return str(summary.get("pool_tier")) == "A"
     if summary.get("auto_enabled") is True:
         return True
     if summary.get("auto_enabled") is False:
@@ -336,8 +337,8 @@ def get_latest_mcap_scan_batch(conn) -> Optional[Dict[str, Any]]:
         d = dict(r)
         d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
         summary = json.loads(d.pop("summary_json") or "{}")
-        if summary and not summary.get("error") and "auto_enabled" not in summary:
-            summary = {**summary, **evaluate_profile_auto_enable(summary)}
+        if summary and not summary.get("error"):
+            summary = enrich_summary(summary)
         d["summary"] = summary
         rows_out.append(d)
     b["items"] = rows_out

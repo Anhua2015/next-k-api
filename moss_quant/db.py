@@ -200,7 +200,124 @@ def migrate_moss_tables(c: sqlite3.Cursor) -> None:
     )
     seed_moss_daily_core_symbols(c)
     _ensure_profile_source_column(c)
+    _ensure_governance_columns(c)
+    _ensure_pool_governance_tables(c)
     _ensure_moss_wallet_table(c)
+    _upgrade_profiles_spot_sizing(c)
+    _upgrade_profiles_trailing_off(c)
+    _sync_capital_config(c)
+
+
+def _sync_capital_config(c: sqlite3.Cursor) -> None:
+    """全账户钱包初始（如 10 万）与各 Profile 算仓本金（如 1 万）对齐环境配置。"""
+    from moss_quant import config as cfg
+
+    wallet_initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
+    profile_initial = float(cfg.MOSS_QUANT_PROFILE_CAPITAL)
+    now = _utc_now()
+    try:
+        settled_all = float(
+            c.execute(
+                "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements"
+            ).fetchone()[0]
+            or 0
+        )
+    except sqlite3.OperationalError:
+        settled_all = 0.0
+    wallet_balance = wallet_initial + settled_all
+    c.execute(
+        """INSERT INTO moss_wallet(id, initial_capital_usdt, balance_usdt, updated_at_utc)
+           VALUES (1, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             initial_capital_usdt=excluded.initial_capital_usdt,
+             balance_usdt=excluded.balance_usdt,
+             updated_at_utc=excluded.updated_at_utc""",
+        (wallet_initial, wallet_balance, now),
+    )
+    try:
+        profile_rows = c.execute("SELECT id FROM moss_profiles").fetchall()
+    except sqlite3.OperationalError:
+        return
+    for (pid,) in profile_rows:
+        settled_p = float(
+            c.execute(
+                "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements WHERE profile_id = ?",
+                (int(pid),),
+            ).fetchone()[0]
+            or 0
+        )
+        c.execute(
+            """UPDATE moss_profiles SET virtual_equity_usdt=?, updated_at_utc=?
+               WHERE id=?""",
+            (round(profile_initial + settled_p, 4), now, int(pid)),
+        )
+
+
+def _upgrade_profiles_spot_sizing(c: sqlite3.Cursor) -> None:
+    """已有 Profile 的性格参数统一为默认 1x 满仓（无杠杆）。"""
+    import json
+
+    from moss_quant.params import apply_spot_personality
+
+    try:
+        rows = c.execute(
+            "SELECT id, initial_params_json FROM moss_profiles"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    now = _utc_now()
+    for row in rows:
+        pid = int(row[0])
+        initial = json.loads(row[1] or "{}")
+        updated = apply_spot_personality(initial)
+        c.execute(
+            """UPDATE moss_profiles SET initial_params_json=?, updated_at_utc=?
+               WHERE id=?""",
+            (json.dumps(updated, ensure_ascii=False), now, pid),
+        )
+
+
+def _upgrade_profiles_trailing_off(c: sqlite3.Cursor) -> None:
+    """一次性：将历史 Profile 的移动止损关掉（此后默认不再自动开启）。"""
+    import json
+
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS moss_schema_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )"""
+    )
+    if c.execute(
+        "SELECT 1 FROM moss_schema_meta WHERE key='trailing_default_off_v1'"
+    ).fetchone():
+        return
+    try:
+        rows = c.execute(
+            "SELECT id, initial_params_json, tactical_params_json FROM moss_profiles"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    now = _utc_now()
+    for row in rows:
+        pid = int(row[0])
+        initial = json.loads(row[1] or "{}")
+        tactical = json.loads(row[2] or "{}")
+        initial["trailing_enabled"] = False
+        tactical["trailing_enabled"] = False
+        c.execute(
+            """UPDATE moss_profiles SET initial_params_json=?, tactical_params_json=?,
+               updated_at_utc=? WHERE id=?""",
+            (
+                json.dumps(initial, ensure_ascii=False),
+                json.dumps(tactical, ensure_ascii=False),
+                now,
+                pid,
+            ),
+        )
+    c.execute(
+        "INSERT OR REPLACE INTO moss_schema_meta(key, value) VALUES (?, ?)",
+        ("trailing_default_off_v1", now),
+    )
 
 
 def _ensure_moss_wallet_table(c: sqlite3.Cursor) -> None:
@@ -215,7 +332,7 @@ def _ensure_moss_wallet_table(c: sqlite3.Cursor) -> None:
     )"""
     )
     row = c.execute("SELECT id FROM moss_wallet WHERE id = 1").fetchone()
-    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
     now = _utc_now()
     if not row:
         try:
@@ -392,16 +509,16 @@ def get_moss_wallet(
     row = conn.execute(
         "SELECT initial_capital_usdt, balance_usdt, updated_at_utc FROM moss_wallet WHERE id = 1"
     ).fetchone()
-    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
     if not row:
-        initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+        initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
         return {
             "initial_capital_usdt": initial,
             "balance_usdt": initial,
             "realized_pnl_usdt": 0.0,
             "updated_at_utc": _utc_now(),
         }
-    initial = float(row["initial_capital_usdt"] or cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(row["initial_capital_usdt"] or cfg.MOSS_QUANT_WALLET_INITIAL)
     settled = float(
         conn.execute("SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements").fetchone()[
             0
@@ -423,8 +540,32 @@ def get_moss_wallet(
     }
 
 
+def profile_wallet_balance(
+    conn: sqlite3.Connection, profile_id: int, *, sync: bool = True
+) -> float:
+    """单 bot 钱包余额（原工程 wallet_balance）：Profile 初始 + 该 Profile 已实现盈亏。"""
+    from moss_quant import config as cfg
+
+    initial = float(cfg.MOSS_QUANT_PROFILE_CAPITAL)
+    pid = int(profile_id)
+    settled = float(
+        conn.execute(
+            "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements WHERE profile_id = ?",
+            (pid,),
+        ).fetchone()[0]
+        or 0
+    )
+    balance = initial + settled
+    if sync:
+        conn.execute(
+            "UPDATE moss_profiles SET virtual_equity_usdt=?, updated_at_utc=? WHERE id=?",
+            (round(balance, 4), _utc_now(), pid),
+        )
+    return balance
+
+
 def wallet_equity_for_sizing(conn: sqlite3.Connection) -> float:
-    """开仓名义仓位按全局钱包余额计算。"""
+    """已废弃：请用 profile_wallet_balance。保留以免旧引用报错。"""
     return float(get_moss_wallet(conn)["balance_usdt"])
 
 
@@ -516,7 +657,14 @@ def reset_moss_wallet(conn: sqlite3.Connection) -> None:
     from moss_quant import config as cfg
 
     _ensure_moss_wallet_table(conn.cursor())
-    initial = float(cfg.MOSS_QUANT_DEFAULT_CAPITAL)
+    initial = float(cfg.MOSS_QUANT_WALLET_INITIAL)
+    settled_all = float(
+        conn.execute(
+            "SELECT COALESCE(SUM(pnl_usdt), 0) FROM moss_settlements"
+        ).fetchone()[0]
+        or 0
+    )
+    balance = initial + settled_all
     now = _utc_now()
     conn.execute(
         """INSERT INTO moss_wallet(id, initial_capital_usdt, balance_usdt, updated_at_utc)
@@ -525,7 +673,7 @@ def reset_moss_wallet(conn: sqlite3.Connection) -> None:
              initial_capital_usdt=excluded.initial_capital_usdt,
              balance_usdt=excluded.balance_usdt,
              updated_at_utc=excluded.updated_at_utc""",
-        (initial, initial, now),
+        (initial, balance, now),
     )
 
 
@@ -535,6 +683,46 @@ def _ensure_profile_source_column(c: sqlite3.Cursor) -> None:
         c.execute(
             "ALTER TABLE moss_profiles ADD COLUMN profile_source TEXT NOT NULL DEFAULT 'manual'"
         )
+
+
+def _ensure_governance_columns(c: sqlite3.Cursor) -> None:
+    cols = {row[1] for row in c.execute("PRAGMA table_info(moss_profiles)").fetchall()}
+    if "governance_manual_lock" not in cols:
+        c.execute(
+            "ALTER TABLE moss_profiles ADD COLUMN governance_manual_lock INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _ensure_pool_governance_tables(c: sqlite3.Cursor) -> None:
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS moss_symbol_pool_streak (
+        symbol TEXT PRIMARY KEY,
+        last_pool_tier TEXT,
+        last_batch_id INTEGER,
+        degrade_streak INTEGER NOT NULL DEFAULT 0,
+        upgrade_streak INTEGER NOT NULL DEFAULT 0,
+        last_action TEXT,
+        last_action_at_utc TEXT,
+        updated_at_utc TEXT NOT NULL
+    )"""
+    )
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS moss_pool_governance_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL,
+        symbol TEXT NOT NULL,
+        action TEXT NOT NULL,
+        pool_tier TEXT,
+        degrade_streak INTEGER,
+        upgrade_streak INTEGER,
+        profile_id INTEGER,
+        detail_json TEXT,
+        created_at_utc TEXT NOT NULL
+    )"""
+    )
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS ix_moss_pool_gov_log_batch ON moss_pool_governance_log(batch_id)"
+    )
 
 
 def seed_moss_daily_core_symbols(c: sqlite3.Cursor) -> None:
@@ -666,6 +854,7 @@ def list_daily_core_symbols(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
 
 DAILY_PROFILE_SOURCE = "daily_auto"  # 历史遗留；新逻辑不再自动创建
 FROM_DAILY_PROFILE_SOURCE = "from_daily"
+GOVERNANCE_PROFILE_SOURCE = "governance_auto"
 MANUAL_PROFILE_SOURCE = "manual"
 DAILY_PROFILE_NAME_PREFIX = "daily-"
 
@@ -691,10 +880,141 @@ def row_to_profile(row: sqlite3.Row) -> Dict[str, Any]:
     d = dict(row)
     d["enabled"] = bool(d.get("enabled"))
     d["evolution_enabled"] = bool(d.get("evolution_enabled"))
+    d["governance_manual_lock"] = bool(d.get("governance_manual_lock"))
     d["profile_source"] = str(d.get("profile_source") or "manual")
     d["initial_params"] = json.loads(d.pop("initial_params_json") or "{}")
     d["tactical_params"] = json.loads(d.pop("tactical_params_json") or "{}")
     return d
+
+
+def get_symbol_pool_streak(
+    conn: sqlite3.Connection, symbol: str
+) -> Optional[Dict[str, Any]]:
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM moss_symbol_pool_streak WHERE symbol = ?", (sym,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_symbol_pool_streak(
+    conn: sqlite3.Connection,
+    symbol: str,
+    *,
+    last_pool_tier: str,
+    last_batch_id: int,
+    degrade_streak: int,
+    upgrade_streak: int,
+    last_action: Optional[str] = None,
+    last_action_at_utc: Optional[str] = None,
+    commit: bool = True,
+) -> Dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    now = _utc_now()
+    conn.execute(
+        """INSERT INTO moss_symbol_pool_streak(
+               symbol, last_pool_tier, last_batch_id,
+               degrade_streak, upgrade_streak,
+               last_action, last_action_at_utc, updated_at_utc)
+           VALUES (?,?,?,?,?,?,?,?)
+           ON CONFLICT(symbol) DO UPDATE SET
+               last_pool_tier=excluded.last_pool_tier,
+               last_batch_id=excluded.last_batch_id,
+               degrade_streak=excluded.degrade_streak,
+               upgrade_streak=excluded.upgrade_streak,
+               last_action=COALESCE(excluded.last_action, moss_symbol_pool_streak.last_action),
+               last_action_at_utc=COALESCE(excluded.last_action_at_utc, moss_symbol_pool_streak.last_action_at_utc),
+               updated_at_utc=excluded.updated_at_utc""",
+        (
+            sym,
+            last_pool_tier,
+            int(last_batch_id),
+            int(degrade_streak),
+            int(upgrade_streak),
+            last_action,
+            last_action_at_utc,
+            now,
+        ),
+    )
+    if commit:
+        conn.commit()
+    out = get_symbol_pool_streak(conn, sym)
+    return out or {}
+
+
+def insert_pool_governance_log(
+    conn: sqlite3.Connection,
+    *,
+    batch_id: int,
+    symbol: str,
+    action: str,
+    pool_tier: Optional[str] = None,
+    degrade_streak: Optional[int] = None,
+    upgrade_streak: Optional[int] = None,
+    profile_id: Optional[int] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO moss_pool_governance_log(
+               batch_id, symbol, action, pool_tier,
+               degrade_streak, upgrade_streak, profile_id,
+               detail_json, created_at_utc)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (
+            int(batch_id),
+            str(symbol).strip().upper(),
+            action,
+            pool_tier,
+            degrade_streak,
+            upgrade_streak,
+            profile_id,
+            json.dumps(detail or {}, ensure_ascii=False),
+            _utc_now(),
+        ),
+    )
+
+
+def list_symbol_pool_streaks(
+    conn: sqlite3.Connection, symbols: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
+    conn.row_factory = sqlite3.Row
+    if symbols:
+        syms = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        if not syms:
+            return []
+        placeholders = ",".join("?" for _ in syms)
+        rows = conn.execute(
+            f"SELECT * FROM moss_symbol_pool_streak WHERE symbol IN ({placeholders})",
+            syms,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM moss_symbol_pool_streak ORDER BY symbol ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_recent_pool_governance_logs(
+    conn: sqlite3.Connection, *, limit: int = 30
+) -> List[Dict[str, Any]]:
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT * FROM moss_pool_governance_log
+           ORDER BY id DESC LIMIT ?""",
+        (max(1, int(limit)),),
+    ).fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["detail"] = json.loads(d.pop("detail_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            d["detail"] = {}
+        out.append(d)
+    return out
 
 
 def get_profile(conn: sqlite3.Connection, profile_id: int) -> Optional[Dict[str, Any]]:
