@@ -32,7 +32,11 @@ def fetch_and_cache_position_id(symbol: str, profile_id: int) -> int:
         positions = _client(timeout=10).get_moss_positions(status="open", limit=200)
         # API 返回 ORDER BY id DESC，取第一个匹配（最新仓位）
         for pos in positions:
-            if pos.get("symbol") == symbol and pos.get("source") == SOURCE:
+            if (
+                pos.get("symbol") == symbol
+                and pos.get("source") == SOURCE
+                and int(pos.get("profile_id") or 0) == int(profile_id)
+            ):
                 pid = int(pos["id"])
                 _pos_id_cache[profile_id] = pid
                 return pid

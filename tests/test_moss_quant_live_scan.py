@@ -40,6 +40,22 @@ def test_protocol_position_ids_returns_all_real_position_ids():
     assert protocol_position_ids(rows) == [11, 12]
 
 
+def test_protocol_ingest_result_requires_traded_action():
+    from moss_quant.paper_scanner import protocol_ingest_open_result
+
+    ok = protocol_ingest_open_result(
+        {"traded": 1, "details": [{"action": "traded", "position_id": 42}]}
+    )
+    rejected = protocol_ingest_open_result(
+        {"traded": 0, "errors": 1, "details": [{"action": "error", "error": "disabled"}]}
+    )
+
+    assert ok.ok is True
+    assert ok.position_id == 42
+    assert rejected.ok is False
+    assert "disabled" in rejected.error
+
+
 def test_mark_profile_open_signals_external_closed_only_open_positions():
     from moss_quant.db import (
         mark_profile_open_signals_external_closed,

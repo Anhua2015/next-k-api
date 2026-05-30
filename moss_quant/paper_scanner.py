@@ -7,6 +7,7 @@ import logging
 import math
 import sqlite3
 import time as _time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -235,6 +236,34 @@ def latest_protocol_open_positions() -> Optional[List[Dict[str, Any]]]:
 
 def can_send_live_open(sender: Any, live_opens_allowed: bool) -> bool:
     return sender is None or bool(live_opens_allowed)
+
+
+@dataclass(frozen=True)
+class ProtocolOpenResult:
+    ok: bool
+    position_id: int = 0
+    error: str = ""
+
+
+def protocol_ingest_open_result(resp: Any) -> ProtocolOpenResult:
+    if not isinstance(resp, dict):
+        return ProtocolOpenResult(ok=False, error="invalid_protocol_response")
+    details = resp.get("details") or []
+    for detail in details:
+        if isinstance(detail, dict) and detail.get("action") == "traded":
+            return ProtocolOpenResult(
+                ok=True,
+                position_id=int(detail.get("position_id") or 0),
+            )
+    first = details[0] if details and isinstance(details[0], dict) else {}
+    error = (
+        resp.get("error")
+        or first.get("error")
+        or first.get("reason")
+        or first.get("action")
+        or "protocol_open_not_traded"
+    )
+    return ProtocolOpenResult(ok=False, error=str(error))
 
 
 def fetch_open_positions_map(conn: sqlite3.Connection) -> Dict[int, Dict[str, Any]]:
@@ -1160,6 +1189,57 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
             logger.info("[moss] %s SKIP OPEN: insufficient free margin", label)
             continue
 
+        protocol_position_id = 0
+        if sender:
+            atr_series = compute_atr(df, 14)
+            atr_val = float(atr_series.iloc[-1])
+            if np.isnan(atr_val) or atr_val <= 0:
+                atr_val = mark * 0.02
+            sl_dist = params.sl_atr_mult * atr_val
+            tp_dist = sl_dist * params.tp_rr_ratio
+            sl_price = mark - sl_dist if side == "LONG" else mark + sl_dist
+            tp_price = mark + tp_dist if side == "LONG" else mark - tp_dist
+            open_resp = sender.send_open(
+                symbol=symbol,
+                side=side,
+                entry_price=mark,
+                sl_price=round(sl_price, 6),
+                tp_price=round(tp_price, 6),
+                notional=notional,
+                profile_id=pid,
+                play=profile.get("template", ""),
+                composite=composite,
+                regime=regime_label,
+            )
+            open_result = protocol_ingest_open_result(open_resp)
+            if not open_result.ok:
+                stats["details"].append(
+                    _scan_detail(
+                        label,
+                        profile,
+                        {
+                            "symbol": symbol,
+                            "action": "error",
+                            "error": f"protocol_open_failed: {open_result.error}",
+                            "template": profile.get("template"),
+                            "composite": composite,
+                            "regime": regime_label,
+                        },
+                    )
+                )
+                logger.error("[moss] %s protocol open failed: %s", label, open_result.error)
+                continue
+            protocol_position_id = open_result.position_id
+            if protocol_position_id:
+                sender.set_cached_position_id(pid, protocol_position_id)
+            else:
+                # 延迟重试：protocol 可能尚未完成 position 创建
+                for _retry in range(3):
+                    protocol_position_id = sender.fetch_and_cache_position_id(symbol, pid)
+                    if protocol_position_id:
+                        break
+                    _time.sleep(0.3)
+
         conn.execute(
             """INSERT INTO moss_signals(
                 profile_id, recorded_at_utc, side, symbol, entry_price,
@@ -1181,36 +1261,6 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
         )
         stats["opens"] += 1
 
-        # 实盘模式：发送开仓信号到 protocol
-        if sender:
-            atr_series = compute_atr(df, 14)
-            atr_val = float(atr_series.iloc[-1])
-            if np.isnan(atr_val) or atr_val <= 0:
-                atr_val = mark * 0.02
-            sl_dist = params.sl_atr_mult * atr_val
-            tp_dist = sl_dist * params.tp_rr_ratio
-            sl_price = mark - sl_dist if side == "LONG" else mark + sl_dist
-            tp_price = mark + tp_dist if side == "LONG" else mark - tp_dist
-            sender.send_open(
-                symbol=symbol,
-                side=side,
-                entry_price=mark,
-                sl_price=round(sl_price, 6),
-                tp_price=round(tp_price, 6),
-                notional=notional,
-                profile_id=pid,
-                play=profile.get("template", ""),
-                composite=composite,
-                regime=regime_label,
-            )
-            # 缓存 protocol position_id 供后续 trailing/close 使用
-            # 延迟重试：protocol 可能尚未完成 position 创建
-            for _retry in range(3):
-                pos_id = sender.fetch_and_cache_position_id(symbol, pid)
-                if pos_id:
-                    break
-                _time.sleep(0.3)
-
         stats["details"].append(
             _scan_detail(
                 label,
@@ -1221,6 +1271,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                     "template": profile.get("template"),
                     "composite": composite,
                     "regime": regime_label,
+                    "position_id": protocol_position_id or None,
                     **_position_fields(
                         side=side,
                         entry=mark,
