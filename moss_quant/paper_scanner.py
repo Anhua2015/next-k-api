@@ -1017,7 +1017,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                                 sender.send_rolling(
                                     symbol=symbol,
                                     side=side,
-                                    notional=add_notional,
+                                    margin_usdt=round(new_margin, 6),
                                     profile_id=pid,
                                     play=profile.get("template", ""),
                                     sl_price=round(roll_sl, 6),
@@ -1205,7 +1205,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                 entry_price=mark,
                 sl_price=round(sl_price, 6),
                 tp_price=round(tp_price, 6),
-                notional=notional,
+                margin_usdt=round(notional / lev, 6),
                 profile_id=pid,
                 play=profile.get("template", ""),
                 composite=composite,

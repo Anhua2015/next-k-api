@@ -42,6 +42,17 @@ _moss_daily_optimize_lock = threading.Lock()
 _moss_mcap_scan_lock = threading.Lock()
 
 
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    return _safe_float(os.getenv(name, default), default)
+
+
 def moss_daily_optimize_busy() -> bool:
     return _moss_daily_optimize_lock.locked()
 
@@ -205,6 +216,7 @@ def _push_signals_to_protocol() -> None:
         return
 
     signals = []
+    zct_leverage = max(_env_float("ZCT_LEVERAGE", 10.0), 1e-9)
     for r in rows:
         logger.info(
             "_push_signals: id=%s symbol=%s side=%s play=%s entry=%s sl=%s tp=%s",
@@ -222,7 +234,7 @@ def _push_signals_to_protocol() -> None:
             "tp_price": r["tp_price"],
             "confidence": r["confidence"],
             "regime": r["regime"],
-            "notional_usdt": r["virtual_notional_usdt"],
+            "margin_usdt": round(_safe_float(r["virtual_notional_usdt"], 0.0) / zct_leverage, 6),
         })
 
     body = json.dumps({"signals": signals}).encode("utf-8")
@@ -363,7 +375,7 @@ def _push_momentum_signals_to_protocol() -> None:
             "sl_price": sl_price,
             "confidence": None,
             "regime": None,
-            "notional_usdt": r["virtual_notional_usdt"],
+            "margin_usdt": round(_safe_float(r["virtual_notional_usdt"], 0.0), 6),
             "play": r["signal_type"] or "",
         })
 
@@ -441,7 +453,7 @@ def _push_jiezhen_signals_to_protocol() -> None:
             "sl_price": sl_price,
             "confidence": None,
             "regime": None,
-            "notional_usdt": r["virtual_notional_usdt"],
+            "margin_usdt": round(_safe_float(r["virtual_notional_usdt"], 0.0), 6),
             "play": r["signal_type"] or "",
         })
 

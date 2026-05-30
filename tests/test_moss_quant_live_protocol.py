@@ -106,7 +106,7 @@ def test_signal_sender_rolling_action_is_stable(monkeypatch):
     signal_sender.send_rolling(
         symbol="BTCUSDT",
         side="LONG",
-        notional=100,
+        margin_usdt=100,
         profile_id=7,
         play="trend",
         sl_price=90,
@@ -115,18 +115,10 @@ def test_signal_sender_rolling_action_is_stable(monkeypatch):
     )
 
     assert captured["action"] == "rolling"
+    assert captured["margin_usdt"] == 100
 
 
 def test_signal_sender_fetch_position_id_filters_profile(monkeypatch):
     from moss_quant import signal_sender
 
-    class FakeClient:
-        def get_moss_positions(self, status="open", limit=200):
-            return [
-                {"id": 91, "source": "moss_quant", "symbol": "BTCUSDT", "profile_id": 9},
-                {"id": 71, "source": "moss_quant", "symbol": "BTCUSDT", "profile_id": 7},
-            ]
-
-    monkeypatch.setattr(signal_sender, "_client", lambda timeout=10: FakeClient())
-
-    assert signal_sender.fetch_and_cache_position_id("BTCUSDT", 7) == 71
+    assert signal_sender.fetch_and_cache_position_id("BTCUSDT", 7) == 0

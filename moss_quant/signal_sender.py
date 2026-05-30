@@ -27,21 +27,7 @@ def set_cached_position_id(profile_id: int, position_id: int) -> None:
 
 
 def fetch_and_cache_position_id(symbol: str, profile_id: int) -> int:
-    """查询 protocol 该 symbol+source 的最新 open 仓位 ID 并缓存。"""
-    try:
-        positions = _client(timeout=10).get_moss_positions(status="open", limit=200)
-        # API 返回 ORDER BY id DESC，取第一个匹配（最新仓位）
-        for pos in positions:
-            if (
-                pos.get("symbol") == symbol
-                and pos.get("source") == SOURCE
-                and int(pos.get("profile_id") or 0) == int(profile_id)
-            ):
-                pid = int(pos["id"])
-                _pos_id_cache[profile_id] = pid
-                return pid
-    except Exception as exc:
-        logger.warning("[moss_quant] fetch position_id for %s failed: %s", symbol, exc)
+    """Protocol 已不再返回本地 position_id；保留兼容函数并固定返回 0。"""
     return 0
 
 
@@ -103,7 +89,7 @@ def send_open(
     entry_price: float,
     sl_price: float,
     tp_price: Optional[float],
-    notional: float,
+    margin_usdt: float,
     profile_id: int,
     play: str = "",
     composite: float = 0.0,
@@ -114,8 +100,8 @@ def send_open(
         logger.debug("[moss_quant] real mode disabled, skip send_open")
         return {"ok": False, "error": "real_mode_disabled"}
 
-    logger.info("[moss_quant] send_open: symbol=%s side=%s notional=%.2f sl=%.4f tp=%s",
-                symbol, side, notional, sl_price, tp_price)
+    logger.info("[moss_quant] send_open: symbol=%s side=%s margin=%.2f sl=%.4f tp=%s",
+                symbol, side, margin_usdt, sl_price, tp_price)
     try:
         return _client().send_open(
             symbol=symbol,
@@ -123,7 +109,7 @@ def send_open(
             entry_price=entry_price,
             sl_price=sl_price,
             tp_price=tp_price,
-            notional=notional,
+            margin_usdt=margin_usdt,
             profile_id=profile_id,
             play=play,
             composite=composite,
@@ -204,7 +190,7 @@ def send_rolling(
     *,
     symbol: str,
     side: str,
-    notional: float,
+    margin_usdt: float,
     profile_id: int,
     play: str = "",
     sl_price: float,
@@ -216,8 +202,8 @@ def send_rolling(
         logger.debug("[moss_quant] real mode disabled, skip send_rolling")
         return {"ok": False, "error": "real_mode_disabled"}
 
-    logger.info("[moss_quant] send_rolling: symbol=%s side=%s notional=%.2f",
-                symbol, side, notional)
+    logger.info("[moss_quant] send_rolling: symbol=%s side=%s margin=%.2f",
+                symbol, side, margin_usdt)
     try:
         return _client().send_open(
             symbol=symbol,
@@ -225,7 +211,7 @@ def send_rolling(
             entry_price=None,
             sl_price=sl_price,
             tp_price=tp_price,
-            notional=notional,
+            margin_usdt=margin_usdt,
             profile_id=profile_id,
             play=f"{play}_rolling" if play else "rolling",
             composite=0.0,
