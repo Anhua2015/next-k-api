@@ -170,6 +170,11 @@ def _summarize_protocol_moss(
         )
 
     wallet_balance = float(account.get("wallet_balance_usdt") or 0)
+    profile_capital = (
+        round(wallet_balance / int(enabled_profiles), 4)
+        if int(enabled_profiles or 0) > 0
+        else None
+    )
     return {
         "ok": True,
         "mode": "live",
@@ -180,6 +185,7 @@ def _summarize_protocol_moss(
         "wallet_initial_usdt": round(wallet_balance - total_pnl, 4),
         "wallet_balance_usdt": wallet_balance,
         "available_balance_usdt": float(account.get("available_balance_usdt") or 0),
+        "profile_capital_usdt": profile_capital,
         "enabled_profiles": int(enabled_profiles or 0),
         "per_profile": [
             per_profile_map[k] for k in sorted(per_profile_map.keys())
@@ -188,6 +194,81 @@ def _summarize_protocol_moss(
             open_profile_map[k] for k in sorted(open_profile_map.keys())
         ],
         "protocol_moss": account.get("moss_quant") or {},
+    }
+
+
+def _moss_optimize_policy(mq_cfg) -> Dict[str, Any]:
+    return {
+        "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
+        "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
+        "min_train_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES,
+        "min_val_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_VAL_TRADES,
+        "max_train_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_TRAIN_DRAWDOWN,
+        "max_val_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_VAL_DRAWDOWN,
+        "validation_top_k": mq_cfg.MOSS_QUANT_OPTIMIZE_VALIDATION_TOP_K,
+        "full_risk_slots": mq_cfg.MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS,
+        "mcap_observation_days": mq_cfg.MOSS_QUANT_MCAP_OBSERVATION_DAYS,
+    }
+
+
+def _moss_runtime_fields(conn, mq_cfg) -> Dict[str, Any]:
+    running = False
+    mcap_running = False
+    daily_pools: dict = {}
+    try:
+        from moss_quant.daily_optimize_service import (
+            is_daily_optimize_in_progress,
+            summarize_latest_daily_pools,
+        )
+        from moss_quant.mcap_scan_service import is_mcap_scan_in_progress
+
+        running = is_daily_optimize_in_progress(conn)
+        mcap_running = is_mcap_scan_in_progress(conn)
+        daily_pools = summarize_latest_daily_pools(conn)
+    except Exception:
+        pass
+    return {
+        "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
+        "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,
+        "data_source_label": mq_cfg.data_source_label(),
+        "kline_limit": mq_cfg.MOSS_QUANT_KLINE_LIMIT,
+        "daily_optimize_utc": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_UTC,
+        "daily_optimize_enabled": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED,
+        "daily_optimize_apply_profiles": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES,
+        "daily_optimize_running": running,
+        "mcap_scan_running": mcap_running,
+        "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
+        "optimize_policy": _moss_optimize_policy(mq_cfg),
+        "daily_optimize_pools": daily_pools,
+        "pool_governance": _pool_governance_summary(conn),
+    }
+
+
+def _moss_live_unavailable_summary(
+    conn,
+    mq_cfg,
+    *,
+    reason: str,
+    enabled_profiles: int = 0,
+) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "mode": "live_unavailable",
+        "lane": "moss_quant",
+        "protocol_error": reason,
+        "open_positions": 0,
+        "settled_count": 0,
+        "total_pnl_usdt": 0.0,
+        "wallet_initial_usdt": None,
+        "wallet_balance_usdt": None,
+        "available_balance_usdt": None,
+        "profile_capital_usdt": None,
+        "enabled_profiles": int(enabled_profiles or 0),
+        "per_profile": [],
+        "per_symbol": [],
+        "open_by_profile": [],
+        "protocol_moss": {},
+        **_moss_runtime_fields(conn, mq_cfg),
     }
 
 
@@ -900,134 +981,54 @@ async def get_summary():
             from moss_quant.protocol_client import ProtocolClient
 
             protocol = ProtocolClient.from_env()
+            enabled_profile_count = count_enabled_profiles(conn)
             if protocol.enabled():
                 account = protocol.get_account_summary()
                 positions = protocol.get_moss_positions(status=None, limit=1000)
                 summary = _summarize_protocol_moss(
                     account=account,
                     positions=positions,
-                    enabled_profiles=count_enabled_profiles(conn),
+                    enabled_profiles=enabled_profile_count,
                 )
-                running = False
-                mcap_running = False
-                try:
-                    from moss_quant.daily_optimize_service import is_daily_optimize_in_progress
-                    from moss_quant.mcap_scan_service import is_mcap_scan_in_progress
-
-                    running = is_daily_optimize_in_progress(conn)
-                    mcap_running = is_mcap_scan_in_progress(conn)
-                except Exception:
-                    pass
                 return {
                     **summary,
-                    "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
-                    "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,
-                    "data_source_label": mq_cfg.data_source_label(),
-                    "kline_limit": mq_cfg.MOSS_QUANT_KLINE_LIMIT,
-                    "daily_optimize_utc": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_UTC,
-                    "daily_optimize_enabled": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED,
-                    "daily_optimize_apply_profiles": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES,
-                    "daily_optimize_running": running,
-                    "mcap_scan_running": mcap_running,
-                    "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
+                    **_moss_runtime_fields(conn, mq_cfg),
                 }
-        except Exception as e:
-            logger.warning("[moss] live protocol summary failed, fallback local: %s", e)
-
-        cur = conn.cursor()
-        open_n = int(
-            cur.execute(
-                """SELECT COUNT(*) FROM moss_signals
-                   WHERE outcome IS NULL AND side IN ('LONG','SHORT')"""
-            ).fetchone()[0]
-            or 0
-        )
-        settled = int(
-            cur.execute("SELECT COUNT(*) FROM moss_settlements").fetchone()[0] or 0
-        )
-        from moss_quant.db import (
-            get_moss_wallet,
-            list_open_unrealized_by_profile,
-            list_settlement_stats_by_profile,
-            list_settlement_stats_by_symbol,
-        )
-
-        wallet = get_moss_wallet(conn)
-        total_pnl = float(wallet["realized_pnl_usdt"])
-        wallet_balance = float(wallet["balance_usdt"])
-        wallet_initial = float(wallet["initial_capital_usdt"])
-        per_profile = list_settlement_stats_by_profile(conn)
-        per_symbol = list_settlement_stats_by_symbol(conn)
-        open_by_profile = list_open_unrealized_by_profile(conn)
-        profiles = int(
-            cur.execute("SELECT COUNT(*) FROM moss_profiles WHERE enabled=1").fetchone()[0]
-            or 0
-        )
-
-        running = False
-        mcap_running = False
-        daily_pools: dict = {}
-        try:
-            from moss_quant.daily_optimize_service import (
-                is_daily_optimize_in_progress,
-                summarize_latest_daily_pools,
+            return _moss_live_unavailable_summary(
+                conn,
+                mq_cfg,
+                reason="protocol_api_url_missing",
+                enabled_profiles=enabled_profile_count,
             )
-            from moss_quant.mcap_scan_service import is_mcap_scan_in_progress
+        except Exception as e:
+            logger.warning("[moss] live protocol summary failed: %s", e)
+            try:
+                from moss_quant.db import count_enabled_profiles
 
-            running = is_daily_optimize_in_progress(conn)
-            mcap_running = is_mcap_scan_in_progress(conn)
-            daily_pools = summarize_latest_daily_pools(conn)
-        except Exception:
-            pass
-        return {
-            "ok": True,
-            "lane": "moss_quant",
-            "open_positions": open_n,
-            "settled_count": settled,
-            "total_pnl_usdt": total_pnl,
-            "wallet_initial_usdt": wallet_initial,
-            "wallet_balance_usdt": wallet_balance,
-            "profile_capital_usdt": mq_cfg.MOSS_QUANT_PROFILE_CAPITAL,
-            "per_profile": per_profile,
-            "per_symbol": per_symbol,
-            "open_by_profile": open_by_profile,
-            "enabled_profiles": profiles,
-            "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
-            "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,
-            "data_source_label": mq_cfg.data_source_label(),
-            "kline_limit": mq_cfg.MOSS_QUANT_KLINE_LIMIT,
-            "daily_optimize_utc": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_UTC,
-            "daily_optimize_enabled": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED,
-            "daily_optimize_apply_profiles": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES,
-            "daily_optimize_running": running,
-            "mcap_scan_running": mcap_running,
-            "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
-            "optimize_policy": {
-                "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
-                "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
-                "min_train_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES,
-                "min_val_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_VAL_TRADES,
-                "max_train_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_TRAIN_DRAWDOWN,
-                "max_val_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_VAL_DRAWDOWN,
-                "validation_top_k": mq_cfg.MOSS_QUANT_OPTIMIZE_VALIDATION_TOP_K,
-                "full_risk_slots": mq_cfg.MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS,
-                "mcap_observation_days": mq_cfg.MOSS_QUANT_MCAP_OBSERVATION_DAYS,
-            },
-            "daily_optimize_pools": daily_pools,
-            "pool_governance": _pool_governance_summary(conn),
-        }
+                enabled_profile_count = count_enabled_profiles(conn)
+            except Exception:
+                enabled_profile_count = 0
+            return _moss_live_unavailable_summary(
+                conn,
+                mq_cfg,
+                reason=str(e),
+                enabled_profiles=enabled_profile_count,
+            )
     except sqlite3.OperationalError:
         from moss_quant import config as mq_cfg
 
         return {
             "ok": True,
+            "mode": "live_unavailable",
             "lane": "moss_quant",
+            "protocol_error": "local_db_unavailable",
             "open_positions": 0,
             "settled_count": 0,
             "total_pnl_usdt": 0.0,
-            "wallet_initial_usdt": mq_cfg.MOSS_QUANT_WALLET_INITIAL,
-            "wallet_balance_usdt": mq_cfg.MOSS_QUANT_WALLET_INITIAL,
-            "profile_capital_usdt": mq_cfg.MOSS_QUANT_PROFILE_CAPITAL,
+            "wallet_initial_usdt": None,
+            "wallet_balance_usdt": None,
+            "available_balance_usdt": None,
+            "profile_capital_usdt": None,
             "enabled_profiles": 0,
             "max_active_profiles": mq_cfg.MOSS_QUANT_MAX_ACTIVE_PROFILES,
             "data_source": mq_cfg.MOSS_QUANT_DATA_SOURCE,
@@ -1039,10 +1040,7 @@ async def get_summary():
             "daily_optimize_running": False,
             "mcap_scan_running": False,
             "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
-            "optimize_policy": {
-                "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
-                "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
-            },
+            "optimize_policy": _moss_optimize_policy(mq_cfg),
             "daily_optimize_pools": {},
             "pool_governance": {},
         }

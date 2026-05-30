@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 
 def test_live_summary_aggregates_protocol_positions():
     from routers.moss_quant import _summarize_protocol_moss
@@ -39,9 +41,38 @@ def test_live_summary_aggregates_protocol_positions():
 
     assert summary["mode"] == "live"
     assert summary["wallet_balance_usdt"] == 1000
+    assert summary["profile_capital_usdt"] == 500
     assert summary["open_positions"] == 1
     assert summary["settled_count"] == 2
     assert summary["total_pnl_usdt"] == 9.5
+
+
+def test_live_unavailable_summary_does_not_emit_paper_wallet_defaults():
+    from moss_quant import config as mq_cfg
+    from moss_quant.db import migrate_moss_tables
+    from routers.moss_quant import _moss_live_unavailable_summary
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        migrate_moss_tables(conn.cursor())
+
+        summary = _moss_live_unavailable_summary(
+            conn,
+            mq_cfg,
+            reason="protocol_api_url_missing",
+            enabled_profiles=3,
+        )
+    finally:
+        conn.close()
+
+    assert summary["mode"] == "live_unavailable"
+    assert summary["protocol_error"] == "protocol_api_url_missing"
+    assert summary["wallet_initial_usdt"] is None
+    assert summary["wallet_balance_usdt"] is None
+    assert summary["available_balance_usdt"] is None
+    assert summary["profile_capital_usdt"] is None
+    assert summary["enabled_profiles"] == 3
 
 
 def test_live_open_position_uses_mark_price_and_unrealized_pnl():
