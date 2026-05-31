@@ -31,13 +31,15 @@ def test_protocol_ingest_result_requires_traded_action():
     from moss_quant.paper_scanner import protocol_ingest_open_result
 
     ok = protocol_ingest_open_result(
-        {"traded": 1, "details": [{"action": "traded", "position_id": 42}]}
+        {"traded": 1, "details": [{"action": "traded", "position_id": 42, "client_ref": "moss:1:open:1"}]}
     )
     rejected = protocol_ingest_open_result(
         {"traded": 0, "errors": 1, "details": [{"action": "error", "error": "disabled"}]}
     )
 
     assert ok.ok is True
+    assert ok.position_id == 42
+    assert ok.client_ref == "moss:1:open:1"
     assert rejected.ok is False
     assert "disabled" in rejected.error
 
@@ -73,10 +75,119 @@ def test_mark_profile_open_signals_external_closed_only_open_positions():
         (now, now),
     )
 
-    changed = mark_profile_open_signals_external_closed(conn, 1)
+    changed = mark_profile_open_signals_external_closed(conn, 1, exit_price=95.0)
 
     assert changed == 1
-    row = conn.execute("SELECT outcome, exit_rule, unrealized_pnl_usdt FROM moss_signals WHERE id=10").fetchone()
-    assert row == ("external_closed", "external_closed", 0)
+    row = conn.execute(
+        "SELECT outcome, exit_rule, unrealized_pnl_usdt, pnl_usdt, exit_price FROM moss_signals WHERE id=10"
+    ).fetchone()
+    assert row[0] == "external_closed"
+    assert row[1] == "external_closed"
+    assert row[2] == 0
+    assert row[3] is not None
+    assert row[4] == 95.0
+    settled = conn.execute(
+        "SELECT COUNT(*) FROM moss_settlements WHERE profile_id=1"
+    ).fetchone()[0]
+    assert settled == 1
     wait_outcome = conn.execute("SELECT outcome FROM moss_signals WHERE id=11").fetchone()[0]
     assert wait_outcome is None
+
+
+def test_compute_paper_protective_prices_long():
+    import pandas as pd
+    from moss_quant.core.decision import DecisionParams
+    from moss_quant.paper_scanner import compute_paper_protective_prices
+
+    params = DecisionParams(sl_atr_mult=2.0, tp_rr_ratio=2.0, trailing_enabled=False)
+    df = pd.DataFrame(
+        {
+            "high": [110.0],
+            "low": [90.0],
+            "close": [100.0],
+            "open": [100.0],
+        }
+    )
+    prices = compute_paper_protective_prices(
+        side="LONG",
+        entry=100.0,
+        mark=100.0,
+        params=params,
+        df=df,
+    )
+
+    assert prices["sl_price"] == 60.0
+    assert prices["tp_price"] == 180.0
+
+
+def test_compute_paper_protective_prices_trailing_tightens_long_sl():
+    import pandas as pd
+    from moss_quant.core.decision import DecisionParams
+    from moss_quant.paper_scanner import compute_paper_protective_prices
+
+    params = DecisionParams(
+        sl_atr_mult=2.0,
+        tp_rr_ratio=2.0,
+        trailing_enabled=True,
+        trailing_activation_pct=0.01,
+        trailing_distance_atr=1.0,
+    )
+    df = pd.DataFrame(
+        {
+            "high": [115.0],
+            "low": [100.0],
+            "close": [110.0],
+            "open": [100.0],
+        }
+    )
+    prices = compute_paper_protective_prices(
+        side="LONG",
+        entry=100.0,
+        mark=110.0,
+        params=params,
+        df=df,
+    )
+
+    assert prices["atr_sl"] == 70.0
+    assert prices["trailing_sl"] == 100.0
+    assert prices["sl_price"] == 100.0
+
+
+def test_sync_live_protective_orders_updates_meta(monkeypatch):
+    import pandas as pd
+    from moss_quant.core.decision import DecisionParams
+    from moss_quant.paper_scanner import sync_live_protective_orders
+
+    sent = {"sl": 0, "tp": 0}
+
+    class FakeSender:
+        def send_update_sl(self, **kwargs):
+            sent["sl"] += 1
+            return {"details": [{"action": "traded"}]}
+
+        def send_update_tp(self, **kwargs):
+            sent["tp"] += 1
+            return {"details": [{"action": "traded"}]}
+
+    params = DecisionParams(sl_atr_mult=2.0, tp_rr_ratio=2.0)
+    df = pd.DataFrame(
+        {"high": [110.0], "low": [90.0], "close": [100.0], "open": [100.0]}
+    )
+    meta = sync_live_protective_orders(
+        sender=FakeSender(),
+        symbol="BTCUSDT",
+        side="LONG",
+        entry=100.0,
+        mark=100.0,
+        params=params,
+        df=df,
+        profile_id=1,
+        meta={},
+        has_live_position=True,
+    )
+
+    assert sent["sl"] == 1
+    assert sent["tp"] == 1
+    assert meta["last_synced_sl"] == 60.0
+    assert meta["last_synced_tp"] == 180.0
+    assert meta.get("last_synced_at_utc")

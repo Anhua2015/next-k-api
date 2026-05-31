@@ -118,22 +118,21 @@ def _summarize_protocol_moss(
     leverage: Optional[float] = None,
 ) -> Dict[str, Any]:
     from moss_quant.db import (
-        list_profiles_for_paper_scan,
+        build_profile_by_symbol_map,
         list_settlement_stats_by_profile,
         list_settlement_stats_by_symbol,
     )
 
-    open_rows = list(positions or [])
+    open_rows = [
+        row for row in (positions or [])
+        if float(row.get("quantity") or row.get("positionAmt") or 0) != 0
+    ]
     total_pnl = round(
         sum(float(row.get("total_pnl_usdt") or 0) for row in list_settlement_stats_by_profile(conn)),
         4,
     )
 
-    profile_by_symbol: Dict[str, Dict[str, Any]] = {}
-    for profile in list_profiles_for_paper_scan(conn):
-        symbol = str(profile.get("symbol") or "").upper()
-        if symbol and symbol not in profile_by_symbol:
-            profile_by_symbol[symbol] = dict(profile)
+    profile_by_symbol = build_profile_by_symbol_map(conn)
 
     open_profile_map: Dict[int, Dict[str, Any]] = {}
     for row in open_rows:
@@ -279,7 +278,7 @@ def _moss_live_unavailable_summary(
 
 
 def _position_unrealized_pnl(p: Dict[str, Any]) -> float:
-    for key in ("unrealized_pnl_usdt", "upnl"):
+    for key in ("unrealized_pnl_usdt", "upnl", "pnl_usdt"):
         if key in p and p.get(key) is not None:
             return float(p.get(key) or 0)
     return 0.0
@@ -1025,7 +1024,7 @@ async def get_summary():
             summary_leverage = _moss_summary_leverage(conn)
             if protocol.enabled():
                 account = protocol.get_account_summary()
-                positions = protocol.get_moss_positions(status=None, limit=1000)
+                positions = protocol.get_moss_positions(status="open", limit=1000)
                 summary = _summarize_protocol_moss(
                     conn=conn,
                     account=account,
@@ -1303,17 +1302,16 @@ async def get_signals(profile_id: Optional[int] = None):
 
         protocol = ProtocolClient.from_env()
         if protocol.enabled():
-            positions = protocol.get_moss_positions(status=None, limit=1000)
+            positions = protocol.get_moss_positions(status="open", limit=1000)
             conn = _conn()
             try:
-                from moss_quant.db import list_profiles_for_paper_scan
+                from moss_quant.db import build_profile_by_symbol_map
                 from moss_quant.paper_scanner import serialize_signal_rows
 
-                symbol_to_profile: Dict[str, int] = {}
-                for profile in list_profiles_for_paper_scan(conn):
-                    symbol = str(profile.get("symbol") or "").upper()
-                    if symbol and symbol not in symbol_to_profile:
-                        symbol_to_profile[symbol] = int(profile["id"])
+                profile_map = build_profile_by_symbol_map(conn)
+                symbol_to_profile = {
+                    sym: int(prof["id"]) for sym, prof in profile_map.items()
+                }
 
                 if profile_id:
                     rows = conn.execute(

@@ -171,6 +171,36 @@ def send_update_sl(
         return {"ok": False, "error": str(exc)}
 
 
+def send_update_tp(
+    *,
+    symbol: str,
+    side: str,
+    new_tp_price: float,
+    profile_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """更新动态止盈 → POST /api/binance/signals/ingest"""
+    if not is_real_mode():
+        logger.debug("[moss_quant] real mode disabled, skip send_update_tp")
+        return {"ok": False, "error": "real_mode_disabled"}
+
+    logger.info("[moss_quant] send_update_tp: symbol=%s side=%s new_tp=%.4f",
+                symbol, side, new_tp_price)
+    try:
+        return _client().send_update_tp(
+            symbol=symbol,
+            side=side,
+            new_tp_price=new_tp_price,
+            profile_id=profile_id,
+        )
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500] if exc.response else ""
+        logger.error("[moss_quant] send_update_tp HTTP %s: %s", exc.response.status_code, detail)
+        return {"ok": False, "error": detail or str(exc)}
+    except Exception as exc:
+        logger.error("[moss_quant] send_update_tp failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
 def send_rolling(
     *,
     symbol: str,

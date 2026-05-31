@@ -19,8 +19,9 @@ from moss_quant.core.indicators import atr as compute_atr
 from moss_quant.core.regime import classify_regime
 from moss_quant.db import (
     _utc_now,
+    insert_open_signal_from_protocol,
     list_profiles_for_paper_scan,
-    mark_profile_open_signals_external_closed,
+    settle_profile_external_closed,
     profile_wallet_balance,
     sync_moss_wallet_from_settlements,
 )
@@ -245,6 +246,18 @@ def can_send_live_open(sender: Any, live_opens_allowed: bool) -> bool:
 class ProtocolOpenResult:
     ok: bool
     error: str = ""
+    position_id: Optional[int] = None
+    client_ref: str = ""
+    entry_price: Optional[float] = None
+
+
+def _protocol_ingest_traded(resp: Any) -> bool:
+    if not isinstance(resp, dict):
+        return False
+    for detail in resp.get("details") or []:
+        if isinstance(detail, dict) and detail.get("action") == "traded":
+            return True
+    return False
 
 
 def protocol_ingest_open_result(resp: Any) -> ProtocolOpenResult:
@@ -253,7 +266,19 @@ def protocol_ingest_open_result(resp: Any) -> ProtocolOpenResult:
     details = resp.get("details") or []
     for detail in details:
         if isinstance(detail, dict) and detail.get("action") == "traded":
-            return ProtocolOpenResult(ok=True)
+            pid = detail.get("position_id")
+            entry_raw = detail.get("entry_price")
+            entry_price = float(entry_raw) if entry_raw is not None else None
+            return ProtocolOpenResult(
+                ok=True,
+                position_id=int(pid) if pid is not None else None,
+                client_ref=str(
+                    detail.get("client_ref")
+                    or detail.get("api_signal_id")
+                    or ""
+                ),
+                entry_price=entry_price,
+            )
     first = details[0] if details and isinstance(details[0], dict) else {}
     error = (
         resp.get("error")
@@ -263,6 +288,94 @@ def protocol_ingest_open_result(resp: Any) -> ProtocolOpenResult:
         or "protocol_open_not_traded"
     )
     return ProtocolOpenResult(ok=False, error=str(error))
+
+
+def _reconcile_orphan_protocol_closes(
+    conn: sqlite3.Connection,
+    protocol_client: Any,
+    protocol_open_by_symbol: Dict[str, List[Dict[str, Any]]],
+) -> None:
+    """补记：Protocol 已成交开仓但本地无 row、且交易所已无仓的历史单。"""
+    try:
+        signals = protocol_client.get_signals(source="moss_quant", limit=300)
+    except Exception as e:
+        logger.warning("[moss] orphan protocol reconcile skipped: %s", e)
+        return
+    if not isinstance(signals, list):
+        return
+
+    for sig in signals:
+        if str(sig.get("status") or "") != "traded":
+            continue
+        action = str(sig.get("action") or "open").lower()
+        if action not in ("open", ""):
+            continue
+        pid = sig.get("profile_id")
+        symbol = str(sig.get("symbol") or "").upper()
+        if pid is None or not symbol:
+            continue
+        pid_i = int(pid)
+        if protocol_open_by_symbol.get(symbol):
+            continue
+        has_open = conn.execute(
+            """SELECT 1 FROM moss_signals
+               WHERE profile_id=? AND outcome IS NULL AND side IN ('LONG','SHORT')
+               LIMIT 1""",
+            (pid_i,),
+        ).fetchone()
+        if has_open:
+            continue
+        already_settled = conn.execute(
+            """SELECT 1 FROM moss_settlements
+               WHERE profile_id=? AND symbol=? AND exit_rule LIKE 'external_closed%'
+               LIMIT 1""",
+            (pid_i, symbol),
+        ).fetchone()
+        if already_settled:
+            continue
+        api_id = str(sig.get("api_signal_id") or sig.get("client_ref") or "")
+        if api_id:
+            settled = conn.execute(
+                """SELECT 1 FROM moss_signals
+                   WHERE profile_id=? AND meta_json LIKE ?
+                   LIMIT 1""",
+                (pid_i, f"%{api_id}%"),
+            ).fetchone()
+            if settled:
+                continue
+        entry = float(sig.get("entry_price") or 0)
+        if entry <= 0:
+            continue
+        side = str(sig.get("side") or "LONG").upper()
+        notional = float(sig.get("notional_usdt") or sig.get("margin_usdt") or 0)
+        if notional <= 0:
+            lev = float(sig.get("leverage") or 1)
+            margin = float(sig.get("margin_usdt") or 1000)
+            notional = margin * max(lev, 1.0)
+        meta = json.dumps({"protocol_client_ref": api_id, "source": "orphan_reconcile"})
+        insert_open_signal_from_protocol(
+            conn,
+            profile_id=pid_i,
+            symbol=symbol,
+            side=side,
+            entry_price=entry,
+            virtual_notional_usdt=notional,
+            mark_price=entry,
+            regime=str(sig.get("regime") or ""),
+            meta_json=meta,
+        )
+        settle_profile_external_closed(
+            conn,
+            pid_i,
+            exit_price=entry,
+            exit_rule="external_closed_reconcile",
+        )
+        logger.info(
+            "[moss] reconciled orphan protocol close profile=%s symbol=%s ref=%s",
+            pid_i,
+            symbol,
+            api_id,
+        )
 
 
 def fetch_open_positions_map(conn: sqlite3.Connection) -> Dict[int, Dict[str, Any]]:
@@ -565,6 +678,163 @@ def exit_snapshot(
     }
 
 
+def _atr_from_df(df: pd.DataFrame, mark: float) -> float:
+    atr_series = compute_atr(df, 14)
+    atr_val = float(atr_series.iloc[-1])
+    if np.isnan(atr_val) or atr_val <= 0:
+        atr_val = mark * 0.02
+    return atr_val
+
+
+def compute_paper_protective_prices(
+    *,
+    side: str,
+    entry: float,
+    mark: float,
+    params: DecisionParams,
+    df: pd.DataFrame,
+) -> Dict[str, Optional[float]]:
+    """纸面等价绝对 SL/TP（与 exit_snapshot / 开仓逻辑一致）。"""
+    side_u = side.upper()
+    if entry <= 0 or mark <= 0:
+        return {"sl_price": None, "tp_price": None, "atr_sl": None, "trailing_sl": None}
+
+    atr_val = _atr_from_df(df, mark)
+    sl_dist = params.sl_atr_mult * atr_val
+    tp_dist = sl_dist * params.tp_rr_ratio
+    bar_high = float(df["high"].iloc[-1])
+    bar_low = float(df["low"].iloc[-1])
+    trailing_sl: Optional[float] = None
+
+    if side_u in ("LONG", "BUY"):
+        atr_sl = entry - sl_dist
+        tp_price = entry + tp_dist
+        if params.trailing_enabled and bar_high > entry * (1 + params.trailing_activation_pct):
+            trail_dist = params.trailing_distance_atr * atr_val
+            trailing_sl = bar_high - trail_dist
+            sl_price = max(atr_sl, trailing_sl)
+        else:
+            sl_price = atr_sl
+    else:
+        atr_sl = entry + sl_dist
+        tp_price = entry - tp_dist
+        if params.trailing_enabled and bar_low < entry * (1 - params.trailing_activation_pct):
+            trail_dist = params.trailing_distance_atr * atr_val
+            trailing_sl = bar_low + trail_dist
+            sl_price = min(atr_sl, trailing_sl)
+        else:
+            sl_price = atr_sl
+
+    return {
+        "sl_price": round(float(sl_price), 8),
+        "tp_price": round(float(tp_price), 8),
+        "atr_sl": round(float(atr_sl), 8),
+        "trailing_sl": round(float(trailing_sl), 8) if trailing_sl is not None else None,
+    }
+
+
+def _protective_price_changed(
+    old: Optional[float],
+    new: Optional[float],
+    *,
+    min_rel: float = 0.0002,
+) -> bool:
+    if new is None:
+        return False
+    if old is None:
+        return True
+    if old <= 0:
+        return old != new
+    return abs(new - old) / old >= min_rel
+
+
+def sync_live_protective_orders(
+    *,
+    sender: Any,
+    symbol: str,
+    side: str,
+    entry: float,
+    mark: float,
+    params: DecisionParams,
+    df: pd.DataFrame,
+    profile_id: int,
+    meta: Dict[str, Any],
+    has_live_position: bool,
+    label: str = "",
+) -> Dict[str, Any]:
+    """每轮 hold 将纸面等价 SL/TP 同步到 Protocol/Binance。"""
+    if not sender or not has_live_position:
+        return meta
+
+    prices = compute_paper_protective_prices(
+        side=side,
+        entry=entry,
+        mark=mark,
+        params=params,
+        df=df,
+    )
+    sl_price = prices.get("sl_price")
+    tp_price = prices.get("tp_price")
+    if sl_price is None or tp_price is None:
+        return meta
+
+    last_sl = meta.get("last_synced_sl")
+    last_tp = meta.get("last_synced_tp")
+    sl_changed = _protective_price_changed(
+        float(last_sl) if last_sl is not None else None,
+        float(sl_price),
+    )
+    tp_changed = _protective_price_changed(
+        float(last_tp) if last_tp is not None else None,
+        float(tp_price),
+    )
+    meta_changed = False
+
+    if sl_changed:
+        try:
+            resp = sender.send_update_sl(
+                symbol=symbol,
+                side=side,
+                new_sl_price=round(float(sl_price), 6),
+                profile_id=profile_id,
+            )
+            if _protocol_ingest_traded(resp):
+                meta["last_synced_sl"] = round(float(sl_price), 6)
+                meta_changed = True
+                logger.info(
+                    "[moss] %s sync SL %.6g (atr=%.6g trail=%s)",
+                    label,
+                    sl_price,
+                    prices.get("atr_sl"),
+                    prices.get("trailing_sl"),
+                )
+            else:
+                logger.warning("[moss] %s sync SL skipped: %s", label, resp)
+        except Exception as exc:
+            logger.warning("[moss] %s sync SL failed: %s", label, exc)
+
+    if tp_changed:
+        try:
+            resp = sender.send_update_tp(
+                symbol=symbol,
+                side=side,
+                new_tp_price=round(float(tp_price), 6),
+                profile_id=profile_id,
+            )
+            if _protocol_ingest_traded(resp):
+                meta["last_synced_tp"] = round(float(tp_price), 6)
+                meta_changed = True
+                logger.info("[moss] %s sync TP %.6g", label, tp_price)
+            else:
+                logger.warning("[moss] %s sync TP skipped: %s", label, resp)
+        except Exception as exc:
+            logger.warning("[moss] %s sync TP failed: %s", label, exc)
+
+    if meta_changed:
+        meta["last_synced_at_utc"] = _utc_now()
+    return meta
+
+
 def check_exit(
     *,
     side: str,
@@ -740,7 +1010,8 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
 
     sender = _get_sender()
     live_account_summary: Optional[Dict[str, Any]] = None
-    protocol_open_by_profile: Dict[int, List[Dict[str, Any]]] = {}
+    protocol_client: Any = None
+    protocol_open_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     protocol_truth_loaded = False
     live_opens_allowed = True
     enabled_profile_count = sum(1 for p in profiles if bool(p.get("enabled")))
@@ -755,6 +1026,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                 protocol_client.get_moss_positions(status="open", limit=500)
             )
             protocol_truth_loaded = True
+            _reconcile_orphan_protocol_closes(conn, protocol_client, protocol_open_by_symbol)
         except Exception as e:
             logger.error("[moss] protocol truth load failed: %s", e)
             stats["protocol_error"] = str(e)
@@ -791,10 +1063,36 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
             (pid,),
         ).fetchone()
 
+        if sender and protocol_truth_loaded and protocol_pos and not row:
+            entry_px = float(protocol_pos.get("entry_price") or mark)
+            notional_pb = _protocol_position_notional(protocol_pos)
+            side_pb = str(protocol_pos.get("side") or "LONG").upper()
+            mark_pb = _protocol_position_mark_price(protocol_pos) or mark
+            insert_open_signal_from_protocol(
+                conn,
+                profile_id=pid,
+                symbol=symbol,
+                side=side_pb,
+                entry_price=entry_px,
+                virtual_notional_usdt=notional_pb,
+                mark_price=mark_pb,
+                regime=regime_label,
+                meta_json=json.dumps({"source": "protocol_backfill"}),
+            )
+            row = conn.execute(
+                """SELECT * FROM moss_signals
+                   WHERE profile_id = ? AND outcome IS NULL AND side IN ('LONG','SHORT')
+                   LIMIT 1""",
+                (pid,),
+            ).fetchone()
+            logger.info("[moss] %s backfilled local signal from protocol_open", label)
+
         if row:
             if sender and protocol_truth_loaded and not real_positions:
-                changed = mark_profile_open_signals_external_closed(conn, pid)
-                stats["closes"] += changed
+                settled = settle_profile_external_closed(
+                    conn, pid, exit_price=mark, exit_rule="external_closed"
+                )
+                stats["closes"] += int(settled.get("closed") or 0)
                 stats["details"].append(
                     _scan_detail(
                         label,
@@ -804,11 +1102,15 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                             "action": "close",
                             "side": str(row["side"]),
                             "rule": "external_closed",
-                            "pnl": 0.0,
+                            "pnl": float(settled.get("pnl_usdt") or 0),
                         },
                     )
                 )
-                logger.info("[moss] %s CLOSE external_closed", label)
+                logger.info(
+                    "[moss] %s CLOSE external_closed pnl=%s",
+                    label,
+                    settled.get("pnl_usdt"),
+                )
                 continue
 
             side = str((protocol_pos or {}).get("side") or row["side"])
@@ -832,6 +1134,59 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
             if exit_rule:
                 pnl = pnl_usdt(side, entry, mark, notional)
                 outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "flat")
+
+                if sender and real_positions:
+                    try:
+                        close_resp = sender.send_close(
+                            symbol=symbol,
+                            side=side,
+                            exit_rule=exit_rule,
+                            close_price=mark,
+                            profile_id=pid,
+                        )
+                        if not _protocol_ingest_traded(close_resp):
+                            err = (
+                                (close_resp or {}).get("error")
+                                or "protocol_close_not_traded"
+                            )
+                            logger.error(
+                                "[moss] %s protocol close failed: %s",
+                                label,
+                                err,
+                            )
+                            stats["details"].append(
+                                _scan_detail(
+                                    label,
+                                    profile,
+                                    {
+                                        "symbol": symbol,
+                                        "action": "error",
+                                        "error": f"protocol_close_failed: {err}",
+                                        "rule": exit_rule,
+                                    },
+                                )
+                            )
+                            continue
+                    except Exception as exc:
+                        logger.error(
+                            "[moss] %s protocol close error: %s",
+                            label,
+                            exc,
+                        )
+                        stats["details"].append(
+                            _scan_detail(
+                                label,
+                                profile,
+                                {
+                                    "symbol": symbol,
+                                    "action": "error",
+                                    "error": f"protocol_close_failed: {exc}",
+                                    "rule": exit_rule,
+                                },
+                            )
+                        )
+                        continue
+
                 conn.execute(
                     """UPDATE moss_signals SET outcome=?, outcome_at_utc=?, exit_price=?,
                        pnl_usdt=?, exit_rule=?, updated_at_utc=?, unrealized_pnl_usdt=0
@@ -860,16 +1215,6 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                 sync_moss_wallet_from_settlements(conn)
                 profile_wallet_balance(conn, pid)
                 stats["closes"] += 1
-
-                # 实盘模式：发送平仓信号到 protocol
-                if sender and real_positions:
-                    sender.send_close(
-                        symbol=symbol,
-                        side=side,
-                        exit_rule=exit_rule,
-                        close_price=mark,
-                        profile_id=pid,
-                    )
 
                 stats["details"].append(
                     _scan_detail(
@@ -905,7 +1250,7 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                 conn.execute(
                     """UPDATE moss_signals SET mark_price=?, unrealized_pnl_usdt=?,
                        updated_at_utc=? WHERE id=?""",
-                    (mark, upnl, now, row["id"]),
+                    (detail_mark, detail_upnl, now, row["id"]),
                 )
                 stats["details"].append(
                     _scan_detail(
@@ -980,14 +1325,13 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                                 (notional, now, row["id"]),
                             )
                             if sender:
-                                atr_series = compute_atr(df, 14)
-                                atr_val = float(atr_series.iloc[-1])
-                                if np.isnan(atr_val) or atr_val <= 0:
-                                    atr_val = mark * 0.02
-                                sl_dist = params.sl_atr_mult * atr_val
-                                tp_dist = sl_dist * params.tp_rr_ratio
-                                roll_sl = mark - sl_dist if side == "LONG" else mark + sl_dist
-                                roll_tp = mark + tp_dist if side == "LONG" else mark - tp_dist
+                                prot_prices = compute_paper_protective_prices(
+                                    side=side,
+                                    entry=mark,
+                                    mark=mark,
+                                    params=params,
+                                    df=df,
+                                )
                                 sender.send_rolling(
                                     symbol=symbol,
                                     side=side,
@@ -995,8 +1339,8 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                                     leverage=round(lev, 6),
                                     profile_id=pid,
                                     play=profile.get("template", ""),
-                                    sl_price=round(roll_sl, 6),
-                                    tp_price=round(roll_tp, 6),
+                                    sl_price=round(prot_prices["sl_price"] or mark, 6),
+                                    tp_price=round(prot_prices["tp_price"] or mark, 6),
                                     rolling_count=roll_count + 1,
                                 )
                             if params.rolling_move_stop:
@@ -1015,61 +1359,29 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                                 pnl_pct_display,
                             )
 
-                # 移动止损更新：周期性上移 SL 价格
-                if params.trailing_enabled:
-                    if sender:
-                        def _send_trailing_update(new_sl_price: float) -> None:
-                            if not real_positions:
-                                return
-                            sender.send_update_sl(
-                                symbol=symbol,
-                                side=side,
-                                new_sl_price=round(new_sl_price, 6),
-                                profile_id=pid,
-                            )
-
-                        bar_high = float(df["high"].iloc[-1])
-                        bar_low = float(df["low"].iloc[-1])
-                        atr_series = compute_atr(df, 14)
-                        atr_val = float(atr_series.iloc[-1])
-                        if np.isnan(atr_val) or atr_val <= 0:
-                            atr_val = mark * 0.02
-                        trail_dist = params.trailing_distance_atr * atr_val
-                        if side == "LONG" and bar_high > entry * (1 + params.trailing_activation_pct):
-                            new_trail_sl = bar_high - trail_dist
-                            _send_trailing_update(new_trail_sl)
-                        elif side == "SHORT" and bar_low < entry * (1 - params.trailing_activation_pct):
-                            new_trail_sl = bar_low + trail_dist
-                            _send_trailing_update(new_trail_sl)
-            continue
-
-        if sender and real_positions:
-            entry = float((protocol_pos or {}).get("entry_price") or mark)
-            notional = _protocol_position_notional(protocol_pos or {})
-            side = str((protocol_pos or {}).get("side") or "")
-            lev = float((protocol_pos or {}).get("leverage") or lev)
-            mark = _protocol_position_mark_price(protocol_pos or {}) or mark
-            upnl = _protocol_position_unrealized_pnl(protocol_pos or {})
-            stats["details"].append(
-                _scan_detail(
-                    label,
-                    profile,
-                    {
-                        "symbol": symbol,
-                        "action": "hold",
-                        "template": profile.get("template"),
-                        **_position_fields(
-                            side=side,
-                            entry=entry,
-                            mark=mark,
-                            notional=notional,
-                            upnl=upnl,
-                            leverage=lev,
-                        ),
-                    },
-                )
-            )
-            logger.info("[moss] %s HOLD protocol_open", label)
+                if sender and real_positions:
+                    try:
+                        hold_meta = json.loads(row["meta_json"] or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        hold_meta = {}
+                    hold_meta = sync_live_protective_orders(
+                        sender=sender,
+                        symbol=symbol,
+                        side=side,
+                        entry=entry,
+                        mark=mark,
+                        params=params,
+                        df=df,
+                        profile_id=pid,
+                        meta=hold_meta,
+                        has_live_position=True,
+                        label=label,
+                    )
+                    if hold_meta.get("last_synced_at_utc"):
+                        conn.execute(
+                            "UPDATE moss_signals SET meta_json=? WHERE id=?",
+                            (json.dumps(hold_meta), row["id"]),
+                        )
             continue
 
         ent = entry_snapshot(df, params, regime_s)
@@ -1147,20 +1459,21 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
             continue
 
         if sender:
-            atr_series = compute_atr(df, 14)
-            atr_val = float(atr_series.iloc[-1])
-            if np.isnan(atr_val) or atr_val <= 0:
-                atr_val = mark * 0.02
-            sl_dist = params.sl_atr_mult * atr_val
-            tp_dist = sl_dist * params.tp_rr_ratio
-            sl_price = mark - sl_dist if side == "LONG" else mark + sl_dist
-            tp_price = mark + tp_dist if side == "LONG" else mark - tp_dist
+            prot_prices = compute_paper_protective_prices(
+                side=side,
+                entry=mark,
+                mark=mark,
+                params=params,
+                df=df,
+            )
+            sl_price = prot_prices["sl_price"]
+            tp_price = prot_prices["tp_price"]
             open_resp = sender.send_open(
                 symbol=symbol,
                 side=side,
                 entry_price=mark,
-                sl_price=round(sl_price, 6),
-                tp_price=round(tp_price, 6),
+                sl_price=round(sl_price or mark, 6),
+                tp_price=round(tp_price or mark, 6) if tp_price else None,
                 margin_usdt=round(notional / lev, 6),
                 leverage=round(lev, 6),
                 profile_id=pid,
@@ -1187,22 +1500,57 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                 logger.error("[moss] %s protocol open failed: %s", label, open_result.error)
                 continue
 
+            entry_px = open_result.entry_price or mark
+            if protocol_client:
+                try:
+                    fresh = protocol_open_positions_by_symbol(
+                        protocol_client.get_moss_positions(status="open")
+                    )
+                    if fresh.get(symbol):
+                        protocol_open_by_symbol[symbol] = fresh[symbol]
+                        entry_px = float(
+                            fresh[symbol][0].get("entry_price") or entry_px
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[moss] %s refresh entry after open failed: %s",
+                        label,
+                        exc,
+                    )
+            elif protocol_open_by_symbol.get(symbol):
+                proto_after = protocol_open_by_symbol[symbol][0]
+                entry_px = float(proto_after.get("entry_price") or entry_px)
+            meta = json.dumps(
+                {
+                    "protocol_client_ref": open_result.client_ref,
+                    "protocol_position_id": open_result.position_id,
+                    "last_synced_sl": round(float(sl_price or mark), 6),
+                    "last_synced_tp": round(float(tp_price or mark), 6),
+                    "last_synced_at_utc": now,
+                }
+            )
+        else:
+            open_result = None
+            meta = None
+            entry_px = mark
+
         conn.execute(
             """INSERT INTO moss_signals(
                 profile_id, recorded_at_utc, side, symbol, entry_price,
                 virtual_notional_usdt, mark_price, composite, regime,
-                unrealized_pnl_usdt, updated_at_utc)
-               VALUES (?,?,?,?,?,?,?,?,?,0,?)""",
+                unrealized_pnl_usdt, meta_json, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,0,?,?)""",
             (
                 pid,
                 now,
                 side,
                 symbol,
-                mark,
+                entry_px,
                 notional,
-                mark,
+                entry_px,
                 composite,
                 regime_label,
+                meta,
                 now,
             ),
         )
@@ -1218,11 +1566,13 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                     "template": profile.get("template"),
                     "composite": composite,
                     "regime": regime_label,
-                    "position_id": protocol_position_id or None,
+                    "position_id": (
+                        open_result.position_id if open_result else None
+                    ),
                     **_position_fields(
                         side=side,
-                        entry=mark,
-                        mark=mark,
+                        entry=entry_px,
+                        mark=entry_px,
                         notional=notional,
                         upnl=0.0,
                         leverage=lev,

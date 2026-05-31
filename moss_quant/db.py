@@ -1050,24 +1050,142 @@ def profile_has_open_position(conn: sqlite3.Connection, profile_id: int) -> bool
     return row is not None
 
 
+def build_profile_by_symbol_map(
+    conn: sqlite3.Connection,
+) -> Dict[str, Dict[str, Any]]:
+    """symbol → 最新 Profile（id DESC；含 enabled 或有未平仓的 profile）。"""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT DISTINCT p.* FROM moss_profiles p
+           WHERE p.enabled = 1
+              OR EXISTS (
+                  SELECT 1 FROM moss_signals s
+                  WHERE s.profile_id = p.id
+                    AND s.outcome IS NULL
+                    AND s.side IN ('LONG','SHORT')
+              )
+           ORDER BY p.id DESC"""
+    ).fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        sym = str(row["symbol"] or "").upper()
+        if sym and sym not in out:
+            out[sym] = row_to_profile(row)
+    return out
+
+
+def insert_open_signal_from_protocol(
+    conn: sqlite3.Connection,
+    *,
+    profile_id: int,
+    symbol: str,
+    side: str,
+    entry_price: float,
+    virtual_notional_usdt: float,
+    mark_price: float,
+    regime: str = "",
+    composite: float = 0.0,
+    meta_json: Optional[str] = None,
+) -> int:
+    now = _utc_now()
+    cur = conn.execute(
+        """INSERT INTO moss_signals(
+               profile_id, recorded_at_utc, side, symbol, entry_price,
+               virtual_notional_usdt, mark_price, composite, regime,
+               unrealized_pnl_usdt, meta_json, updated_at_utc)
+           VALUES (?,?,?,?,?,?,?,?,?,0,?,?)""",
+        (
+            int(profile_id),
+            now,
+            str(side).upper(),
+            str(symbol).upper(),
+            round(float(entry_price), 8),
+            round(float(virtual_notional_usdt), 4),
+            round(float(mark_price), 8),
+            round(float(composite), 4),
+            regime,
+            meta_json,
+            now,
+        ),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def settle_profile_external_closed(
+    conn: sqlite3.Connection,
+    profile_id: int,
+    *,
+    exit_price: Optional[float] = None,
+    exit_rule: str = "external_closed",
+) -> Dict[str, Any]:
+    """Protocol 侧已无仓：结算本地 open 信号并写入 moss_settlements。"""
+    from moss_quant.paper_scanner import pnl_usdt
+
+    now = _utc_now()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """SELECT * FROM moss_signals
+           WHERE profile_id=? AND outcome IS NULL AND side IN ('LONG','SHORT')""",
+        (int(profile_id),),
+    ).fetchall()
+    total_pnl = 0.0
+    closed = 0
+    for row in rows:
+        side = str(row["side"])
+        entry = float(row["entry_price"] or 0)
+        notional = float(row["virtual_notional_usdt"] or 0)
+        exit_px = float(
+            exit_price if exit_price is not None else row["mark_price"] or entry
+        )
+        pnl = round(float(pnl_usdt(side, entry, exit_px, notional)), 4)
+        outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "flat")
+        conn.execute(
+            """UPDATE moss_signals SET outcome=?, outcome_at_utc=?, exit_price=?,
+               pnl_usdt=?, exit_rule=?, updated_at_utc=?, unrealized_pnl_usdt=0
+               WHERE id=?""",
+            ("external_closed", now, exit_px, pnl, exit_rule, now, row["id"]),
+        )
+        conn.execute(
+            """INSERT INTO moss_settlements(
+                settled_at_utc, signal_id, profile_id, symbol, side, outcome,
+                entry_price, exit_price, pnl_usdt, virtual_notional_usdt, exit_rule)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                now,
+                row["id"],
+                int(profile_id),
+                str(row["symbol"] or "").upper(),
+                side,
+                outcome,
+                entry,
+                exit_px,
+                pnl,
+                notional,
+                exit_rule,
+            ),
+        )
+        total_pnl += pnl
+        closed += 1
+    if closed:
+        sync_moss_wallet_from_settlements(conn)
+        profile_wallet_balance(conn, int(profile_id))
+    return {"closed": closed, "pnl_usdt": round(total_pnl, 4)}
+
+
 def mark_profile_open_signals_external_closed(
     conn: sqlite3.Connection,
     profile_id: int,
     *,
+    exit_price: Optional[float] = None,
     exit_rule: str = "external_closed",
 ) -> int:
-    now = _utc_now()
-    cur = conn.execute(
-        """UPDATE moss_signals
-           SET outcome='external_closed',
-               outcome_at_utc=?,
-               exit_rule=?,
-               updated_at_utc=?,
-               unrealized_pnl_usdt=0
-           WHERE profile_id=? AND outcome IS NULL AND side IN ('LONG','SHORT')""",
-        (now, exit_rule, now, int(profile_id)),
+    result = settle_profile_external_closed(
+        conn,
+        profile_id,
+        exit_price=exit_price,
+        exit_rule=exit_rule,
     )
-    return int(cur.rowcount or 0)
+    return int(result.get("closed") or 0)
 
 
 def list_profiles_for_strategy_sync(conn: sqlite3.Connection) -> List[Dict[str, Any]]:

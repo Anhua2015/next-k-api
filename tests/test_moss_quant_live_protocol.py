@@ -94,6 +94,28 @@ def test_protocol_update_sl_uses_ingest_without_profile_id(monkeypatch):
     assert "profile_id" not in signal
 
 
+def test_protocol_update_tp_uses_ingest(monkeypatch):
+    from moss_quant.protocol_client import ProtocolClient
+
+    captured = {}
+
+    def fake_post(self, path, body):
+        captured["path"] = path
+        captured["body"] = body
+        return {"ok": True}
+
+    monkeypatch.setattr(ProtocolClient, "_post", fake_post)
+
+    c = ProtocolClient(base_url="http://protocol.test")
+    c.send_update_tp(symbol="BTCUSDT", side="LONG", new_tp_price=67890.0, profile_id=3)
+
+    assert captured["path"] == "/api/binance/signals/ingest"
+    signal = captured["body"]["signals"][0]
+    assert signal["action"] == "update_tp"
+    assert signal["tp_price"] == 67890.0
+    assert signal["profile_id"] == 3
+
+
 def test_signal_sender_rolling_action_is_stable(monkeypatch):
     from moss_quant import signal_sender
 

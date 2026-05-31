@@ -88,11 +88,37 @@ class ProtocolClient:
     def get_moss_positions(
         self, status: Optional[str] = None, limit: int = 500
     ) -> List[Dict[str, Any]]:
-        return self._get(
+        data = self._get(
             "/api/binance/positions",
             status=status,
             limit=limit,
         )
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            rows = data.get("positions") or data.get("items") or []
+            return list(rows) if isinstance(rows, list) else []
+        return []
+
+    def get_signals(
+        self,
+        *,
+        source: Optional[str] = SOURCE,
+        limit: int = 200,
+        profile_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        data = self._get(
+            "/api/binance/signals",
+            source=source,
+            limit=limit,
+            profile_id=profile_id,
+        )
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            rows = data.get("signals") or data.get("items") or []
+            return list(rows) if isinstance(rows, list) else []
+        return []
 
     def send_open(
         self,
@@ -123,6 +149,7 @@ class ProtocolClient:
             "leverage": round(leverage, 6),
             "play": play,
             "regime": regime,
+            "composite": composite,
             "profile_id": profile_id,
             "client_ref": client_ref,
             "action": action,
@@ -149,6 +176,7 @@ class ProtocolClient:
             "client_ref": client_ref,
             "action": "close",
             "play": exit_rule,
+            "exit_rule": exit_rule,
         }
         return self._post("/api/binance/signals/ingest", {"signals": [signal]})
 
@@ -170,6 +198,52 @@ class ProtocolClient:
             "sl_price": new_sl_price,
             "client_ref": client_ref,
             "action": "update_sl",
+        }
+        if profile_id is not None:
+            signal["profile_id"] = profile_id
+        return self._post("/api/binance/signals/ingest", {"signals": [signal]})
+
+    def send_update_tp(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        new_tp_price: float,
+        profile_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        profile_ref = str(profile_id) if profile_id is not None else "unknown"
+        client_ref = f"moss:{profile_ref}:update_tp:{int(time.time() * 1000)}"
+        signal: Dict[str, Any] = {
+            "source": SOURCE,
+            "api_signal_id": client_ref,
+            "symbol": symbol,
+            "side": side,
+            "tp_price": new_tp_price,
+            "client_ref": client_ref,
+            "action": "update_tp",
+        }
+        if profile_id is not None:
+            signal["profile_id"] = profile_id
+        return self._post("/api/binance/signals/ingest", {"signals": [signal]})
+
+    def send_update_tp(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        new_tp_price: float,
+        profile_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        profile_ref = str(profile_id) if profile_id is not None else "unknown"
+        client_ref = f"moss:{profile_ref}:update_tp:{int(time.time() * 1000)}"
+        signal: Dict[str, Any] = {
+            "source": SOURCE,
+            "api_signal_id": client_ref,
+            "symbol": symbol,
+            "side": side,
+            "tp_price": new_tp_price,
+            "client_ref": client_ref,
+            "action": "update_tp",
         }
         if profile_id is not None:
             signal["profile_id"] = profile_id
