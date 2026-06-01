@@ -273,7 +273,7 @@ def protocol_ingest_action_result(
             pid = detail.get("position_id")
             entry_raw = detail.get("entry_price")
             entry_price = float(entry_raw) if entry_raw is not None else None
-            return ProtocolOpenResult(
+            return ProtocolActionResult(
                 ok=True,
                 position_id=int(pid) if pid is not None else None,
                 client_ref=str(
