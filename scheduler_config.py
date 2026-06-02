@@ -146,6 +146,21 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
             replace_existing=True,
         )
     try:
+        from moss2_quant.config import (
+            MOSS2_QUANT_SCAN_INTERVAL_MINUTES,
+            scheduler_enabled as moss2_scheduler_enabled,
+        )
+    except ImportError:
+        moss2_scheduler_enabled = lambda: False  # type: ignore[misc, assignment]
+        MOSS2_QUANT_SCAN_INTERVAL_MINUTES = 15
+    if moss2_scheduler_enabled():
+        sch.add_job(
+            wt.run_moss2_quant_scan_task,
+            IntervalTrigger(minutes=MOSS2_QUANT_SCAN_INTERVAL_MINUTES),
+            id="moss2_quant_scan",
+            replace_existing=True,
+        )
+    try:
         from moss_quant.config import (
             daily_optimize_scheduler_enabled,
             parse_daily_optimize_utc,

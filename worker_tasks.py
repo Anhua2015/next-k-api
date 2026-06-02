@@ -41,6 +41,7 @@ _powder_keg_radar_lock = threading.Lock()
 _momentum_lane_lock = threading.Lock()
 _jiezhen_lane_lock = threading.Lock()
 _moss_quant_lock = threading.Lock()
+_moss2_quant_lock = threading.Lock()
 _moss_daily_optimize_lock = threading.Lock()
 _moss_mcap_scan_lock = threading.Lock()
 
@@ -709,6 +710,37 @@ def run_moss_quant_paper_task() -> None:
         logger.exception("moss_quant_paper failed: %s", e)
     finally:
         _moss_quant_lock.release()
+
+
+def run_moss2_quant_scan_task() -> None:
+    """Moss2 多机器人扫描：候选池选币 + 去重 + 空仓切换 + 冷却。"""
+    if not _moss2_quant_lock.acquire(blocking=False):
+        logger.warning("跳过 moss2_quant_scan：上一轮仍在运行")
+        return
+    try:
+        from moss2_quant.config import scheduler_enabled
+        from moss2_quant.service import run_scan_once
+        from accumulation_radar import init_db
+
+        if not scheduler_enabled():
+            return
+        conn = init_db()
+        try:
+            out = run_scan_once(conn, refresh_klines=False)
+            logger.info(
+                "Moss2 扫描完成 run_id=%s robots=%s opens=%s closes=%s skips=%s",
+                out.get("run_id"),
+                out.get("robots_scanned"),
+                out.get("opens"),
+                out.get("closes"),
+                out.get("skips"),
+            )
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.exception("moss2_quant_scan failed: %s", e)
+    finally:
+        _moss2_quant_lock.release()
 
 
 def run_moss_daily_optimize_bootstrap_task() -> None:
