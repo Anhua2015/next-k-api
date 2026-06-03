@@ -124,6 +124,7 @@ def _run_backtest_summary(
         "max_drawdown": round(result.max_drawdown, 4),
         "total_trades": int(result.total_trades),
         "win_rate": round(result.win_rate, 4),
+        "profit_factor": round(float(result.profit_factor or 0), 4),
         "blowup_count": int(result.blowup_count),
     }
 

@@ -300,12 +300,26 @@ def sync_deny_reason(summary: Dict[str, Any]) -> Optional[str]:
     ratio_reason = train_val_ratio_ok(tr, vr)
     if ratio_reason:
         return ratio_reason
-    if not evaluate_profile_auto_enable(summary).get("auto_enabled"):
+    auto_gate = evaluate_profile_auto_enable(summary)
+    if not auto_gate.get("auto_enabled"):
         return str(
             summary.get("auto_enable_reason")
-            or evaluate_profile_auto_enable(summary).get("auto_enable_reason")
+            or auto_gate.get("auto_enable_reason")
             or "达标门禁未通过"
         )
+    if cfg.MOSS_QUANT_SYNC_REQUIRE_RECENT_TAIL_OK and cfg.MOSS_QUANT_RECENT_PICK_ENABLED:
+        rp = summary.get("recent_pick")
+        if isinstance(rp, dict) and not rp.get("skipped"):
+            tail_pct = rp.get("tail_return_pct")
+            floor_pct = float(cfg.MOSS_QUANT_RECENT_PICK_TAIL_MIN_RETURN) * 100
+            if tail_pct is None:
+                if int(rp.get("bars") or 0) > 0:
+                    return str(rp.get("reason") or "1500短窗未验收")
+            elif float(tail_pct) < floor_pct:
+                return (
+                    f"1500尾段收益{float(tail_pct):.2f}%"
+                    f"（门槛 {floor_pct:.0f}%）"
+                )
     return None
 
 
@@ -368,6 +382,9 @@ def enrich_summary(
         if isinstance(val_summary, dict):
             out.update(evaluate_validation(val_summary))
     out.update(classify_pool_tier(out))
+    rp = out.get("recent_pick")
+    if isinstance(rp, dict) and rp.get("side_stats"):
+        out["side_bias_stats"] = rp["side_stats"]
     out["sync_allowed"] = can_sync_profile_params(out)
     deny = sync_deny_reason(out)
     if deny:

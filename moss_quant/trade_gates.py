@@ -140,19 +140,72 @@ def effective_entry_threshold(
 def _train_regime_note_from_summary(summary: Optional[Dict[str, Any]]) -> str:
     if not summary:
         return ""
+    rp = summary.get("recent_pick")
+    if isinstance(rp, dict):
+        note = str(rp.get("regime_note") or "").strip()
+        if note:
+            return note
     adj = summary.get("regime_adjustment")
     if isinstance(adj, dict):
         return str(adj.get("regime_note") or "").strip()
     return ""
 
 
-def latest_train_regime_note(
+def _side_stats_from_local_refine(block: Dict[str, Any]) -> Dict[str, Any]:
+    rounds = block.get("rounds") or block.get("rounds_log") or []
+    if not isinstance(rounds, list) or not rounds:
+        return {}
+    last = rounds[-1]
+    if not isinstance(last, dict):
+        return {}
+    ta = last.get("train_analysis") or {}
+    if isinstance(ta, dict):
+        ss = ta.get("side_stats")
+        if isinstance(ss, dict) and ss:
+            return ss
+    return {}
+
+
+def _side_stats_from_summary(summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not summary:
+        return {}
+    rp = summary.get("recent_pick")
+    if isinstance(rp, dict):
+        ss = rp.get("side_stats")
+        if isinstance(ss, dict) and ss:
+            return ss
+    pipe = summary.get("post_grid_pipeline")
+    if isinstance(pipe, dict):
+        td = pipe.get("tuning_diagnosis")
+        if isinstance(td, dict):
+            ta = td.get("train_analysis") or {}
+            if isinstance(ta, dict):
+                ss = ta.get("side_stats")
+                if isinstance(ss, dict) and ss:
+                    return ss
+        lr = pipe.get("local_refine")
+        if isinstance(lr, dict):
+            ss = _side_stats_from_local_refine(lr)
+            if ss:
+                return ss
+    for key in ("train_analysis", "local_refine"):
+        block = summary.get(key)
+        if isinstance(block, dict):
+            ss = block.get("side_stats")
+            if isinstance(ss, dict) and ss:
+                return ss
+            ss = _side_stats_from_local_refine(block)
+            if ss:
+                return ss
+    return {}
+
+
+def _latest_completed_optimize_summary(
     conn: sqlite3.Connection, symbol: str
-) -> str:
-    """最近完成的每日寻优批次里该标的训练窗 regime 标签。"""
+) -> Dict[str, Any]:
     sym = str(symbol or "").strip().upper()
     if not sym:
-        return ""
+        return {}
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """SELECT i.summary_json
@@ -164,12 +217,60 @@ def latest_train_regime_note(
         (sym,),
     ).fetchone()
     if not row or not row["summary_json"]:
-        return ""
+        return {}
     try:
-        summary = json.loads(row["summary_json"] or "{}")
+        return json.loads(row["summary_json"] or "{}")
     except json.JSONDecodeError:
-        return ""
-    return _train_regime_note_from_summary(summary)
+        return {}
+
+
+def latest_attribution_side_stats(
+    conn: sqlite3.Connection, symbol: str
+) -> Dict[str, Any]:
+    """最近每日寻优批次中该标的训练/L3 多空胜率统计。"""
+    return _side_stats_from_summary(_latest_completed_optimize_summary(conn, symbol))
+
+
+def side_attribution_threshold_deltas(
+    side_stats: Dict[str, Any],
+    *,
+    base_threshold: float,
+) -> Dict[str, Any]:
+    """纸面扫描：空/多侧胜率差 → 仅抬升弱势方向门槛。"""
+    if not cfg.MOSS_QUANT_SIDE_BIAS_ADJUST_ENABLED or base_threshold <= 0:
+        return {"long_delta": 0.0, "short_delta": 0.0, "reason": ""}
+    lc = int(side_stats.get("long_count") or 0)
+    sc = int(side_stats.get("short_count") or 0)
+    min_side = int(cfg.MOSS_QUANT_SIDE_BIAS_MIN_SIDE_TRADES)
+    lwr = side_stats.get("long_win_rate")
+    swr = side_stats.get("short_win_rate")
+    gap = float(cfg.MOSS_QUANT_SIDE_BIAS_WIN_GAP)
+    if lc < min_side or sc < min_side or lwr is None or swr is None:
+        return {"long_delta": 0.0, "short_delta": 0.0, "reason": ""}
+    long_d = 0.0
+    short_d = 0.0
+    reason = ""
+    if float(swr) < float(lwr) - gap:
+        short_d = float(cfg.MOSS_QUANT_SIDE_BIAS_SHORT_EXTRA_BUMP)
+        reason = "short_side_weak"
+    elif float(lwr) < float(swr) - gap:
+        long_d = float(cfg.MOSS_QUANT_SIDE_BIAS_LONG_EXTRA_BUMP)
+        reason = "long_side_weak"
+    return {
+        "long_delta": round(long_d, 4),
+        "short_delta": round(short_d, 4),
+        "reason": reason,
+        "side_stats": side_stats,
+    }
+
+
+def latest_train_regime_note(
+    conn: sqlite3.Connection, symbol: str
+) -> str:
+    """最近完成的每日寻优批次里该标的训练窗 regime 标签。"""
+    return _train_regime_note_from_summary(
+        _latest_completed_optimize_summary(conn, symbol)
+    )
 
 
 def regime_alignment_state(
@@ -277,19 +378,25 @@ def resolve_entry_thresholds_for_scan(
         template=template,
         allow_relax=allow_relax,
     )
+    side_stats = latest_attribution_side_stats(conn, symbol)
+    side_bias = side_attribution_threshold_deltas(
+        side_stats, base_threshold=base_th
+    )
     gate_long = entry_trade_gate(symbol, side="LONG", conn=conn)
     gate_short = entry_trade_gate(symbol, side="SHORT", conn=conn)
     long_th = effective_entry_threshold(
         base_th,
         gate_bump=float(gate_long.get("threshold_bump") or 0),
         intraday_bump=intra_bump,
-        regime_delta=float(align["long_delta"]),
+        regime_delta=float(align["long_delta"])
+        + float(side_bias.get("long_delta") or 0),
     )
     short_th = effective_entry_threshold(
         base_th,
         gate_bump=float(gate_short.get("threshold_bump") or 0),
         intraday_bump=intra_bump,
-        regime_delta=float(align["short_delta"]),
+        regime_delta=float(align["short_delta"])
+        + float(side_bias.get("short_delta") or 0),
     )
     return {
         "base_threshold": round(base_th, 4),
@@ -299,6 +406,7 @@ def resolve_entry_thresholds_for_scan(
         "gate_long": gate_long,
         "gate_short": gate_short,
         "regime_align": align,
+        "side_bias": side_bias,
         "paper_loss_block_relax": paper_block,
     }
 

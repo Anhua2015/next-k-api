@@ -45,12 +45,19 @@ def _train_cut(n: int) -> int:
     return max(48, min(n - 48, int(n * ratio)))
 
 
-def _rank_return(summary: Dict[str, Any]) -> Tuple[float, float, float]:
-    return (
-        float(summary.get("total_return") or 0),
-        float(summary.get("sharpe") or 0),
-        -abs(float(summary.get("max_drawdown") or 0)),
-    )
+def _rank_recent_score(summary: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    """收益 × 笔数达标系数 × PF 加成（避免高回撤少笔数虚高）。"""
+    ret = float(summary.get("total_return") or 0)
+    trades = int(summary.get("total_trades") or 0)
+    min_t = max(1, int(cfg.MOSS_QUANT_RECENT_PICK_MIN_TRADES))
+    trade_f = min(1.0, trades / min_t)
+    pf = float(summary.get("profit_factor") or 0)
+    if cfg.MOSS_QUANT_RECENT_PICK_SCORE_USE_PF and pf > 0:
+        pf_f = min(2.0, pf) / 2.0
+        score = ret * trade_f * (0.5 + 0.5 * pf_f)
+    else:
+        score = ret * trade_f
+    return (score, ret, float(summary.get("sharpe") or 0), -abs(float(summary.get("max_drawdown") or 0)))
 
 
 def _tail_validation_summary(
@@ -94,6 +101,10 @@ def _passes_guards(
         return False, "1500窗收益≤0"
     if int(full_s.get("blowup_count") or 0) > 0:
         return False, "1500窗爆仓"
+    min_pf = float(cfg.MOSS_QUANT_RECENT_PICK_MIN_PROFIT_FACTOR or 0)
+    pf = float(full_s.get("profit_factor") or 0)
+    if min_pf > 0 and pf < min_pf:
+        return False, f"1500窗盈亏比{pf:.2f}<{min_pf:.2f}"
     tail_ret = float(tail_s.get("total_return") or 0)
     floor = float(cfg.MOSS_QUANT_RECENT_PICK_TAIL_MIN_RETURN)
     if tail_ret < floor:
@@ -114,14 +125,17 @@ def _grid_combos(
     entries = tuple(cfg.MOSS_QUANT_RECENT_PICK_ENTRY_THRESHOLDS)
     sls = tuple(cfg.MOSS_QUANT_RECENT_PICK_SL_ATR_MULTS)
     tps = tuple(cfg.MOSS_QUANT_RECENT_PICK_TP_RR_RATIOS)
+    exits = tuple(cfg.MOSS_QUANT_RECENT_PICK_EXIT_THRESHOLDS)
     out: List[Tuple[str, Dict[str, Any]]] = []
-    for template, entry, sl, tp in itertools.product(templates, entries, sls, tps):
+    for template, entry, sl, tp, ex in itertools.product(
+        templates, entries, sls, tps, exits
+    ):
         tactical = apply_regime_to_tactical(
             {
                 "entry_threshold": float(entry),
                 "sl_atr_mult": float(sl),
                 "tp_rr_ratio": float(tp),
-                "exit_threshold": 0.12,
+                "exit_threshold": float(ex),
                 "regime_sensitivity": 0.55,
             },
             regime_adj,
@@ -142,7 +156,7 @@ def pick_best_on_recent_window(
     refresh_klines: bool = False,
 ) -> Dict[str, Any]:
     """
-    在最近 N 根（默认 1500）上选 total_return 最高的模板+战术参数。
+    在最近 N 根（默认 1500）上选复合分最高的模板+战术参数。
     70% 归因指导邻域精修；后 30% 尾段不得明显崩坏。
     """
     sym = str(symbol or "").strip().upper()
@@ -197,7 +211,7 @@ def pick_best_on_recent_window(
     best_tact: Dict[str, Any] = {}
     best_full: Dict[str, Any] = {}
     best_tail: Dict[str, Any] = {}
-    best_rank: Tuple[float, float, float] = (-999.0, -999.0, -999.0)
+    best_rank: Tuple[float, float, float, float] = (-999.0, -999.0, -999.0, -999.0)
     tried = 0
 
     for template, tactical in _grid_combos(regime_adj, prefer_template=prefer_tpl or None):
@@ -217,7 +231,7 @@ def pick_best_on_recent_window(
         ok, _ = _passes_guards(full_s, tail_s)
         if not ok:
             continue
-        rk = _rank_return(full_s)
+        rk = _rank_recent_score(full_s)
         if rk > best_rank:
             best_rank = rk
             best_tpl = template
@@ -226,6 +240,7 @@ def pick_best_on_recent_window(
             best_tail = tail_s
 
     refine_log: List[Dict[str, Any]] = []
+    last_train_result = None
     if best_tpl and int(cfg.MOSS_QUANT_RECENT_PICK_REFINE_ROUNDS) > 0:
         params = _build_run_params(best_tpl, best_tact, symbol=sym)
         train_result = run_backtest(
@@ -235,6 +250,7 @@ def pick_best_on_recent_window(
             initial_capital=cap,
             symbol=sym,
         )
+        last_train_result = train_result
         for rnd in range(1, int(cfg.MOSS_QUANT_RECENT_PICK_REFINE_ROUNDS) + 1):
             analysis = analyze_trades(train_result.trades, regime_train)
             sug = suggest_tactical_adjustments(
@@ -259,7 +275,7 @@ def pick_best_on_recent_window(
                 ok, _ = _passes_guards(full_s, tail_s)
                 if not ok:
                     continue
-                rk = _rank_return(full_s)
+                rk = _rank_recent_score(full_s)
                 if rk > round_rank:
                     round_rank = rk
                     round_best_tact = cand
@@ -268,7 +284,8 @@ def pick_best_on_recent_window(
                 {
                     "round": rnd,
                     "improved": improved,
-                    "return_pct": round(float(round_rank[0]) * 100, 2),
+                    "score": round(float(round_rank[0]), 4),
+                    "return_pct": round(float(round_rank[1]) * 100, 2),
                 }
             )
             if improved:
@@ -295,6 +312,7 @@ def pick_best_on_recent_window(
                     initial_capital=cap,
                     symbol=sym,
                 )
+                last_train_result = train_result
             else:
                 break
 
@@ -310,9 +328,30 @@ def pick_best_on_recent_window(
         }
 
     ok, reason = _passes_guards(best_full, best_tail)
+    side_stats: Dict[str, Any] = {}
+    if best_tpl:
+        if last_train_result is None:
+            params = _build_run_params(best_tpl, best_tact, symbol=sym)
+            last_train_result = run_backtest(
+                df_train,
+                DecisionParams.from_dict(params),
+                regime_train,
+                initial_capital=cap,
+                symbol=sym,
+            )
+        side_stats = dict(
+            (
+                analyze_trades(last_train_result.trades, regime_train).get(
+                    "side_stats"
+                )
+                or {}
+            )
+        )
     narrative = (
         f"最近{len(df)}根：{best_tpl} entry={best_tact.get('entry_threshold')} "
+        f"exit={best_tact.get('exit_threshold')} "
         f"收益{float(best_full.get('total_return') or 0) * 100:+.2f}% "
+        f"PF={float(best_full.get('profit_factor') or 0):.2f} "
         f"尾段{float(best_tail.get('total_return') or 0) * 100:+.2f}% "
         f"({reason})"
     )
@@ -334,6 +373,9 @@ def pick_best_on_recent_window(
         "tail_return_pct": round(float(best_tail.get("total_return") or 0) * 100, 2),
         "win_rate_pct": round(float(best_full.get("win_rate") or 0) * 100, 1),
         "total_trades": best_full.get("total_trades"),
+        "profit_factor": best_full.get("profit_factor"),
+        "pick_score": round(float(best_rank[0]), 4),
+        "side_stats": side_stats,
         "refine_rounds": refine_log,
         "narrative": narrative,
         "param_source": "recent_1500" if ok else "grid",
@@ -367,6 +409,10 @@ def apply_recent_pick_to_best(
         refresh_klines=refresh_klines,
     )
     summary["recent_pick"] = pick
+    from moss_quant.optimize_policy import enrich_summary
+
+    summary = enrich_summary(summary)
+    pick = summary.get("recent_pick") or pick
 
     if pick.get("adopted"):
         tpl = str(pick.get("template") or l1_tpl or "balanced")
@@ -385,4 +431,6 @@ def apply_recent_pick_to_best(
             summary["param_source"] = summary.get("l1_param_source") or "grid"
 
     best["summary"] = summary
+    if summary.get("sync_block_reason") and not summary.get("sync_allowed"):
+        summary["l1_sync_block_reason"] = summary.get("sync_block_reason")
     return best

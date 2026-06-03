@@ -1757,13 +1757,14 @@ class TestMossQuant(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("同向", reason)
 
-    def test_optimize_trailing_off_by_default(self):
+    def test_optimize_trailing_on_for_trend_templates(self):
         from moss_quant.optimize_service import _run_one, _trailing_for_template
         import pandas as pd
 
         from moss_quant.core.regime import classify_regime
 
-        self.assertFalse(_trailing_for_template("momentum"))
+        self.assertTrue(_trailing_for_template("momentum"))
+        self.assertTrue(_trailing_for_template("trend"))
         self.assertFalse(_trailing_for_template("mean_revert"))
         n = 120
         df = pd.DataFrame(
@@ -1791,7 +1792,7 @@ class TestMossQuant(unittest.TestCase):
             },
             capital=10000.0,
         )
-        self.assertFalse(row.get("tactical_params", {}).get("trailing_enabled"))
+        self.assertTrue(row.get("tactical_params", {}).get("trailing_enabled"))
 
     def test_backtest_diagnosis_neighbors_and_holdout(self):
         from moss_quant.backtest_diagnosis import (
@@ -1908,7 +1909,12 @@ class TestMossQuant(unittest.TestCase):
         from moss_quant.recent_window_pick import _passes_guards
 
         ok, _ = _passes_guards(
-            {"total_trades": 10, "total_return": 0.05, "blowup_count": 0},
+            {
+                "total_trades": 10,
+                "total_return": 0.05,
+                "blowup_count": 0,
+                "profit_factor": 1.2,
+            },
             {"total_return": 0.01},
         )
         self.assertTrue(ok)
@@ -1918,6 +1924,121 @@ class TestMossQuant(unittest.TestCase):
         )
         self.assertFalse(bad)
         self.assertIn("笔数", reason)
+        bad_pf, reason_pf = _passes_guards(
+            {
+                "total_trades": 10,
+                "total_return": 0.05,
+                "blowup_count": 0,
+                "profit_factor": 0.5,
+            },
+            {"total_return": 0.01},
+        )
+        self.assertFalse(bad_pf)
+        self.assertIn("盈亏比", reason_pf)
+
+    def test_rank_recent_score_prefers_more_trades(self):
+        from moss_quant.recent_window_pick import _rank_recent_score
+
+        high_ret_few = _rank_recent_score(
+            {"total_return": 0.20, "total_trades": 4, "profit_factor": 1.5}
+        )
+        mid_ret_many = _rank_recent_score(
+            {"total_return": 0.12, "total_trades": 12, "profit_factor": 1.4}
+        )
+        self.assertGreater(mid_ret_many[0], high_ret_few[0])
+
+    def test_side_attribution_raises_short_threshold(self):
+        from moss_quant.trade_gates import side_attribution_threshold_deltas
+
+        d = side_attribution_threshold_deltas(
+            {
+                "long_count": 8,
+                "short_count": 6,
+                "long_win_rate": 0.55,
+                "short_win_rate": 0.30,
+            },
+            base_threshold=0.44,
+        )
+        self.assertGreater(d["short_delta"], 0.0)
+        self.assertEqual(d["long_delta"], 0.0)
+        self.assertEqual(d["reason"], "short_side_weak")
+
+    def test_side_stats_from_post_grid_local_refine(self):
+        from moss_quant.trade_gates import _side_stats_from_summary
+
+        ss = _side_stats_from_summary(
+            {
+                "post_grid_pipeline": {
+                    "local_refine": {
+                        "rounds": [
+                            {
+                                "train_analysis": {
+                                    "side_stats": {
+                                        "long_count": 5,
+                                        "short_count": 4,
+                                        "long_win_rate": 0.6,
+                                        "short_win_rate": 0.25,
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        self.assertEqual(ss.get("short_count"), 4)
+
+    def test_sync_deny_when_recent_pick_no_tail(self):
+        from moss_quant.optimize_policy import sync_deny_reason
+
+        reason = sync_deny_reason(
+            {
+                "pool_tier": "A",
+                "validation_passed": True,
+                "wf_validation_passed": True,
+                "train_return": 0.1,
+                "val_return": 0.08,
+                "total_return": 0.1,
+                "total_trades": 20,
+                "win_rate": 0.5,
+                "max_drawdown": 0.1,
+                "blowup_count": 0,
+                "recent_pick": {
+                    "skipped": False,
+                    "bars": 1500,
+                    "adopted": False,
+                    "reason": "1500窗无满足门槛的组合",
+                },
+            }
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("1500", reason or "")
+
+    def test_sync_deny_when_recent_tail_below_floor(self):
+        from moss_quant.optimize_policy import sync_deny_reason
+
+        reason = sync_deny_reason(
+            {
+                "pool_tier": "A",
+                "validation_passed": True,
+                "wf_validation_passed": True,
+                "train_return": 0.1,
+                "val_return": 0.08,
+                "total_return": 0.1,
+                "total_trades": 20,
+                "win_rate": 0.5,
+                "max_drawdown": 0.1,
+                "blowup_count": 0,
+                "auto_enabled": True,
+                "recent_pick": {
+                    "skipped": False,
+                    "tail_return_pct": -5.0,
+                    "adopted": False,
+                },
+            }
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("尾段", reason or "")
 
     def test_recent_pick_skips_non_a_pool(self):
         from moss_quant.recent_window_pick import pick_best_on_recent_window
@@ -1935,6 +2056,8 @@ class TestMossQuant(unittest.TestCase):
         combos = _grid_combos({}, prefer_template="momentum")
         self.assertGreater(len(combos), 0)
         self.assertEqual(str(combos[0][0]).lower(), "momentum")
+        exits = {float(c[1].get("exit_threshold") or 0) for c in combos}
+        self.assertGreater(len(exits), 1)
 
     def test_apply_recent_pick_preserves_l1_fields(self):
         from moss_quant.recent_window_pick import apply_recent_pick_to_best

@@ -222,6 +222,37 @@ def suggest_tactical_adjustments(
             "笔数多但盈亏比差",
         )
 
+    ss = analysis.get("side_stats") or {}
+    lc = int(ss.get("long_count") or 0)
+    sc = int(ss.get("short_count") or 0)
+    lwr = ss.get("long_win_rate")
+    swr = ss.get("short_win_rate")
+    gap = float(getattr(cfg, "MOSS_QUANT_SIDE_BIAS_WIN_GAP", 0.12) or 0.12)
+    min_side = int(getattr(cfg, "MOSS_QUANT_SIDE_BIAS_MIN_SIDE_TRADES", 3) or 3)
+    if (
+        lc >= min_side
+        and sc >= min_side
+        and lwr is not None
+        and swr is not None
+    ):
+        if float(swr) < float(lwr) - gap:
+            _propose(
+                "entry_threshold",
+                float(tact.get("entry_threshold") or entry) + 0.04,
+                "空侧胜率明显弱于多侧",
+            )
+            _propose(
+                "exit_threshold",
+                float(tact.get("exit_threshold") or exit_th) - 0.02,
+                "空侧弱时更早离场",
+            )
+        elif float(lwr) < float(swr) - gap:
+            _propose(
+                "entry_threshold",
+                float(tact.get("entry_threshold") or entry) + 0.04,
+                "多侧胜率明显弱于空侧",
+            )
+
     if adjustments:
         narrative = (
             f"训练窗胜率 {wr * 100:.0f}%。建议："
