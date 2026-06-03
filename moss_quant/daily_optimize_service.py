@@ -832,6 +832,24 @@ def summarize_latest_daily_pools(conn) -> Dict[str, Any]:
     }
 
 
+def needs_daily_optimize_bootstrap(conn) -> bool:
+    """启动时是否应预约首次全市场寻优（无 daily_auto Profile 且 bootstrap 开关开）。"""
+    if not cfg.daily_optimize_bootstrap_enabled():
+        return False
+    from moss_quant.db import DAILY_PROFILE_SOURCE
+
+    n = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM moss_profiles WHERE profile_source=?",
+            (DAILY_PROFILE_SOURCE,),
+        ).fetchone()[0]
+        or 0
+    )
+    if n > 0:
+        return False
+    return not is_daily_optimize_in_progress(conn)
+
+
 def is_daily_optimize_in_progress(conn) -> bool:
     """寻优是否进行中（进程锁或 DB running；会先清理僵死 running）。"""
     try:

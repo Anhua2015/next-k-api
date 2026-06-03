@@ -709,29 +709,13 @@ def run_moss_quant_paper_task() -> None:
 def run_moss_daily_optimize_bootstrap_task() -> None:
     """无 daily_auto Profile 时启动后自动跑一次全市场寻优（默认开启）。"""
     try:
-        from moss_quant.config import daily_optimize_bootstrap_enabled
-        from moss_quant.db import DAILY_PROFILE_SOURCE
-        from moss_quant.daily_optimize_service import is_daily_optimize_in_progress
+        from moss_quant.daily_optimize_service import needs_daily_optimize_bootstrap
         from accumulation_radar import init_db
 
-        if not daily_optimize_bootstrap_enabled():
-            return
         conn = init_db()
         try:
-            n = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM moss_profiles WHERE profile_source=?",
-                    (DAILY_PROFILE_SOURCE,),
-                ).fetchone()[0]
-                or 0
-            )
-            if n > 0:
-                logger.info(
-                    "Moss 每日寻优 bootstrap 跳过：已有 %s 个 daily_auto profile", n
-                )
-                return
-            if is_daily_optimize_in_progress(conn):
-                logger.info("Moss 每日寻优 bootstrap 跳过：已有任务在跑")
+            if not needs_daily_optimize_bootstrap(conn):
+                logger.info("Moss 每日寻优 bootstrap 跳过（已有 Profile 或开关关）")
                 return
         finally:
             conn.close()

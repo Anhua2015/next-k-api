@@ -1151,9 +1151,10 @@ class TestMossQuant(unittest.TestCase):
         from moss_quant import config as cfg
 
         self.assertTrue(cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED)
-        self.assertFalse(cfg.MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP)
+        self.assertTrue(cfg.MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP)
         self.assertTrue(cfg.MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES)
         self.assertTrue(cfg.daily_optimize_scheduler_enabled())
+        self.assertTrue(cfg.daily_optimize_bootstrap_enabled())
 
     def test_delete_profile_preserves_settlements_and_wallet_pnl(self):
         import sqlite3
@@ -1962,6 +1963,17 @@ class TestMossQuant(unittest.TestCase):
         self.assertGreater(d["short_delta"], 0.0)
         self.assertEqual(d["long_delta"], 0.0)
         self.assertEqual(d["reason"], "short_side_weak")
+
+    def test_env_truthy_explicit_off(self):
+        import importlib
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"MOSS_QUANT_ENABLED": "off"}):
+            import moss_quant.config as mq_cfg
+
+            importlib.reload(mq_cfg)
+            self.assertFalse(mq_cfg.MOSS_QUANT_ENABLED)
 
     def test_moss_runtime_switches_default_on(self):
         import importlib

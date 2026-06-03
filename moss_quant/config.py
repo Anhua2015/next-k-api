@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Dict
 
 
 def env_truthy(name: str, *, default: bool = False) -> bool:
     raw = os.getenv(name, "")
     if not str(raw).strip():
         return default
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    low = str(raw).strip().lower()
+    if low in ("0", "false", "no", "off"):
+        return False
+    return low in ("1", "true", "yes", "on")
 
 
 MOSS_QUANT_ENABLED = env_truthy("MOSS_QUANT_ENABLED", default=True)
@@ -277,7 +281,7 @@ MOSS_QUANT_POOL_AUTO_DISABLE_ON_PAPER_LOSS = env_truthy(
 )
 
 
-def moss_runtime_switch_snapshot() -> dict[str, bool]:
+def moss_runtime_switch_snapshot() -> Dict[str, bool]:
     """API/看板：Moss 运行时开关一览（未设 env 时均为 True）。"""
     return {
         "enabled": MOSS_QUANT_ENABLED,
@@ -289,10 +293,18 @@ def moss_runtime_switch_snapshot() -> dict[str, bool]:
         "daily_optimize_apply_profiles": MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES,
         "daily_optimize_refresh": MOSS_QUANT_DAILY_OPTIMIZE_REFRESH,
         "daily_optimize_bootstrap": MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP,
+        "daily_optimize_bootstrap_scheduler": daily_optimize_bootstrap_enabled(),
         "pool_governance": pool_governance_enabled(),
+        "pool_auto_disable": MOSS_QUANT_POOL_AUTO_DISABLE,
+        "pool_auto_enable": MOSS_QUANT_POOL_AUTO_ENABLE,
         "recent_pick": MOSS_QUANT_RECENT_PICK_ENABLED,
         "local_refine": MOSS_QUANT_OPTIMIZE_LOCAL_REFINE_ENABLED,
         "tuning_diag": MOSS_QUANT_OPTIMIZE_TUNING_DIAG_ENABLED,
+        "portfolio_risk": MOSS_QUANT_PORTFOLIO_RISK_ENABLED,
+        "intraday_adjust": MOSS_QUANT_INTRADAY_ADJUST_ENABLED,
+        "regime_align": MOSS_QUANT_REGIME_ALIGN_ADJUST_ENABLED,
+        "side_bias": MOSS_QUANT_SIDE_BIAS_ADJUST_ENABLED,
+        "sync_tail_check": MOSS_QUANT_SYNC_REQUIRE_RECENT_TAIL_OK,
         "real_mode": MOSS_QUANT_REAL_MODE,
         "llm": MOSS_QUANT_LLM_ENABLED,
     }

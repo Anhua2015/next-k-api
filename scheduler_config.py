@@ -175,20 +175,35 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
             replace_existing=True,
         )
     if daily_optimize_bootstrap_enabled():
-        from datetime import datetime, timedelta
+        schedule_bootstrap = True
+        try:
+            from accumulation_radar import init_db
+            from moss_quant.daily_optimize_service import needs_daily_optimize_bootstrap
 
-        from moss_quant.config import MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC
+            conn = init_db()
+            try:
+                schedule_bootstrap = needs_daily_optimize_bootstrap(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "Moss bootstrap schedule check failed, will still register: %s", e
+            )
+        if schedule_bootstrap:
+            from datetime import datetime, timedelta
 
-        run_at = datetime.now(sch.timezone) + timedelta(
-            seconds=MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC
-        )
-        sch.add_job(
-            wt.run_moss_daily_optimize_bootstrap_task,
-            "date",
-            run_date=run_at,
-            id="moss_daily_optimize_bootstrap",
-            replace_existing=True,
-        )
+            from moss_quant.config import MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC
+
+            run_at = datetime.now(sch.timezone) + timedelta(
+                seconds=MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC
+            )
+            sch.add_job(
+                wt.run_moss_daily_optimize_bootstrap_task,
+                "date",
+                run_date=run_at,
+                id="moss_daily_optimize_bootstrap",
+                replace_existing=True,
+            )
     if env_truthy("JIEZHEN_SCHEDULER_ENABLED", default=True):
         from jiezhen_config import (
             JIEZHEN_SCAN_INTERVAL_SEC,
