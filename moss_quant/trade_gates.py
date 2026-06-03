@@ -156,8 +156,12 @@ def intraday_threshold_bump(
         return 0.0
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        """SELECT COALESCE(SUM(realized_pnl_usdt), 0) AS realized,
-                  COALESCE(SUM(unrealized_pnl_usdt), 0) AS unrealized
+        """SELECT COALESCE(SUM(
+                   CASE WHEN outcome IS NOT NULL THEN pnl_usdt ELSE 0 END
+               ), 0) AS realized,
+                  COALESCE(SUM(
+                   CASE WHEN outcome IS NULL THEN unrealized_pnl_usdt ELSE 0 END
+               ), 0) AS unrealized
            FROM moss_signals WHERE profile_id=?""",
         (int(profile_id),),
     ).fetchone()

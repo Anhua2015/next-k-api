@@ -1602,6 +1602,45 @@ class TestMossQuant(unittest.TestCase):
         self.assertFalse(out.get("sync_allowed"))
         self.assertIn("近", str(out.get("sync_block_reason") or ""))
 
+    def test_intraday_threshold_bump_uses_pnl_usdt_column(self):
+        import sqlite3
+        from unittest.mock import patch
+
+        from moss_quant import config as cfg
+        from moss_quant.db import migrate_moss_tables
+        from moss_quant.trade_gates import intraday_threshold_bump
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        conn.execute(
+            """INSERT INTO moss_profiles(
+                   id, name, symbol, template, enabled,
+                   initial_params_json, tactical_params_json,
+                   virtual_equity_usdt, created_at_utc, updated_at_utc)
+               VALUES (1,'t','TONUSDT','balanced',1,'{}','{}',1000,'t','t')"""
+        )
+        conn.execute(
+            """INSERT INTO moss_signals(
+                   profile_id, recorded_at_utc, side, symbol, entry_price,
+                   outcome, outcome_at_utc, pnl_usdt, updated_at_utc)
+               VALUES (1,'2024-01-01T00:00:00Z','LONG','TONUSDT',1.0,
+                       'closed','2024-01-01T01:00:00Z',-60.0,'t')"""
+        )
+        conn.execute(
+            """INSERT INTO moss_signals(
+                   profile_id, recorded_at_utc, side, symbol, entry_price,
+                   unrealized_pnl_usdt, outcome, updated_at_utc)
+               VALUES (1,'2024-01-02T00:00:00Z','LONG','TONUSDT',1.0,
+                       -10.0,NULL,'t')"""
+        )
+        conn.commit()
+        with patch.object(cfg, "MOSS_QUANT_INTRADAY_ADJUST_ENABLED", True):
+            with patch.object(cfg, "MOSS_QUANT_INTRADAY_DRAWDOWN_PCT", 0.05):
+                with patch.object(cfg, "MOSS_QUANT_INTRADAY_DRAWDOWN_BUMP", 0.08):
+                    bump = intraday_threshold_bump(conn, 1, profile_capital=1000.0)
+        self.assertEqual(bump, 0.08)
+
     def test_oi_spike_flat_detect(self):
         from moss_quant.trade_gates import _oi_spike_flat_price
 
