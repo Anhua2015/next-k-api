@@ -152,40 +152,6 @@ def migrate_moss_tables(c: sqlite3.Cursor) -> None:
         "CREATE INDEX IF NOT EXISTS ix_moss_daily_items_batch ON moss_daily_optimize_items(batch_id)"
     )
     c.execute(
-        """CREATE TABLE IF NOT EXISTS moss_mcap_scan_batches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ran_at_utc TEXT NOT NULL,
-        finished_at_utc TEXT,
-        status TEXT NOT NULL,
-        symbols_total INTEGER,
-        symbols_ok INTEGER,
-        capital REAL,
-        data_source TEXT,
-        kline_start TEXT,
-        kline_end TEXT,
-        display_top_n INTEGER,
-        mcap_pool_limit INTEGER,
-        error TEXT
-    )"""
-    )
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS moss_mcap_scan_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        batch_id INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        market_cap_usd REAL,
-        mcap_rank INTEGER,
-        template TEXT,
-        tactical_params_json TEXT,
-        summary_json TEXT,
-        score REAL,
-        FOREIGN KEY (batch_id) REFERENCES moss_mcap_scan_batches(id)
-    )"""
-    )
-    c.execute(
-        "CREATE INDEX IF NOT EXISTS ix_moss_mcap_items_batch ON moss_mcap_scan_items(batch_id)"
-    )
-    c.execute(
         """CREATE TABLE IF NOT EXISTS moss_daily_core_symbols (
         symbol TEXT PRIMARY KEY,
         base TEXT NOT NULL,
@@ -794,7 +760,7 @@ def add_symbol_to_daily_core(
     conn: sqlite3.Connection,
     symbol: str,
     *,
-    note: str = "from_mcap_scan",
+    note: str = "manual",
 ) -> Dict[str, Any]:
     """将标的加入 moss_daily_core_symbols（每日寻优必扫表）。"""
     from moss_quant.universe import base_to_binance_symbol, symbol_to_base

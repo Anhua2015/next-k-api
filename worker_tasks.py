@@ -41,9 +41,7 @@ _powder_keg_radar_lock = threading.Lock()
 _momentum_lane_lock = threading.Lock()
 _jiezhen_lane_lock = threading.Lock()
 _moss_quant_lock = threading.Lock()
-_moss2_quant_lock = threading.Lock()
 _moss_daily_optimize_lock = threading.Lock()
-_moss_mcap_scan_lock = threading.Lock()
 
 
 def _safe_float(value: Any, default: float) -> float:
@@ -59,10 +57,6 @@ def _env_float(name: str, default: float) -> float:
 
 def moss_daily_optimize_busy() -> bool:
     return _moss_daily_optimize_lock.locked()
-
-
-def moss_mcap_scan_busy() -> bool:
-    return _moss_mcap_scan_lock.locked()
 
 
 def _run_subprocess_locked(lock_key: str, argv: list[str], *, cwd: Path, env: dict | None = None) -> None:
@@ -712,37 +706,6 @@ def run_moss_quant_paper_task() -> None:
         _moss_quant_lock.release()
 
 
-def run_moss2_quant_scan_task() -> None:
-    """Moss2 多机器人扫描：候选池选币 + 去重 + 空仓切换 + 冷却。"""
-    if not _moss2_quant_lock.acquire(blocking=False):
-        logger.warning("跳过 moss2_quant_scan：上一轮仍在运行")
-        return
-    try:
-        from moss2_quant.config import scheduler_enabled
-        from moss2_quant.service import run_scan_once
-        from accumulation_radar import init_db
-
-        if not scheduler_enabled():
-            return
-        conn = init_db()
-        try:
-            out = run_scan_once(conn, refresh_klines=False)
-            logger.info(
-                "Moss2 扫描完成 run_id=%s robots=%s opens=%s closes=%s skips=%s",
-                out.get("run_id"),
-                out.get("robots_scanned"),
-                out.get("opens"),
-                out.get("closes"),
-                out.get("skips"),
-            )
-        finally:
-            conn.close()
-    except Exception as e:
-        logger.exception("moss2_quant_scan failed: %s", e)
-    finally:
-        _moss2_quant_lock.release()
-
-
 def run_moss_daily_optimize_bootstrap_task() -> None:
     """无 daily_auto Profile 时启动后自动跑一次全市场寻优（默认开启）。"""
     try:
@@ -812,38 +775,6 @@ def run_moss_daily_optimize_task(
         logger.exception("moss_daily_optimize failed: %s", e)
     finally:
         _moss_daily_optimize_lock.release()
-
-
-def run_moss_mcap_scan_task(
-    *,
-    capital: float | None = None,
-    refresh_klines: bool | None = None,
-) -> None:
-    """币安市值 Top 池扩展寻优（排除稳定币与每日 Moss 宇宙）。"""
-    if not _moss_mcap_scan_lock.acquire(blocking=False):
-        logger.warning("跳过 moss_mcap_scan：上一轮仍在运行")
-        return
-    try:
-        from moss_quant import config as mq_cfg
-        from moss_quant.mcap_scan_service import run_mcap_scan_batch
-
-        if not mq_cfg.MOSS_QUANT_ENABLED:
-            return
-        out = run_mcap_scan_batch(
-            capital=capital,
-            refresh_klines=refresh_klines,
-        )
-        logger.info(
-            "Moss 市值扩展寻优完成 batch_id=%s ok=%s/%s top_n=%s",
-            out.get("batch_id"),
-            out.get("symbols_ok"),
-            out.get("symbols_total"),
-            len(out.get("top") or []),
-        )
-    except Exception as e:
-        logger.exception("moss_mcap_scan failed: %s", e)
-    finally:
-        _moss_mcap_scan_lock.release()
 
 
 def run_powder_keg_radar_task() -> None:

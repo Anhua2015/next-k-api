@@ -249,24 +249,30 @@ class TestMossQuant(unittest.TestCase):
         df = _load_factory_csv("BTCUSDT", 100)
         self.assertGreaterEqual(len(df), 50)
 
-    def test_default_data_source_hyperliquid(self):
+    def test_default_data_source_binance(self):
         from moss_quant import config as cfg
 
-        self.assertEqual(cfg.MOSS_QUANT_DATA_SOURCE, "hyperliquid")
+        self.assertEqual(cfg.MOSS_QUANT_DATA_SOURCE, "binance")
 
     def test_optimize_returns_ranking(self):
+        from unittest.mock import patch
+
+        from moss_quant import config as cfg
         from moss_quant.optimize_service import run_strategy_optimize
 
-        out = run_strategy_optimize(
-            symbol="BTCUSDT",
-            capital=10000,
-            refresh_klines=False,
-            max_combinations=8,
-            entry_thresholds=[0.40, 0.50],
-            sl_atr_mults=[2.0],
-            tp_rr_ratios=[2.0, 3.0],
-            top_n=5,
+        small = dict(
+            MOSS_QUANT_OPTIMIZE_MAX_COMBINATIONS=8,
+            MOSS_QUANT_OPTIMIZE_ENTRY_THRESHOLDS=(0.40, 0.50),
+            MOSS_QUANT_OPTIMIZE_SL_ATR_MULTS=(2.0,),
+            MOSS_QUANT_OPTIMIZE_TP_RR_RATIOS=(2.0, 3.0),
         )
+        with patch.multiple(cfg, **small):
+            out = run_strategy_optimize(
+                symbol="BTCUSDT",
+                capital=10000,
+                refresh_klines=False,
+                top_n=5,
+            )
         self.assertTrue(out.get("ok"))
         self.assertGreaterEqual(out.get("combinations_tested", 0), 1)
         self.assertIn("ranking", out)
@@ -417,14 +423,15 @@ class TestMossQuant(unittest.TestCase):
                 json.dumps({"entry_threshold": 0.48, "sl_atr_mult": 2.5}),
                 json.dumps(
                     {
-                        "total_return": 0.5,
+                        "total_return": 0.2,
                         "total_trades": 20,
                         "max_drawdown": -0.08,
                         "blowup_count": 0,
                         "win_rate": 0.55,
                         "validation_passed": True,
                         "validation_reason": "验证通过",
-                        "val_return": 0.1,
+                        "val_return": 0.12,
+                        "val_sharpe": 1.1,
                     }
                 ),
                 0.5,
@@ -449,6 +456,8 @@ class TestMossQuant(unittest.TestCase):
                         "win_rate": 0.5,
                         "validation_passed": True,
                         "validation_reason": "验证通过",
+                        "val_return": 0.15,
+                        "val_sharpe": 0.9,
                     }
                 ),
                 0.2,
@@ -595,56 +604,6 @@ class TestMossQuant(unittest.TestCase):
         self.assertAlmostEqual(json.loads(row[1])["entry_threshold"], 0.44)
         self.assertEqual(row[2], 0)
 
-    def test_mcap_candidates_exclude_symbol_added_to_daily_core_db(self):
-        import sqlite3
-        from unittest.mock import patch
-
-        from moss_quant.binance_mcap_universe import build_mcap_scan_candidates
-        from moss_quant.db import add_symbol_to_daily_core, migrate_moss_tables
-
-        conn = sqlite3.connect(":memory:")
-        migrate_moss_tables(conn.cursor())
-        conn.commit()
-        add_symbol_to_daily_core(conn, "RENDERUSDT", note="test")
-        mcap = {
-            "RENDER": 5e9,
-            "BTC": 1e12,
-            "ETH": 4e11,
-            "SOL": 8e10,
-        }
-        with patch("accumulation_radar.init_db", return_value=conn):
-            candidates = build_mcap_scan_candidates(
-                mcap_limit=10, mcap_map=mcap
-            )
-        bases = {c["base"] for c in candidates}
-        syms = {c["symbol"] for c in candidates}
-        self.assertNotIn("RENDER", bases)
-        self.assertNotIn("RENDERUSDT", syms)
-
-    def test_build_mcap_scan_candidates_excludes_daily_and_stables(self):
-        from moss_quant.binance_mcap_universe import build_mcap_scan_candidates
-        from moss_quant.universe import list_universe
-
-        daily_bases = {u["base"] for u in list_universe()}
-        mcap = {
-            "USDC": 9e10,
-            "USDT": 8e10,
-            "BTC": 1e12,
-            "ETH": 4e11,
-        }
-
-        candidates = build_mcap_scan_candidates(
-            mcap_limit=10, mcap_map=mcap
-        )
-        bases = {c["base"] for c in candidates}
-        self.assertNotIn("USDC", bases)
-        self.assertNotIn("USDT", bases)
-        for b in daily_bases:
-            self.assertNotIn(b, bases)
-        syms = {c["symbol"] for c in candidates}
-        for u in list_universe():
-            self.assertNotIn(u["symbol"], syms)
-
     def test_evaluate_profile_auto_enable_pass(self):
         from moss_quant.daily_auto_enable import evaluate_profile_auto_enable
 
@@ -772,7 +731,8 @@ class TestMossQuant(unittest.TestCase):
             "win_rate": 0.55,
             "validation_passed": True,
             "validation_reason": "验证通过",
-            "val_return": 0.05,
+            "val_return": 0.12,
+            "val_sharpe": 1.0,
         }
         conn.execute(
             """INSERT INTO moss_daily_optimize_items(
@@ -827,7 +787,8 @@ class TestMossQuant(unittest.TestCase):
             "win_rate": 0.55,
             "validation_passed": True,
             "validation_reason": "验证通过",
-            "val_return": 0.05,
+            "val_return": 0.12,
+            "val_sharpe": 1.0,
         }
         conn.execute(
             """INSERT INTO moss_daily_optimize_items(
@@ -881,6 +842,39 @@ class TestMossQuant(unittest.TestCase):
         self.assertEqual(kline_request_weight(1500), 10)
         self.assertEqual(kline_request_weight(100), 1)
 
+    def test_fetch_klines_history_paginates(self):
+        from unittest.mock import patch
+
+        from binance_fapi import BINANCE_KLINE_MAX_PER_REQUEST, fetch_klines_history
+
+        calls: list = []
+
+        def _fake(sym, interval, limit, end_time_ms=None):
+            calls.append((limit, end_time_ms))
+            if end_time_ms is None:
+                return [[10 + i, 1, 1, 1, 1, 1] for i in range(3)]
+            return [[7 + i, 1, 1, 1, 1, 1] for i in range(3)]
+
+        with patch("binance_fapi.fetch_klines", side_effect=_fake):
+            with patch("binance_fapi.BINANCE_KLINE_MAX_PER_REQUEST", 3):
+                rows = fetch_klines_history("BTCUSDT", "15m", 5)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(int(rows[0][0]), 8)
+        self.assertEqual(int(rows[-1][0]), 12)
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_research_kline_bar_limits(self):
+        from moss_quant import config as cfg
+        from moss_quant.kline_cache import kline_bar_limit
+
+        self.assertGreaterEqual(
+            kline_bar_limit(research=True), kline_bar_limit(research=False)
+        )
+        self.assertEqual(cfg.MOSS_QUANT_RESEARCH_KLINE_BARS, 6720)
+        self.assertEqual(cfg.MOSS_QUANT_KLINE_LIMIT, 1500)
+        self.assertEqual(cfg.MOSS_QUANT_DATA_SOURCE, "binance")
+        self.assertEqual(kline_bar_limit(research=False), cfg.MOSS_QUANT_KLINE_LIMIT)
+
     def test_universe_is_daily_core_25_by_default(self):
         from moss_quant.universe import MOSS_DAILY_CORE_BASES, list_universe
 
@@ -891,48 +885,6 @@ class TestMossQuant(unittest.TestCase):
             self.assertIn(base, syms, msg=f"missing {base}")
         for base in ("PEPE",):
             self.assertNotIn(base, syms, msg=f"extended {base} should be excluded")
-
-    def test_top_qualified_mcap_items_filters_and_limits(self):
-        from moss_quant.mcap_scan_service import top_qualified_mcap_items
-
-        items = [
-            {
-                "symbol": "AAAUSDT",
-                "score": 10,
-                "summary": {
-                    "total_return": 0.2,
-                    "total_trades": 10,
-                    "max_drawdown": 0.1,
-                    "blowup_count": 0,
-                    "auto_enabled": True,
-                },
-            },
-            {
-                "symbol": "BBBUSDT",
-                "score": 20,
-                "summary": {
-                    "total_return": -0.1,
-                    "total_trades": 10,
-                    "max_drawdown": 0.1,
-                    "blowup_count": 0,
-                    "auto_enabled": False,
-                },
-            },
-            {
-                "symbol": "CCCUSDT",
-                "score": 5,
-                "summary": {
-                    "total_return": 0.5,
-                    "total_trades": 12,
-                    "max_drawdown": 0.2,
-                    "blowup_count": 0,
-                },
-            },
-        ]
-        top = top_qualified_mcap_items(items, 15)
-        self.assertEqual(len(top), 2)
-        self.assertEqual(top[0]["symbol"], "AAAUSDT")
-        self.assertEqual(top[1]["symbol"], "CCCUSDT")
 
     def test_add_symbol_to_daily_core(self):
         import sqlite3
@@ -964,7 +916,7 @@ class TestMossQuant(unittest.TestCase):
         migrate_moss_tables(conn.cursor())
         conn.commit()
         self.assertFalse(is_symbol_allowed("ZECUSDT", conn=conn))
-        add_symbol_to_daily_core(conn, "ZECUSDT", note="from_mcap_scan")
+        add_symbol_to_daily_core(conn, "ZECUSDT", note="manual")
         self.assertTrue(is_symbol_allowed("ZECUSDT", conn=conn))
         merged = list_universe(conn)
         self.assertIn("ZECUSDT", {u["symbol"] for u in merged})
@@ -1298,6 +1250,183 @@ class TestMossQuant(unittest.TestCase):
         self.assertGreater(len(train), 0)
         self.assertGreater(len(val), 0)
         self.assertEqual(len(train) + len(val), n)
+
+    def test_walk_forward_folds_and_stability(self):
+        import pandas as pd
+
+        from moss_quant.optimize_policy import (
+            aggregate_walk_forward_validation,
+            can_sync_profile_params,
+            enrich_summary,
+            split_walk_forward_folds,
+            stability_adjusted_val_score,
+            templates_for_regime,
+            train_val_ratio_ok,
+        )
+
+        n = 600
+        df = pd.DataFrame({"timestamp": range(n), "close": [1.0] * n})
+        folds = split_walk_forward_folds(df, n_folds=3)
+        self.assertGreaterEqual(len(folds), 2)
+
+        agg = aggregate_walk_forward_validation(
+            [
+                {"validation_passed": True, "val_sharpe": 1.0, "val_return": 0.1},
+                {"validation_passed": True, "val_sharpe": 0.8, "val_return": 0.08},
+                {"validation_passed": False, "val_sharpe": -1.0, "val_return": -0.2},
+            ]
+        )
+        self.assertTrue(agg["wf_validation_passed"])
+        self.assertEqual(agg["wf_passed_folds"], 2)
+
+        hi = stability_adjusted_val_score(1.0, train_return=0.5, val_return=0.48)
+        lo = stability_adjusted_val_score(1.0, train_return=0.5, val_return=0.05)
+        self.assertGreater(hi, lo)
+
+        self.assertIsNotNone(train_val_ratio_ok(0.5, 0.01))
+
+        overfit = {
+            "total_return": 0.5,
+            "val_return": 0.05,
+            "sharpe": 1.0,
+            "max_drawdown": -0.1,
+            "total_trades": 10,
+            "blowup_count": 0,
+            "validation_passed": True,
+            "wf_validation_passed": True,
+        }
+        enriched_over = enrich_summary(overfit)
+        self.assertFalse(enriched_over.get("sync_allowed"))
+        self.assertIn("收益比", str(enriched_over.get("sync_block_reason") or ""))
+
+        tpl = templates_for_regime({"regime_note": "sideways_heavy"})
+        self.assertIn("mean_revert", tpl)
+        self.assertNotIn("trend", tpl)
+
+    def test_validation_context_and_gate_proxy(self):
+        import pandas as pd
+
+        from moss_quant import config as cfg
+        from moss_quant.gate_proxy import funding_extreme_stats, validation_gate_penalty
+        from moss_quant.optimize_service import (
+            _build_validation_context,
+            _validation_window_bounds,
+        )
+
+        n = 200
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC"),
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1.0,
+            }
+        )
+        train, val = df.iloc[:140].copy(), df.iloc[140:].copy()
+        ctx = _build_validation_context(train, val)
+        self.assertEqual(len(ctx), min(len(train), cfg.MOSS_QUANT_OPTIMIZE_VAL_WARMUP_BARS) + len(val))
+        ws, we = _validation_window_bounds(val, ctx)
+        self.assertLessEqual(ws, pd.Timestamp(val["timestamp"].iloc[0]))
+
+        stats = funding_extreme_stats(val.iloc[:10], "BTCUSDT")
+        self.assertIn("extreme_ratio", stats)
+        pen = validation_gate_penalty({"extreme_ratio": 0.5})
+        self.assertGreater(pen, 0.0)
+
+    def test_paper_recent_loss_blocks_sync(self):
+        import json
+        import sqlite3
+        from datetime import datetime, timedelta, timezone
+
+        from moss_quant.db import migrate_moss_tables
+        from moss_quant.optimize_policy import enrich_summary, paper_recent_pnl_block_reason
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        conn.execute(
+            """INSERT INTO moss_profiles(
+                   name, symbol, template, enabled, profile_source,
+                   initial_params_json, tactical_params_json,
+                   virtual_equity_usdt, evolution_enabled,
+                   created_at_utc, updated_at_utc)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "btc",
+                "BTCUSDT",
+                "trend",
+                1,
+                "manual",
+                "{}",
+                "{}",
+                1000.0,
+                0,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO moss_signals(
+                   profile_id, recorded_at_utc, side, symbol,
+                   virtual_notional_usdt, outcome, outcome_at_utc, pnl_usdt, updated_at_utc)
+               VALUES (1,?,?,?,?,?,?,?,?)""",
+            (now, "LONG", "BTCUSDT", 1000, "win", now, -80.0, now),
+        )
+        conn.commit()
+        reason = paper_recent_pnl_block_reason(conn, 1, profile_capital=1000.0)
+        self.assertIsNotNone(reason)
+        good = {
+            "total_return": 0.2,
+            "val_return": 0.12,
+            "sharpe": 1.0,
+            "max_drawdown": -0.1,
+            "total_trades": 10,
+            "blowup_count": 0,
+            "validation_passed": True,
+            "wf_validation_passed": True,
+        }
+        out = enrich_summary(good, conn=conn, profile_id=1, profile_capital=1000.0)
+        self.assertFalse(out.get("sync_allowed"))
+        self.assertIn("近", str(out.get("sync_block_reason") or ""))
+
+    def test_oi_spike_flat_detect(self):
+        from moss_quant.trade_gates import _oi_spike_flat_price
+
+        self.assertTrue(_oi_spike_flat_price({"d6h": 5.0, "px_chg": 2.0}))
+        self.assertFalse(_oi_spike_flat_price({"d6h": 1.0, "px_chg": 2.0}))
+        self.assertFalse(_oi_spike_flat_price({"d6h": 5.0, "px_chg": 8.0}))
+
+    def test_portfolio_open_cap(self):
+        import sqlite3
+        from unittest.mock import patch
+
+        from moss_quant.db import migrate_moss_tables
+        from moss_quant.portfolio_risk import check_portfolio_open, list_open_signal_exposure
+
+        conn = sqlite3.connect(":memory:")
+        migrate_moss_tables(conn.cursor())
+        conn.commit()
+        conn.execute(
+            """INSERT INTO moss_profiles(id, name, symbol, template, enabled,
+               initial_params_json, tactical_params_json, created_at_utc, updated_at_utc)
+               VALUES (1,'a','BTCUSDT','trend',1,'{}','{}','t','t')"""
+        )
+        conn.execute(
+            """INSERT INTO moss_signals(
+                   profile_id, recorded_at_utc, side, symbol,
+                   virtual_notional_usdt, outcome, updated_at_utc)
+               VALUES (1,'2024-01-01T00:00:00Z','LONG','BTCUSDT',9000,NULL,'t')"""
+        )
+        conn.commit()
+        self.assertEqual(len(list_open_signal_exposure(conn)), 1)
+        with patch("moss_quant.portfolio_risk._wallet_budget_usdt", return_value=10000.0):
+            ok, scale, reason = check_portfolio_open(
+                conn, symbol="ETHUSDT", side="LONG", proposed_notional=5000
+            )
+        self.assertFalse(ok)
+        self.assertIn("同向", reason)
 
     def test_optimize_trailing_off_by_default(self):
         from moss_quant.optimize_service import _run_one, _trailing_for_template

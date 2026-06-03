@@ -172,13 +172,14 @@ def load_hyperliquid_cached(
     *,
     interval: Optional[str] = None,
     refresh: bool = False,
+    bar_limit: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     加载 HL K 线：本地缓存 →（过期或 refresh）ccxt → 工厂 CSV 兜底。
     refresh=False 时若缓存过期仍会自动拉取，避免纸面一直用陈旧 mark。
     """
     interval = interval or cfg.MOSS_QUANT_KLINE_INTERVAL
-    limit = cfg.MOSS_QUANT_KLINE_LIMIT
+    limit = int(bar_limit or cfg.MOSS_QUANT_KLINE_LIMIT)
     sym = str(symbol).strip().upper()
     path = _cache_path(sym, interval)
 

@@ -1372,6 +1372,30 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
                             )
             continue
 
+        from moss_quant.trade_gates import (
+            effective_entry_threshold,
+            entry_trade_gate,
+            intraday_threshold_bump,
+        )
+
+        base_th = float(params_d.get("entry_threshold", params.entry_threshold))
+        intra_bump = intraday_threshold_bump(
+            conn, pid, profile_capital=float(profile.get("virtual_equity_usdt") or 0) or None
+        )
+        gate_long = entry_trade_gate(symbol, side="LONG", conn=conn)
+        gate_short = entry_trade_gate(symbol, side="SHORT", conn=conn)
+        gate_bump = max(
+            float(gate_long.get("threshold_bump") or 0),
+            float(gate_short.get("threshold_bump") or 0),
+        )
+        eff_th = effective_entry_threshold(
+            base_th, gate_bump=gate_bump, intraday_bump=intra_bump
+        )
+        if abs(eff_th - base_th) > 1e-6:
+            params_d_scan = dict(params_d)
+            params_d_scan["entry_threshold"] = eff_th
+            params = DecisionParams.from_dict(params_d_scan)
+
         ent = entry_snapshot(df, params, regime_s)
         if ent["signal"] == 0:
             stats["details"].append(
@@ -1401,6 +1425,28 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
 
         side = "LONG" if ent["signal"] == 1 else "SHORT"
         composite = ent["composite"]
+        side_gate = entry_trade_gate(symbol, side=side, conn=conn)
+        if not side_gate.get("allowed", True):
+            stats["details"].append(
+                _scan_detail(
+                    label,
+                    profile,
+                    {
+                        "symbol": symbol,
+                        "action": "wait",
+                        "reason": "trade_gate_block",
+                        "gate_reasons": side_gate.get("reasons"),
+                        "regime": regime_label,
+                    },
+                )
+            )
+            logger.info(
+                "[moss] %s SKIP OPEN gate block %s",
+                label,
+                side_gate.get("reasons"),
+            )
+            continue
+
         if paper_truth:
             notional = paper_profile_notional_usdt()
             lev = paper_trading_leverage()
@@ -1422,6 +1468,36 @@ def run_paper_scan(conn: sqlite3.Connection) -> Dict[str, Any]:
             )
             logger.info("[moss] %s SKIP OPEN: insufficient free margin", label)
             continue
+
+        from moss_quant.portfolio_risk import check_portfolio_open
+
+        pf_ok, pf_scale, pf_reason = check_portfolio_open(
+            conn,
+            symbol=symbol,
+            side=side,
+            proposed_notional=notional,
+            exclude_profile_id=pid,
+        )
+        if not pf_ok:
+            stats["details"].append(
+                _scan_detail(
+                    label,
+                    profile,
+                    {
+                        "symbol": symbol,
+                        "action": "wait",
+                        "reason": "portfolio_risk_cap",
+                        "portfolio_reason": pf_reason,
+                        "regime": regime_label,
+                    },
+                )
+            )
+            logger.info("[moss] %s SKIP OPEN portfolio: %s", label, pf_reason)
+            continue
+        if pf_scale < 1.0:
+            notional = round(notional * pf_scale, 2)
+            if notional <= 0:
+                continue
 
         entry_px = mark
         open_result: Optional[ProtocolActionResult] = None

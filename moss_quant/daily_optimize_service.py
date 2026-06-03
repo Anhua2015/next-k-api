@@ -304,13 +304,21 @@ def annotate_daily_batch_items(conn, batch_id: int) -> Dict[str, Any]:
     fail_n = 0
     for row in rows:
         sym = str(row["symbol"]).upper()
-        summary = enrich_summary(json.loads(row["summary_json"] or "{}"))
+        linked = get_profile_by_symbol(conn, sym)
+        profile_id = int(linked["id"]) if linked else None
+        cap = None
+        if linked:
+            cap = float(linked.get("virtual_equity_usdt") or 0) or None
+        summary = enrich_summary(
+            json.loads(row["summary_json"] or "{}"),
+            conn=conn,
+            profile_id=profile_id,
+            profile_capital=cap,
+        )
         if summary.get("auto_enabled"):
             pass_n += 1
         else:
             fail_n += 1
-        linked = get_profile_by_symbol(conn, sym)
-        profile_id = int(linked["id"]) if linked else None
         conn.execute(
             """UPDATE moss_daily_optimize_items
                SET summary_json=?, profile_id=? WHERE id=?""",
@@ -410,8 +418,12 @@ def _build_initial_for_sync(template: str, risk_scale: float = 1.0) -> dict:
 
 
 def _sync_rank_index(items_by_sym: Dict[str, Dict[str, Any]], sym: str) -> int:
+    def _val_sharpe(item: Dict[str, Any]) -> float:
+        sm = item.get("summary") or {}
+        return float(sm.get("val_sharpe") or 0)
+
     syncable = [
-        (s, float((items_by_sym[s].get("summary") or {}).get("train_score") or items_by_sym[s].get("score") or 0))
+        (s, _val_sharpe(items_by_sym[s]))
         for s in items_by_sym
         if can_sync_profile_params(items_by_sym[s].get("summary") or {})
     ]
@@ -438,6 +450,7 @@ def sync_enabled_profiles_from_batch(
         "no_batch_item": 0,
         "invalid_batch_item": 0,
         "skipped_sync_gate": 0,
+        "skipped_recent_loss": 0,
         "updated_with_open_position": 0,
         "updated_profiles": [],
     }
@@ -453,6 +466,16 @@ def sync_enabled_profiles_from_batch(
         if summary.get("error") or not item.get("template"):
             stats["invalid_batch_item"] += 1
             continue
+        from moss_quant.optimize_policy import paper_recent_pnl_block_reason
+
+        paper_block = paper_recent_pnl_block_reason(
+            conn,
+            pid,
+            profile_capital=float(prof.get("virtual_equity_usdt") or 0) or None,
+        )
+        if paper_block:
+            stats["skipped_recent_loss"] += 1
+            continue
         if not can_sync_profile_params(summary):
             stats["skipped_sync_gate"] += 1
             continue
@@ -462,7 +485,18 @@ def sync_enabled_profiles_from_batch(
         template = str(item.get("template") or "balanced")
         tactical = dict(item.get("tactical_params") or {})
         rank_idx = _sync_rank_index(items_by_sym, sym)
-        risk_scale = risk_scale_for_rank(rank_idx)
+        pool_sharpes = [
+            float((items_by_sym[s].get("summary") or {}).get("val_sharpe") or 0)
+            for s in items_by_sym
+            if can_sync_profile_params(items_by_sym[s].get("summary") or {})
+        ]
+        pool_max_sharpe = max(pool_sharpes) if pool_sharpes else 0.0
+        val_sh = float(summary.get("val_sharpe") or 0)
+        risk_scale = risk_scale_for_rank(
+            rank_idx,
+            val_sharpe=val_sh,
+            pool_max_val_sharpe=pool_max_sharpe,
+        )
         initial = _build_initial_for_sync(template, risk_scale)
         conn.execute(
             """UPDATE moss_profiles SET

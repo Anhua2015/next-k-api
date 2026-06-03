@@ -63,7 +63,7 @@ def _ranked_a_pool_candidates(
         summary = item.get("summary") or {}
         if not _is_upgrade_round(summary):
             continue
-        score = float(item.get("score") or summary.get("train_score") or 0)
+        score = float(summary.get("val_sharpe") or item.get("score") or 0)
         ranked.append((sym, score, item))
     ranked.sort(key=lambda x: -x[1])
     out: List[Tuple[str, Dict[str, Any], int]] = []
@@ -131,7 +131,16 @@ def _sync_profile_from_item(
     rank_idx = _sync_rank_index(items_by_sym, sym)
     from moss_quant.optimize_policy import risk_scale_for_rank
 
-    risk_scale = risk_scale_for_rank(rank_idx)
+    pool_sharpes = [
+        float((items_by_sym[s].get("summary") or {}).get("val_sharpe") or 0)
+        for s in items_by_sym
+        if can_sync_profile_params(items_by_sym[s].get("summary") or {})
+    ]
+    pool_max = max(pool_sharpes) if pool_sharpes else 0.0
+    val_sh = float((item.get("summary") or {}).get("val_sharpe") or 0)
+    risk_scale = risk_scale_for_rank(
+        rank_idx, val_sharpe=val_sh, pool_max_val_sharpe=pool_max
+    )
     initial = _build_initial_for_sync(template, risk_scale)
     conn.execute(
         """UPDATE moss_profiles SET

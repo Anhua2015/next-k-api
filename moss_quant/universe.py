@@ -167,7 +167,7 @@ def list_catalog_universe() -> List[Dict[str, Any]]:
 
 
 def list_universe(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
-    """纸面 / 下拉宇宙：内置目录 + 每日寻优表已启用标的（扩展寻优加入的币）。"""
+    """纸面 / 下拉宇宙：内置目录 + 每日寻优表已启用标的。"""
     out = list_catalog_universe()
     seen = {u["symbol"] for u in out}
     own_conn = False

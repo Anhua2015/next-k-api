@@ -76,13 +76,12 @@ class ApplyFinalParamsRequest(BaseModel):
 
 
 class OptimizeRequest(BaseModel):
-    """网格搜索模板 + 战术参数（按回测收益排序）。"""
+    """网格搜索模板 + 战术参数（网格范围见 moss_quant/config.py 固化默认）。"""
     profile_id: Optional[int] = None
     symbol: Optional[str] = None
     capital: Optional[float] = None
     refresh_klines: bool = False
-    top_n: int = Field(15, ge=1, le=50)
-    max_combinations: int = Field(96, ge=4, le=200)
+    top_n: Optional[int] = Field(None, ge=1, le=50)
     apply_best_tactical_to_profile_id: Optional[int] = None
 
 
@@ -95,11 +94,6 @@ class DailyOptimizeRunRequest(BaseModel):
 class DailyCoreSymbolAdd(BaseModel):
     symbol: str = Field(..., min_length=2, max_length=24)
     note: Optional[str] = Field(None, max_length=128)
-
-
-class McapScanRunRequest(BaseModel):
-    capital: Optional[float] = None
-    refresh_klines: Optional[bool] = None
 
 
 def _conn():
@@ -191,6 +185,7 @@ def _summarize_protocol_moss(
 
 def _moss_optimize_policy(mq_cfg) -> Dict[str, Any]:
     return {
+        "frozen_in_config": True,
         "train_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO,
         "require_validation": mq_cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION,
         "min_train_trades": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_TRADES,
@@ -199,23 +194,35 @@ def _moss_optimize_policy(mq_cfg) -> Dict[str, Any]:
         "max_val_drawdown": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_VAL_DRAWDOWN,
         "validation_top_k": mq_cfg.MOSS_QUANT_OPTIMIZE_VALIDATION_TOP_K,
         "full_risk_slots": mq_cfg.MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS,
-        "mcap_observation_days": mq_cfg.MOSS_QUANT_MCAP_OBSERVATION_DAYS,
+        "wf_folds": mq_cfg.MOSS_QUANT_OPTIMIZE_WF_FOLDS,
+        "wf_min_pass_folds": mq_cfg.MOSS_QUANT_OPTIMIZE_WF_MIN_PASS_FOLDS,
+        "val_warmup_bars": mq_cfg.MOSS_QUANT_OPTIMIZE_VAL_WARMUP_BARS,
+        "gate_proxy_enabled": mq_cfg.MOSS_QUANT_OPTIMIZE_GATE_PROXY_ENABLED,
+        "gate_penalty_scale": mq_cfg.MOSS_QUANT_OPTIMIZE_GATE_PENALTY_SCALE,
+        "stability_penalty": mq_cfg.MOSS_QUANT_OPTIMIZE_STABILITY_PENALTY,
+        "max_train_val_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_MAX_TRAIN_VAL_RATIO,
+        "min_train_val_ratio": mq_cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_VAL_RATIO,
+        "portfolio_risk_enabled": mq_cfg.MOSS_QUANT_PORTFOLIO_RISK_ENABLED,
+        "portfolio_max_same_side_pct": mq_cfg.MOSS_QUANT_PORTFOLIO_MAX_SAME_SIDE_PCT,
+        "gate_funding_extreme": mq_cfg.MOSS_QUANT_GATE_FUNDING_EXTREME,
+        "gate_oi_spike": mq_cfg.MOSS_QUANT_GATE_OI_SPIKE,
+        "sync_block_recent_loss_enabled": mq_cfg.MOSS_QUANT_SYNC_BLOCK_RECENT_LOSS_ENABLED,
+        "sync_block_loss_days": mq_cfg.MOSS_QUANT_SYNC_BLOCK_LOSS_DAYS,
+        "sync_block_loss_pct": mq_cfg.MOSS_QUANT_SYNC_BLOCK_LOSS_PCT,
+        "intraday_adjust_enabled": mq_cfg.MOSS_QUANT_INTRADAY_ADJUST_ENABLED,
     }
 
 
 def _moss_runtime_fields(conn, mq_cfg) -> Dict[str, Any]:
     running = False
-    mcap_running = False
     daily_pools: dict = {}
     try:
         from moss_quant.daily_optimize_service import (
             is_daily_optimize_in_progress,
             summarize_latest_daily_pools,
         )
-        from moss_quant.mcap_scan_service import is_mcap_scan_in_progress
 
         running = is_daily_optimize_in_progress(conn)
-        mcap_running = is_mcap_scan_in_progress(conn)
         daily_pools = summarize_latest_daily_pools(conn)
     except Exception:
         pass
@@ -228,11 +235,10 @@ def _moss_runtime_fields(conn, mq_cfg) -> Dict[str, Any]:
         "daily_optimize_enabled": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED,
         "daily_optimize_apply_profiles": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES,
         "daily_optimize_running": running,
-        "mcap_scan_running": mcap_running,
-        "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
         "optimize_policy": _moss_optimize_policy(mq_cfg),
         "daily_optimize_pools": daily_pools,
         "pool_governance": _pool_governance_summary(conn),
+        "research_kline_bars": mq_cfg.MOSS_QUANT_RESEARCH_KLINE_BARS,
     }
 
 
@@ -517,7 +523,7 @@ async def get_daily_core_universe():
 
 @router.post("/daily-core-symbols")
 async def post_daily_core_symbol(body: DailyCoreSymbolAdd):
-    """将标的加入每日寻优表 moss_daily_core_symbols（扩展寻优看盘可点选）。"""
+    """将标的加入每日寻优表 moss_daily_core_symbols。"""
     from moss_quant.db import add_symbol_to_daily_core, list_daily_core_symbols
     from moss_quant.universe import is_research_symbol_allowed, normalize_usdt_perp_symbol
 
@@ -850,7 +856,6 @@ async def post_optimize(body: OptimizeRequest):
             capital=body.capital,
             refresh_klines=body.refresh_klines,
             top_n=body.top_n,
-            max_combinations=body.max_combinations,
         )
     except Exception as e:
         logger.exception("moss optimize failed")
@@ -1135,117 +1140,12 @@ async def get_summary():
             "daily_optimize_enabled": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED,
             "daily_optimize_apply_profiles": mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_APPLY_PROFILES,
             "daily_optimize_running": False,
-            "mcap_scan_running": False,
-            "mcap_scan_pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
             "optimize_policy": _moss_optimize_policy(mq_cfg),
             "daily_optimize_pools": {},
             "pool_governance": {},
         }
     finally:
         conn.close()
-
-
-@router.get("/mcap-scan/candidates")
-async def get_mcap_scan_candidates():
-    """预览市值扩展寻优候选（未跑回测）。"""
-    from moss_quant.binance_mcap_universe import build_mcap_scan_candidates
-    from moss_quant import config as mq_cfg
-
-    try:
-        candidates = build_mcap_scan_candidates(
-            mcap_limit=mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT
-        )
-    except Exception as e:
-        raise HTTPException(503, f"mcap_candidates_failed: {e}") from e
-    return {
-        "ok": True,
-        "count": len(candidates),
-        "pool_limit": mq_cfg.MOSS_QUANT_MCAP_SCAN_POOL_LIMIT,
-        "candidates": candidates,
-    }
-
-
-@router.get("/mcap-scan/latest")
-async def get_mcap_scan_latest():
-    from moss_quant.mcap_scan_service import (
-        get_latest_mcap_scan_batch,
-        reconcile_stale_mcap_batches,
-    )
-
-    from moss_quant.db import list_daily_core_symbols
-
-    conn = _conn()
-    try:
-        reconcile_stale_mcap_batches(conn)
-        batch = get_latest_mcap_scan_batch(conn)
-        daily_core_symbols = [
-            str(r["symbol"]).upper()
-            for r in list_daily_core_symbols(conn)
-            if int(r.get("enabled") or 0) and r.get("symbol")
-        ]
-        if not batch:
-            return {
-                "ok": True,
-                "has_batch": False,
-                "batch": None,
-                "daily_core_symbols": daily_core_symbols,
-            }
-        return {
-            "ok": True,
-            "has_batch": True,
-            "batch": batch,
-            "daily_core_symbols": daily_core_symbols,
-        }
-    except sqlite3.OperationalError:
-        return {"ok": True, "has_batch": False, "batch": None, "daily_core_symbols": []}
-    finally:
-        conn.close()
-
-
-@router.post("/mcap-scan/run")
-async def post_mcap_scan_run(body: McapScanRunRequest = McapScanRunRequest()):
-    import worker_tasks as wt
-
-    from moss_quant import config as mq_cfg
-    from moss_quant.mcap_scan_service import is_mcap_scan_in_progress
-
-    if not mq_cfg.MOSS_QUANT_ENABLED:
-        raise HTTPException(503, "moss_quant_disabled")
-
-    if wt.moss_mcap_scan_busy():
-        return {
-            "ok": True,
-            "started": False,
-            "already_running": True,
-            "message": "mcap_scan_already_running",
-        }
-
-    conn = _conn()
-    try:
-        if is_mcap_scan_in_progress(conn):
-            return {
-                "ok": True,
-                "started": False,
-                "already_running": True,
-                "message": "mcap_scan_already_running",
-            }
-    finally:
-        conn.close()
-
-    threading.Thread(
-        target=wt.run_moss_mcap_scan_task,
-        kwargs={
-            "capital": body.capital,
-            "refresh_klines": body.refresh_klines,
-        },
-        daemon=True,
-    ).start()
-    return {
-        "ok": True,
-        "started": True,
-        "already_running": False,
-        "message": "mcap_scan_started",
-    }
 
 
 @router.get("/paper-scan/latest")

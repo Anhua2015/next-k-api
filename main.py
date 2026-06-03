@@ -10,6 +10,9 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from env_loader import load_env_oi
+
+load_env_oi()
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +27,6 @@ from routers import s2_s6 as s2_s6_router
 from routers import vp_regime as vp_regime_router
 from routers import jiezhen as jiezhen_router
 from routers import moss_quant as moss_quant_router
-from routers import moss2_quant as moss2_quant_router
 from routers import momentum as momentum_router
 from routers import zct as zct_router
 import worker_tasks as wt
@@ -35,8 +37,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
-
-load_env_oi()
 
 NEXT_K_EMBED_SCHEDULER = os.getenv("NEXT_K_EMBED_SCHEDULER", "").strip().lower() in (
     "1",
@@ -145,7 +145,6 @@ app.include_router(zct_router.router)
 app.include_router(momentum_router.router)
 app.include_router(jiezhen_router.router)
 app.include_router(moss_quant_router.router)
-app.include_router(moss2_quant_router.router)
 app.include_router(vp_regime_router.router)
 app.include_router(s2_s6_router.router)
 

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-import pandas as pd
-
 from moss_quant import config as cfg
 from moss_quant.core.backtest import run_backtest
 from moss_quant.core.decision import DecisionParams
@@ -25,7 +23,7 @@ def run_full_backtest(
     capital = float(capital or cfg.MOSS_QUANT_DEFAULT_CAPITAL)
     regime_version = regime_version or cfg.MOSS_QUANT_REGIME_VERSION
     params = cap_leverage_for_symbol(resolve_params_dict(params), symbol)
-    df = load_cached(symbol, refresh=refresh_klines)
+    df = load_cached(symbol, refresh=refresh_klines, research=True)
     regime = classify_regime(df, version=regime_version)
     p = DecisionParams.from_dict(params)
     result = run_backtest(

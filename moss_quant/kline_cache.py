@@ -9,16 +9,30 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from binance_fapi import fetch_klines
+from binance_fapi import (
+    BINANCE_KLINE_MAX_PER_REQUEST,
+    fetch_klines,
+    fetch_klines_history,
+    kline_request_weight,
+)
 from moss_quant import config as cfg
 
 logger = logging.getLogger(__name__)
 
 
-def _cache_path(symbol: str, interval: str) -> Path:
+def _cache_path(symbol: str, interval: str, *, research: bool = False) -> Path:
     cfg.MOSS_QUANT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     safe = symbol.replace("/", "_")
-    return cfg.MOSS_QUANT_CACHE_DIR / f"{safe}_{interval}.csv"
+    suffix = f"_{interval}_research.csv" if research else f"_{interval}.csv"
+    return cfg.MOSS_QUANT_CACHE_DIR / f"{safe}{suffix}"
+
+
+def kline_bar_limit(*, research: bool = False) -> int:
+    return (
+        int(cfg.MOSS_QUANT_RESEARCH_KLINE_BARS)
+        if research
+        else int(cfg.MOSS_QUANT_KLINE_LIMIT)
+    )
 
 
 def klines_to_df(rows: List[List[Any]]) -> pd.DataFrame:
@@ -35,28 +49,52 @@ def klines_to_df(rows: List[List[Any]]) -> pd.DataFrame:
     return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
 
+def _trim_tail(df: pd.DataFrame, limit: int) -> pd.DataFrame:
+    if df is None or df.empty or len(df) <= limit:
+        return df
+    return df.iloc[-limit:].copy().reset_index(drop=True)
+
+
+def _fetch_binance_rows(symbol: str, interval: str, limit: int) -> List[List[Any]]:
+    if limit <= BINANCE_KLINE_MAX_PER_REQUEST:
+        logger.debug(
+            "[moss] binance klines %s %s limit=%s weight≈%s",
+            symbol,
+            interval,
+            limit,
+            kline_request_weight(limit),
+        )
+        rows = fetch_klines(symbol, interval, limit)
+    else:
+        pages = (limit + BINANCE_KLINE_MAX_PER_REQUEST - 1) // BINANCE_KLINE_MAX_PER_REQUEST
+        est_w = pages * kline_request_weight(BINANCE_KLINE_MAX_PER_REQUEST)
+        logger.info(
+            "[moss] binance klines history %s %s bars=%s pages≈%s weight≈%s",
+            symbol,
+            interval,
+            limit,
+            pages,
+            est_w,
+        )
+        rows = fetch_klines_history(symbol, interval, limit)
+    return rows
+
+
 def fetch_and_cache(
     symbol: str,
     *,
     interval: Optional[str] = None,
     limit: Optional[int] = None,
+    research: bool = False,
 ) -> pd.DataFrame:
     interval = interval or cfg.MOSS_QUANT_KLINE_INTERVAL
-    limit = limit or cfg.MOSS_QUANT_KLINE_LIMIT
-    from binance_fapi import kline_request_weight
-
-    logger.debug(
-        "[moss] binance klines %s %s limit=%s weight≈%s",
-        symbol,
-        interval,
-        limit,
-        kline_request_weight(limit),
-    )
-    rows = fetch_klines(symbol, interval, limit)
+    limit = int(limit or kline_bar_limit(research=research))
+    rows = _fetch_binance_rows(symbol, interval, limit)
     if not rows:
         raise RuntimeError(f"no klines for {symbol} {interval}")
     df = klines_to_df(rows)
-    path = _cache_path(symbol, interval)
+    df = _trim_tail(df, limit)
+    path = _cache_path(symbol, interval, research=research)
     df.to_csv(path, index=False)
     return df
 
@@ -74,6 +112,12 @@ def _kline_stale(df: pd.DataFrame) -> bool:
     return age_min > float(cfg.MOSS_QUANT_KLINE_STALE_MINUTES)
 
 
+def _research_cache_insufficient(df: pd.DataFrame) -> bool:
+    """旧版仅 1500 根的扫描缓存，不足以做长窗寻优。"""
+    need = int(cfg.MOSS_QUANT_RESEARCH_KLINE_BARS)
+    return len(df) < max(need - 50, int(need * 0.9))
+
+
 def _use_binance_klines(symbol: str) -> bool:
     """全局 binance 源，或非 Moss 内置标的（回测任意币安永续默认走币安 K 线）。"""
     if cfg.MOSS_QUANT_DATA_SOURCE == "binance":
@@ -89,14 +133,21 @@ def _load_binance_cached(
     *,
     interval: str,
     refresh: bool,
+    research: bool,
 ) -> pd.DataFrame:
-    path = _cache_path(symbol, interval)
-    if refresh or not path.is_file():
-        return fetch_and_cache(symbol, interval=interval)
-    df = pd.read_csv(path, parse_dates=["timestamp"])
-    if df.empty or _kline_stale(df):
-        return fetch_and_cache(symbol, interval=interval)
-    return df
+    limit = kline_bar_limit(research=research)
+    path = _cache_path(symbol, interval, research=research)
+
+    if not refresh and path.is_file():
+        df = pd.read_csv(path, parse_dates=["timestamp"])
+        if (
+            not df.empty
+            and not _kline_stale(df)
+            and (not research or not _research_cache_insufficient(df))
+        ):
+            return _trim_tail(df, limit)
+
+    return fetch_and_cache(symbol, interval=interval, limit=limit, research=research)
 
 
 def load_cached(
@@ -104,20 +155,30 @@ def load_cached(
     *,
     interval: Optional[str] = None,
     refresh: bool = False,
+    research: bool = False,
 ) -> pd.DataFrame:
     interval = interval or cfg.MOSS_QUANT_KLINE_INTERVAL
     if _use_binance_klines(symbol):
-        return _load_binance_cached(symbol, interval=interval, refresh=refresh)
+        return _load_binance_cached(
+            symbol, interval=interval, refresh=refresh, research=research
+        )
     if cfg.MOSS_QUANT_DATA_SOURCE == "hyperliquid":
         from moss_quant.hyperliquid_klines import load_hyperliquid_cached
 
         return load_hyperliquid_cached(
-            symbol, interval=interval, refresh=refresh
+            symbol,
+            interval=interval,
+            refresh=refresh,
+            bar_limit=kline_bar_limit(research=research),
         )
-    return _load_binance_cached(symbol, interval=interval, refresh=refresh)
+    return _load_binance_cached(
+        symbol, interval=interval, refresh=refresh, research=research
+    )
 
 
-def catalog_entry(symbol: str, df: pd.DataFrame) -> Dict[str, Any]:
+def catalog_entry(
+    symbol: str, df: pd.DataFrame, *, research: bool = False
+) -> Dict[str, Any]:
     if cfg.MOSS_QUANT_DATA_SOURCE == "hyperliquid":
         from moss_quant.hyperliquid_klines import catalog_entry as hl_catalog
 
@@ -131,8 +192,10 @@ def catalog_entry(symbol: str, df: pd.DataFrame) -> Dict[str, Any]:
         "bars": len(df),
         "start": ts0.isoformat().replace("+00:00", "Z"),
         "end": ts1.isoformat().replace("+00:00", "Z"),
-        "csv_path": str(_cache_path(symbol, cfg.MOSS_QUANT_KLINE_INTERVAL)),
+        "csv_path": str(_cache_path(symbol, cfg.MOSS_QUANT_KLINE_INTERVAL, research=research)),
         "data_source": "binance",
+        "research": research,
+        "bar_limit": kline_bar_limit(research=research),
     }
 
 

@@ -188,7 +188,7 @@ def run_segmented_evolve(
         resolve_params_dict(initial_params), symbol
     )
     if df is None:
-        df = load_cached(symbol, refresh=refresh_klines)
+        df = load_cached(symbol, refresh=refresh_klines, research=True)
     regime = classify_regime(df, version=regime_version)
 
     total_bars = len(df)

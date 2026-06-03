@@ -1,10 +1,13 @@
-"""寻优评分、样本外验证、币池分层（每日寻优 / 市值扫描共用）。"""
+"""寻优评分、样本外验证、币池分层（每日寻优）。"""
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import sqlite3
 
 from moss_quant import config as cfg
 from moss_quant.daily_auto_enable import evaluate_profile_auto_enable
@@ -43,13 +46,68 @@ def composite_optimize_score(summary: Dict[str, Any]) -> float:
     )
 
 
+def stability_gap(train_return: float, val_return: float) -> float:
+    return abs(float(train_return or 0) - float(val_return or 0))
+
+
+def stability_penalty(train_return: float, val_return: float) -> float:
+    return float(cfg.MOSS_QUANT_OPTIMIZE_STABILITY_PENALTY) * stability_gap(
+        train_return, val_return
+    )
+
+
+def stability_adjusted_val_score(
+    val_sharpe: float,
+    *,
+    train_return: float,
+    val_return: float,
+) -> float:
+    """验证 Sharpe 为主，惩罚训练/验证收益差距过大。"""
+    return round(
+        float(val_sharpe or 0) - stability_penalty(train_return, val_return),
+        6,
+    )
+
+
+def train_val_ratio_ok(train_return: float, val_return: float) -> Optional[str]:
+    """训练/验证收益比异常 → 过拟合嫌疑。"""
+    tr = float(train_return or 0)
+    vr = float(val_return or 0)
+    if tr <= 0 or vr <= 0:
+        return None
+    ratio = tr / vr if abs(vr) > 1e-9 else 999.0
+    if ratio > float(cfg.MOSS_QUANT_OPTIMIZE_MAX_TRAIN_VAL_RATIO):
+        return "训练验证收益比过高"
+    if ratio < float(cfg.MOSS_QUANT_OPTIMIZE_MIN_TRAIN_VAL_RATIO):
+        return "训练验证收益比过低"
+    return None
+
+
+_ALL_TEMPLATES = ("balanced", "momentum", "trend", "mean_revert")
+
+
+def templates_for_regime(regime_adj: Dict[str, Any]) -> Tuple[str, ...]:
+    """按训练窗 regime 占比缩小模板搜索空间。"""
+    if not cfg.MOSS_QUANT_OPTIMIZE_REGIME_FILTER_TEMPLATES:
+        return _ALL_TEMPLATES
+    note = str(regime_adj.get("regime_note") or "")
+    if note == "sideways_heavy":
+        return ("mean_revert", "balanced")
+    if note == "trend_heavy":
+        return ("trend", "momentum", "balanced")
+    return _ALL_TEMPLATES
+
+
 def split_train_validation_df(
-    df: pd.DataFrame, train_ratio: Optional[float] = None
+    df: pd.DataFrame,
+    train_ratio: Optional[float] = None,
+    *,
+    min_bars: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     ratio = float(train_ratio if train_ratio is not None else cfg.MOSS_QUANT_OPTIMIZE_TRAIN_RATIO)
     ratio = max(0.5, min(0.85, ratio))
     n = int(len(df))
-    min_bars = int(cfg.MOSS_QUANT_OPTIMIZE_MIN_BARS)
+    min_bars = int(min_bars if min_bars is not None else cfg.MOSS_QUANT_OPTIMIZE_MIN_BARS)
     if n < min_bars:
         return df.copy(), df.iloc[0:0].copy()
     cut = max(int(n * ratio), int(n * 0.5))
@@ -59,6 +117,80 @@ def split_train_validation_df(
     return df.iloc[:cut].copy().reset_index(drop=True), df.iloc[cut:].copy().reset_index(
         drop=True
     )
+
+
+def split_walk_forward_folds(
+    df: pd.DataFrame,
+    *,
+    n_folds: Optional[int] = None,
+    train_ratio: Optional[float] = None,
+) -> List[Tuple[pd.DataFrame, pd.DataFrame]]:
+    """把时间轴切成多段，每段内 70/30 训练/验证（滚动多考几次试）。"""
+    k = max(1, int(n_folds if n_folds is not None else cfg.MOSS_QUANT_OPTIMIZE_WF_FOLDS))
+    if k <= 1:
+        tr, va = split_train_validation_df(df, train_ratio)
+        return [(tr, va)]
+
+    n = int(len(df))
+    seg = max(96, n // k)
+    ratio = train_ratio
+    folds: List[Tuple[pd.DataFrame, pd.DataFrame]] = []
+    for i in range(k):
+        start = i * seg
+        end = n if i >= k - 1 else min(n, (i + 1) * seg)
+        if end - start < 96:
+            continue
+        chunk = df.iloc[start:end].copy().reset_index(drop=True)
+        fold_min = max(96, int(cfg.MOSS_QUANT_OPTIMIZE_MIN_BARS) // max(k * 2, 2))
+        tr, va = split_train_validation_df(chunk, ratio, min_bars=fold_min)
+        if len(tr) >= 48 and len(va) >= 48:
+            folds.append((tr, va))
+    if not folds:
+        tr, va = split_train_validation_df(df, train_ratio)
+        return [(tr, va)]
+    return folds
+
+
+def aggregate_walk_forward_validation(
+    fold_validations: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """多折验证汇总：达标折数、中位 Sharpe/收益、稳定性分。"""
+    passed = [v for v in fold_validations if v.get("validation_passed")]
+    n_pass = len(passed)
+    min_pass = int(cfg.MOSS_QUANT_OPTIMIZE_WF_MIN_PASS_FOLDS)
+    n_folds = len(fold_validations)
+    sharpes = [
+        float(v.get("val_sharpe") or 0)
+        for v in passed
+        if v.get("val_sharpe") is not None
+    ]
+    returns = [
+        float(v.get("val_return") or 0)
+        for v in passed
+        if v.get("val_return") is not None
+    ]
+    med_sharpe = float(median(sharpes)) if sharpes else 0.0
+    med_return = float(median(returns)) if returns else 0.0
+    penalties = [float(v.get("gate_penalty") or 0) for v in fold_validations]
+    ratios = [float(v.get("gate_extreme_ratio") or 0) for v in fold_validations]
+    med_penalty = float(median(penalties)) if penalties else 0.0
+    med_ratio = float(median(ratios)) if ratios else 0.0
+    wf_ok = n_pass >= min_pass if n_folds > 1 else bool(passed)
+    reason = "滚动验证通过" if wf_ok else f"滚动验证仅 {n_pass}/{n_folds} 折达标(需>={min_pass})"
+    return {
+        "wf_folds": n_folds,
+        "wf_passed_folds": n_pass,
+        "wf_min_pass_folds": min_pass,
+        "wf_validation_passed": wf_ok,
+        "wf_reason": reason,
+        "val_sharpe": med_sharpe,
+        "val_return": med_return,
+        "gate_penalty": med_penalty,
+        "gate_extreme_ratio": med_ratio,
+        "validation_passed": wf_ok,
+        "validation_reason": reason if wf_ok else reason,
+        "fold_validations": fold_validations,
+    }
 
 
 def regime_tactical_adjustments(regime: pd.Series) -> Dict[str, Any]:
@@ -143,12 +275,6 @@ def classify_pool_tier(summary: Dict[str, Any]) -> Dict[str, Any]:
     if val_required and not val_passed:
         reason = str(summary.get("validation_reason") or "验证未通过")
         return {"pool_tier": "B", "pool_label": "观察", "pool_reason": reason}
-    if summary.get("mcap_observation"):
-        return {
-            "pool_tier": "B",
-            "pool_label": "观察",
-            "pool_reason": "市值扩币观察期",
-        }
     return {
         "pool_tier": "A",
         "pool_label": "可交易",
@@ -156,21 +282,84 @@ def classify_pool_tier(summary: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def can_sync_profile_params(summary: Dict[str, Any]) -> bool:
-    """是否允许将本批次寻优结果写入纸面 Profile。"""
+def sync_deny_reason(summary: Dict[str, Any]) -> Optional[str]:
+    """本批次寻优结果不可同步的原因（不含纸面近期亏损）。"""
     if summary.get("error"):
-        return False
+        return "寻优失败"
     tier = classify_pool_tier(summary)
     if tier["pool_tier"] != "A":
-        return False
+        return str(tier.get("pool_reason") or "非 A 池")
     if bool(cfg.MOSS_QUANT_OPTIMIZE_REQUIRE_VALIDATION) and not summary.get(
         "validation_passed"
     ):
-        return False
-    return bool(evaluate_profile_auto_enable(summary).get("auto_enabled"))
+        return str(summary.get("validation_reason") or "验证未通过")
+    if summary.get("wf_validation_passed") is False:
+        return str(summary.get("wf_reason") or "滚动验证未达标")
+    tr = float(summary.get("total_return") or summary.get("train_return") or 0)
+    vr = float(summary.get("val_return") or 0)
+    ratio_reason = train_val_ratio_ok(tr, vr)
+    if ratio_reason:
+        return ratio_reason
+    if not evaluate_profile_auto_enable(summary).get("auto_enabled"):
+        return str(
+            summary.get("auto_enable_reason")
+            or evaluate_profile_auto_enable(summary).get("auto_enable_reason")
+            or "达标门禁未通过"
+        )
+    return None
 
 
-def enrich_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+def can_sync_profile_params(summary: Dict[str, Any]) -> bool:
+    """是否允许将本批次寻优结果写入纸面 Profile（仅看寻优 summary）。"""
+    return sync_deny_reason(summary) is None
+
+
+def paper_recent_pnl_block_reason(
+    conn: sqlite3.Connection,
+    profile_id: int,
+    *,
+    profile_capital: Optional[float] = None,
+) -> Optional[str]:
+    """启用 Profile 近 N 日纸面收益过差 → 本批不同步覆盖参数。"""
+    if not cfg.MOSS_QUANT_SYNC_BLOCK_RECENT_LOSS_ENABLED:
+        return None
+    cap = float(profile_capital or cfg.MOSS_QUANT_PROFILE_CAPITAL)
+    if cap <= 0:
+        return None
+    days = int(cfg.MOSS_QUANT_SYNC_BLOCK_LOSS_DAYS)
+    floor_pct = float(cfg.MOSS_QUANT_SYNC_BLOCK_LOSS_PCT)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """SELECT
+               COALESCE(SUM(
+                   CASE WHEN outcome IS NOT NULL AND outcome_at_utc >= ?
+                        THEN pnl_usdt ELSE 0 END
+               ), 0) AS realized,
+               COALESCE(SUM(
+                   CASE WHEN outcome IS NULL THEN unrealized_pnl_usdt ELSE 0 END
+               ), 0) AS unrealized
+           FROM moss_signals WHERE profile_id=?""",
+        (cutoff, int(profile_id)),
+    ).fetchone()
+    if not row:
+        return None
+    pnl = float(row["realized"] or 0) + float(row["unrealized"] or 0)
+    pct = pnl / cap
+    if pct <= floor_pct:
+        return f"近{days}日纸面收益 {pct * 100:.1f}%（阈值 {floor_pct * 100:.0f}%）"
+    return None
+
+
+def enrich_summary(
+    summary: Dict[str, Any],
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+    profile_id: Optional[int] = None,
+    profile_capital: Optional[float] = None,
+) -> Dict[str, Any]:
     """合并门禁、验证、币池标签到 summary（写入 DB / API）。"""
     out = dict(summary)
     out.update(evaluate_profile_auto_enable(out))
@@ -180,13 +369,38 @@ def enrich_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
             out.update(evaluate_validation(val_summary))
     out.update(classify_pool_tier(out))
     out["sync_allowed"] = can_sync_profile_params(out)
+    deny = sync_deny_reason(out)
+    if deny:
+        out["sync_block_reason"] = deny
+    if conn is not None and profile_id is not None:
+        paper_block = paper_recent_pnl_block_reason(
+            conn, int(profile_id), profile_capital=profile_capital
+        )
+        if paper_block:
+            out["sync_allowed"] = False
+            out["sync_block_reason"] = paper_block
+    elif not out.get("sync_allowed") and not out.get("sync_block_reason") and deny:
+        out["sync_block_reason"] = deny
     return out
+
+
+def _candidate_sort_key(c: Dict[str, Any]) -> Tuple[float, float, float]:
+    val = c.get("validation") or {}
+    tr_ret = float((c.get("summary") or {}).get("total_return") or 0)
+    vr_ret = float(val.get("val_return") or 0)
+    gate_pen = float(val.get("gate_penalty") or 0)
+    adj = stability_adjusted_val_score(
+        float(val.get("val_sharpe") or -999),
+        train_return=tr_ret,
+        val_return=vr_ret - gate_pen,
+    )
+    return (-adj, -(vr_ret - gate_pen), -float(c.get("score") or -999))
 
 
 def pick_best_validated(
     candidates: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """在通过验证的候选中选验证 Sharpe 最高者；关闭验证门控时取训练分最高。"""
+    """在通过验证的候选中选稳定性调整后的验证分最高者。"""
     ok = [
         c
         for c in candidates
@@ -207,19 +421,22 @@ def pick_best_validated(
             )
         )
         return ok[0]
-    ok.sort(
-        key=lambda r: (
-            -float((r.get("validation") or {}).get("val_sharpe") or -999),
-            -float((r.get("validation") or {}).get("val_return") or -999),
-            -float(r.get("score") or -999),
-        )
-    )
+    ok.sort(key=_candidate_sort_key)
     return ok[0]
 
 
-def risk_scale_for_rank(rank_index: int) -> float:
-    """A 池内排序：前 N 满仓，其余半仓（1x 下 risk 缩放）。"""
+def risk_scale_for_rank(
+    rank_index: int,
+    *,
+    val_sharpe: Optional[float] = None,
+    pool_max_val_sharpe: Optional[float] = None,
+) -> float:
+    """A 池内排序：前 N 基础满仓；其余半仓；可按验证 Sharpe 相对缩放。"""
     full = max(1, int(cfg.MOSS_QUANT_OPTIMIZE_FULL_RISK_SLOTS))
-    if rank_index < full:
-        return 1.0
-    return float(cfg.MOSS_QUANT_OPTIMIZE_REDUCED_RISK_SCALE)
+    base = 1.0 if rank_index < full else float(cfg.MOSS_QUANT_OPTIMIZE_REDUCED_RISK_SCALE)
+    vs = float(val_sharpe or 0)
+    mx = float(pool_max_val_sharpe or 0)
+    if vs > 0 and mx > 0:
+        rel = max(0.5, min(1.0, vs / mx))
+        return round(base * rel, 4)
+    return base

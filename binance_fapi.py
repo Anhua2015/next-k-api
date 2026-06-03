@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 FAPI = "https://fapi.binance.com"
 
+# /fapi/v1/klines 单次 limit 上限
+BINANCE_KLINE_MAX_PER_REQUEST = 1500
+
 # /fapi/v1/klines 权重（limit 与 IP 1 分钟 2400 上限）：1500 根 ≈ 10
 _KLINE_WEIGHT_BY_LIMIT: Tuple[Tuple[int, int], ...] = (
     (100, 1),
@@ -159,6 +162,53 @@ def fetch_klines(
     if isinstance(data, list):
         return data
     return []
+
+
+def fetch_klines_history(
+    symbol: str,
+    interval: str,
+    total_bars: int,
+    *,
+    end_time_ms: Optional[int] = None,
+) -> List[List[Any]]:
+    """
+    分页拉取最多 total_bars 根 K 线（时间升序，保留最近一段）。
+    通过 endTime 向历史回溯；单次请求不超过 BINANCE_KLINE_MAX_PER_REQUEST。
+    """
+    total = max(1, int(total_bars))
+    if total <= BINANCE_KLINE_MAX_PER_REQUEST:
+        return fetch_klines(symbol, interval, total, end_time_ms=end_time_ms)
+
+    collected: List[List[Any]] = []
+    end_ms = end_time_ms
+    max_pages = (total // BINANCE_KLINE_MAX_PER_REQUEST) + 3
+
+    for _ in range(max_pages):
+        if len(collected) >= total:
+            break
+        chunk_size = min(
+            BINANCE_KLINE_MAX_PER_REQUEST, total - len(collected)
+        )
+        batch = fetch_klines(symbol, interval, chunk_size, end_time_ms=end_ms)
+        if not batch:
+            break
+
+        if collected:
+            first_open = int(collected[0][0])
+            older = [r for r in batch if int(r[0]) < first_open]
+            if not older:
+                break
+            collected = older + collected
+        else:
+            collected = list(batch)
+
+        if len(batch) < chunk_size:
+            break
+        end_ms = int(batch[0][0]) - 1
+
+    if len(collected) > total:
+        collected = collected[-total:]
+    return collected
 
 
 def fetch_mark_price(symbol: str) -> Optional[float]:

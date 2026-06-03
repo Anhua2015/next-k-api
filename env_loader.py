@@ -1,4 +1,4 @@
-"""加载 next-k-api 目录下的 `.env.oi`（setdefault，不覆盖已有环境变量）。"""
+"""加载 next-k-api 目录下的 `.env.oi`（文件中的项覆盖已有环境变量，与代码默认一致）。"""
 
 from __future__ import annotations
 
@@ -19,5 +19,5 @@ def load_env_oi(base_dir: Optional[Path] = None) -> Optional[Path]:
                 k, v = line.split("=", 1)
                 # Strip inline comment (whitespace + # and everything after)
                 v = v.split(" #")[0].split("\t#")[0].strip()
-                os.environ.setdefault(k.strip(), v)
+                os.environ[k.strip()] = v
     return path
