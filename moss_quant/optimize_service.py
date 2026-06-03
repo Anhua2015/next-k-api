@@ -214,7 +214,6 @@ def _validate_candidate(
             "val_sharpe": None,
             "val_return": None,
         }
-    from moss_quant.core.decision import DecisionParams
     from moss_quant.gate_proxy import (
         funding_extreme_stats,
         gate_fail_reason,

@@ -334,7 +334,6 @@ def pick_best_on_recent_window(
     ok, reason = _passes_guards(best_full, best_tail)
     reach_stats: Dict[str, Any] = {}
     if best_tpl and ok and cfg.MOSS_QUANT_OPTIMIZE_REACHABLE_ENABLED:
-        from moss_quant.core.decision import DecisionParams
         from moss_quant.signal_entry import validation_reachable_stats
 
         dec = DecisionParams.from_dict(_build_run_params(best_tpl, best_tact, symbol=sym))
