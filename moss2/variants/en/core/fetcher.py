@@ -279,8 +279,8 @@ if __name__ == "__main__":
                         help="交易对列表 (默认: BTC/USDT)")
     parser.add_argument("--timeframe", default="1h",
                         help="K线周期 (默认: 1h)")
-    parser.add_argument("--days", type=int, default=148,
-                        help="下载天数 (默认: 148，约2025-10-01至今)")
+    parser.add_argument("--days", type=int, default=90,
+                        help="下载天数 (默认: 90，与 MOSS2_FETCH_DAYS 一致)")
     parser.add_argument("--no-cache", action="store_true",
                         help="忽略缓存强制重新下载")
     args = parser.parse_args()

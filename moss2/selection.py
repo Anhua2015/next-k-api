@@ -64,6 +64,7 @@ def _backtest_row(
     params: dict,
     capital: float,
     limit_bars: int,
+    min_trades: Optional[int] = None,
 ) -> Dict[str, Any]:
     out = run_factory_backtest(
         symbol=symbol,
