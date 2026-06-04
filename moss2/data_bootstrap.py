@@ -77,6 +77,80 @@ def startup_bootstrap_needed(*, force: bool = False) -> Tuple[bool, str]:
     return False, "seed_cache_ready"
 
 
+def _parse_base_from_csv_name(name: str) -> Optional[str]:
+    """从 binanceusdm_ETH_USDT_USDT_15m_*.csv 解析 base。"""
+    stem = name.replace(".csv", "")
+    parts = stem.split("_")
+    if len(parts) >= 2 and parts[0] == "binanceusdm":
+        return str(parts[1]).upper().replace("USDT", "")
+    return None
+
+
+def cleanup_en_data_cache(
+    cache_dir: Optional[Path] = None,
+    *,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    拉取前清理 data_cache：
+    - 删除非当前 canonical 命名的 binanceusdm_*.csv（如带 2025-10-06 的旧文件）
+    - force 时删除 25 核心全部 CSV + bootstrap marker，再全量重拉
+    """
+    root = cache_dir or en_data_cache_dir()
+    removed: List[str] = []
+    if not root.is_dir():
+        return {"removed": 0, "files": [], "cache_dir": str(root)}
+
+    canonical_by_base = {
+        str(b).upper().replace("USDT", ""): canonical_csv_path(root, b).resolve()
+        for b in MOSS2_SEED_BASES
+    }
+    canonical_set = set(canonical_by_base.values())
+
+    if force:
+        for base in MOSS2_SEED_BASES:
+            b = str(base).upper().replace("USDT", "")
+            for path in root.glob(f"binanceusdm_{b}_*.csv"):
+                try:
+                    path.unlink(missing_ok=True)
+                    removed.append(path.name)
+                except OSError as e:
+                    logger.warning("[moss2] cleanup unlink %s: %s", path, e)
+        marker = bootstrap_marker_path(root)
+        if marker.is_file():
+            try:
+                marker.unlink()
+                removed.append(marker.name)
+            except OSError:
+                pass
+        logger.info("[moss2] data_cache force cleanup removed=%s", len(removed))
+        return {"removed": len(removed), "files": removed, "cache_dir": str(root), "force": True}
+
+    for path in list(root.glob("binanceusdm_*.csv")):
+        resolved = path.resolve()
+        if resolved in canonical_set:
+            continue
+        base = _parse_base_from_csv_name(path.name)
+        if base and base in canonical_by_base:
+            try:
+                path.unlink(missing_ok=True)
+                removed.append(path.name)
+                logger.info("[moss2] data_cache removed legacy duplicate %s", path.name)
+            except OSError as e:
+                logger.warning("[moss2] cleanup unlink %s: %s", path, e)
+            continue
+        if cfg.MOSS2_FETCH_SINCE_ROLLING and "2025-10-06" in path.name:
+            try:
+                path.unlink(missing_ok=True)
+                removed.append(path.name)
+            except OSError as e:
+                logger.warning("[moss2] cleanup unlink %s: %s", path, e)
+
+    if removed:
+        logger.info("[moss2] data_cache pre-fetch cleanup removed=%s", len(removed))
+    return {"removed": len(removed), "files": removed, "cache_dir": str(root), "force": False}
+
+
 def canonical_csv_path(
     cache_dir: Path, base: str, *, since: Optional[str] = None, days: Optional[int] = None
 ) -> Path:
@@ -146,12 +220,17 @@ def bootstrap_seed_data(
     *,
     bases: Optional[List[str]] = None,
     force: bool = False,
+    context: str = "manual",
 ) -> Dict[str, Any]:
     """拉取 MOSS2_SEED_BASES（默认 25 核心）到 en_data_cache_dir。"""
     if not cfg.MOSS2_DATA_BOOTSTRAP_ENABLED:
         return {"ok": False, "reason": "bootstrap_disabled"}
 
     cache_dir = en_data_cache_dir()
+    cleanup: Dict[str, Any] = {}
+    if cfg.MOSS2_DATA_BOOTSTRAP_CLEAN_BEFORE_FETCH:
+        cleanup = cleanup_en_data_cache(cache_dir, force=force)
+
     bases = list(bases or MOSS2_SEED_BASES)
     results: List[Dict[str, Any]] = []
     saved = skipped = failed = 0
@@ -172,6 +251,8 @@ def bootstrap_seed_data(
     stats = {
         "ok": failed == 0 and (saved > 0 or skipped > 0),
         "lane": "moss2",
+        "context": context,
+        "cleanup": cleanup,
         "cache_dir": str(cache_dir),
         "bases": len(bases),
         "saved": saved,

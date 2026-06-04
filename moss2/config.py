@@ -102,6 +102,8 @@ MOSS2_DATA_BOOTSTRAP_ON_START = True
 MOSS2_DATA_BOOTSTRAP_WEEKLY = True
 MOSS2_DATA_BOOTSTRAP_STALE_HOURS = 24
 MOSS2_DATA_BOOTSTRAP_SLEEP_SEC = 1.5
+# 每次 bootstrap 拉取前先清理：旧命名 CSV、同币重复文件；force 时清空 25 核心再拉
+MOSS2_DATA_BOOTSTRAP_CLEAN_BEFORE_FETCH = True
 # False：固定起点（复现用）；True：滚动最近 MOSS2_FETCH_DAYS 天，终点为当前 UTC（线上默认）
 MOSS2_FETCH_SINCE_ROLLING = True
 MOSS2_FETCH_SINCE = "2025-10-06"
@@ -315,6 +317,7 @@ def moss2_runtime_snapshot() -> Dict[str, object]:
         "en_data_cache": str(en_data_cache_dir()),
         "data_bootstrap_on_start": MOSS2_DATA_BOOTSTRAP_ON_START,
         "data_bootstrap_weekly": MOSS2_DATA_BOOTSTRAP_WEEKLY,
+        "data_bootstrap_clean_before_fetch": MOSS2_DATA_BOOTSTRAP_CLEAN_BEFORE_FETCH,
         "auto_provision": MOSS2_AUTO_PROVISION_ENABLED,
         "auto_provision_on_start": MOSS2_AUTO_PROVISION_ON_START,
         "auto_provision_weekly": MOSS2_AUTO_PROVISION_WEEKLY,

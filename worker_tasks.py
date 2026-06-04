@@ -765,11 +765,13 @@ def run_moss2_data_bootstrap_task(
                 )
                 return
             logger.info("moss2_data_bootstrap 启动任务：%s", reason)
-        stats = bootstrap_seed_data(force=force)
+        stats = bootstrap_seed_data(force=force, context=context)
+        cleanup_n = (stats.get("cleanup") or {}).get("removed", 0)
         if not stats.get("ok"):
             logger.warning(
-                "Moss2 data_bootstrap 未完全成功 ctx=%s cache=%s saved=%s skipped=%s failed=%s",
+                "Moss2 data_bootstrap 未完全成功 ctx=%s cleanup=%s cache=%s saved=%s skipped=%s failed=%s",
                 context,
+                cleanup_n,
                 stats.get("cache_dir"),
                 stats.get("saved"),
                 stats.get("skipped"),
@@ -777,8 +779,9 @@ def run_moss2_data_bootstrap_task(
             )
         else:
             logger.info(
-                "Moss2 data_bootstrap 完成 ctx=%s cache=%s saved=%s skipped=%s failed=%s",
+                "Moss2 data_bootstrap 完成 ctx=%s cleanup=%s cache=%s saved=%s skipped=%s failed=%s",
                 context,
+                cleanup_n,
                 stats.get("cache_dir"),
                 stats.get("saved"),
                 stats.get("skipped"),

@@ -82,6 +82,22 @@ class TestMoss2DataBootstrap(unittest.TestCase):
                 self.assertFalse(need3)
                 self.assertEqual(reason3, "seed_cache_ready")
 
+    def test_cleanup_removes_legacy_dated_csv(self):
+        from moss2 import config as c
+        from moss2.data_bootstrap import cleanup_en_data_cache, canonical_csv_path
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td)
+            legacy = cache / "binanceusdm_BTC_USDT_USDT_15m_2025-10-06_148d.csv"
+            legacy.write_text("timestamp,open,high,low,close,volume\n1,1,1,1,1,1\n", encoding="utf-8")
+            with patch.object(c, "MOSS2_FETCH_SINCE_ROLLING", True):
+                canonical_csv_path(cache, "BTC").write_text(
+                    "timestamp,open,high,low,close,volume\n1,1,1,1,1,1\n", encoding="utf-8"
+                )
+                out = cleanup_en_data_cache(cache, force=False)
+            self.assertEqual(out["removed"], 1)
+            self.assertFalse(legacy.exists())
+
     def test_bootstrap_skips_fresh(self):
         from moss2.data_bootstrap import bootstrap_seed_data, canonical_csv_path
         from moss2 import config as c

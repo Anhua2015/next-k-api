@@ -4,9 +4,10 @@
 
 - **目录**：`next-k-api/data/moss2_en_data_cache/`（或 `DATA_DIR/moss2_en_data_cache`）
 - **不依赖** `moss-trade-bot-skills-main`
-- **启动后约 90 秒**：仅在「有缺失 seed CSV」或「从未成功 bootstrap」时拉取；若 25 个核心 CSV 已齐且存在 `.moss2_bootstrap_last.json`，则跳过（避免每次重启全量扫币安）
-- **K 线窗**：默认 `MOSS2_FETCH_SINCE_ROLLING=True`，拉取**最近 148 天至当前**；文件名 `..._15m_148d.csv`（非固定 2025-10-06 终点）
-- **每周日 04:00 UTC**：过期文件刷新
+- **拉取前自动清理**（`MOSS2_DATA_BOOTSTRAP_CLEAN_BEFORE_FETCH`）：删掉旧命名/重复 CSV；`force=true` 时清空 25 核心再拉
+- **启动后约 90 秒（UTC）**：仅在「有缺失 seed CSV」或「从未成功 bootstrap」时拉取；已齐则跳过
+- **K 线窗**：`MOSS2_FETCH_SINCE_ROLLING=True`，拉取**最近 148 天至当前**；文件名 `..._15m_148d.csv`
+- **每周日 04:00（调度器 Asia/Shanghai）**：刷新超过 24h 的 stale CSV（未过期则 skipped）
 - **启动后约 5 分钟 / 每周日 04:45 UTC**：全自动 Profile（25 核心 suggest→创建→进化→启用）
 - **实盘 15m 扫描**：仍用币安实时 K 线，不等待 CSV
 
@@ -19,7 +20,18 @@ POST /api/moss2/maintenance/bootstrap-data?force=false
 X-Maintenance-Token: <PROTOCOL_MAINTENANCE_TOKEN>
 ```
 
-`force=true` 强制重拉全部。
+`force=true` 强制重拉全部（会先清理再拉）。
+
+## 什么时候会拉 CSV（25 核心）
+
+| 时机 | 触发 | 说明 |
+|------|------|------|
+| 启动 +90s | 调度 `startup` | 缺文件或首次；**先 cleanup 再拉** |
+| 每周日 04:00 | 调度 `weekly`（上海时区） | 仅拉 stale&gt;24h 的币；**先 cleanup 去重** |
+| 手动 | `POST .../bootstrap-data?force=` | 维护 Token |
+| 纸面 15m | **不拉 CSV** | 用币安实时 K 线 |
+
+同日上午：**04:45** auto-provision、**05:00** evolve、**06:30** cull（不拉 CSV，用已有缓存回测）。
 
 ## 全自动 Profile
 
