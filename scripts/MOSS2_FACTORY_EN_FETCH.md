@@ -6,7 +6,7 @@
 - **不依赖** `moss-trade-bot-skills-main`
 - **拉取前自动清理**（`MOSS2_DATA_BOOTSTRAP_CLEAN_BEFORE_FETCH`）：删掉旧命名/重复 CSV；`force=true` 时清空 25 核心再拉
 - **启动后约 90 秒（UTC）**：仅在「有缺失 seed CSV」或「从未成功 bootstrap」时拉取；已齐则跳过
-- **K 线窗**：`MOSS2_FETCH_SINCE_ROLLING=True`，拉取**最近 148 天至当前**；文件名 `..._15m_148d.csv`
+- **K 线窗**：`MOSS2_FETCH_SINCE_ROLLING=True`，拉取**最近 90 天至当前**（覆盖进化窗 4500 根 + 预热）；文件名 `..._15m_90d.csv`
 - **每周日 04:00（调度器 Asia/Shanghai）**：刷新超过 24h 的 stale CSV（未过期则 skipped）
 - **启动后约 5 分钟 / 每周日 04:45 UTC**：全自动 Profile（25 核心 suggest→创建→进化→启用）
 - **实盘 15m 扫描**：仍用币安实时 K 线，不等待 CSV

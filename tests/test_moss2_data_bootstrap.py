@@ -33,7 +33,7 @@ class TestMoss2DataBootstrap(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with patch.object(c, "MOSS2_FETCH_SINCE_ROLLING", True):
                 path = canonical_csv_path(Path(td), "ETH")
-            self.assertEqual(path.name, "binanceusdm_ETH_USDT_USDT_15m_148d.csv")
+            self.assertEqual(path.name, "binanceusdm_ETH_USDT_USDT_15m_90d.csv")
 
     def test_canonical_csv_path_fixed_since(self):
         from moss2 import config as c
@@ -44,7 +44,7 @@ class TestMoss2DataBootstrap(unittest.TestCase):
                 path = canonical_csv_path(Path(td), "ETH")
             self.assertEqual(
                 path.name,
-                "binanceusdm_ETH_USDT_USDT_15m_2025-10-06_148d.csv",
+                "binanceusdm_ETH_USDT_USDT_15m_2025-10-06_90d.csv",
             )
 
     def test_startup_bootstrap_needed(self):
