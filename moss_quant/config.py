@@ -24,7 +24,8 @@ def env_truthy(name: str, *, default: bool = False) -> bool:
 
 
 MOSS_QUANT_ENABLED = env_truthy("MOSS_QUANT_ENABLED", default=True)
-MOSS_QUANT_PAPER_ENABLED = env_truthy("MOSS_QUANT_PAPER_ENABLED", default=True)
+# 暂时关闭 15m 纸面定时扫描（设 MOSS_QUANT_PAPER_ENABLED=1 可重新打开）
+MOSS_QUANT_PAPER_ENABLED = env_truthy("MOSS_QUANT_PAPER_ENABLED", default=False)
 MOSS_QUANT_SCHEDULER_ENABLED = env_truthy("MOSS_QUANT_SCHEDULER_ENABLED", default=True)
 
 MOSS_QUANT_SCAN_INTERVAL_MINUTES = max(
@@ -117,8 +118,9 @@ def paper_scheduler_enabled() -> bool:
     )
 
 
+# 暂时关闭每日寻优（设 MOSS_QUANT_DAILY_OPTIMIZE_ENABLED=1 可重新打开）
 MOSS_QUANT_DAILY_OPTIMIZE_ENABLED = env_truthy(
-    "MOSS_QUANT_DAILY_OPTIMIZE_ENABLED", default=True
+    "MOSS_QUANT_DAILY_OPTIMIZE_ENABLED", default=False
 )
 # UTC 每日执行时刻，格式 HH:MM
 MOSS_QUANT_DAILY_OPTIMIZE_UTC = (
@@ -289,9 +291,9 @@ MOSS_QUANT_REGIME_ALIGN_TIGHTEN_PCT = 0.04
 # 震荡市 + mean_revert/balanced 时两侧对称小幅放宽
 MOSS_QUANT_REGIME_ALIGN_SIDEWAYS_RELAX_PCT = 0.04
 
-# 首次部署（尚无 daily_auto Profile）时自动跑一次全市场寻优
+# 首次部署（尚无 daily_auto Profile）时自动跑一次全市场寻优（随 DAILY_OPTIMIZE 默认关）
 MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP = env_truthy(
-    "MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP", default=True
+    "MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP", default=False
 )
 # 启动后延迟再跑 bootstrap，避免与首屏 API 抢库（秒）
 MOSS_QUANT_DAILY_OPTIMIZE_BOOTSTRAP_DELAY_SEC = max(

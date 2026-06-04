@@ -692,11 +692,16 @@ def run_moss_quant_paper_task() -> None:
         logger.warning("跳过 moss_quant_paper：上一轮仍在运行")
         return
     try:
+        from moss_quant import config as mq_cfg
         from moss_quant.config import paper_scheduler_enabled
         from moss_quant.paper_scanner import run_paper_scan
         from accumulation_radar import init_db
 
         if not paper_scheduler_enabled():
+            if mq_cfg.MOSS_QUANT_ENABLED and not mq_cfg.MOSS_QUANT_PAPER_ENABLED:
+                logger.info(
+                    "跳过 moss_quant_paper：MOSS_QUANT_PAPER_ENABLED=0（15m 扫描已关闭）"
+                )
             return
         conn = init_db()
         try:
@@ -923,6 +928,11 @@ def run_moss2_discipline_snapshot_task() -> None:
 def run_moss_daily_optimize_bootstrap_task() -> None:
     """无 daily_auto Profile 时启动后自动跑一次全市场寻优（默认开启）。"""
     try:
+        from moss_quant.config import daily_optimize_bootstrap_enabled
+
+        if not daily_optimize_bootstrap_enabled():
+            logger.info("Moss 每日寻优 bootstrap 已关闭（MOSS_QUANT_DAILY_OPTIMIZE_*）")
+            return
         if moss2_heavy_work_active():
             logger.warning(
                 "Moss 每日寻优 bootstrap 推迟：Moss2 auto_provision/拉数仍在运行，"
@@ -960,6 +970,9 @@ def run_moss_daily_optimize_task(
         from moss_quant.daily_optimize_service import run_daily_optimize_batch
 
         if not mq_cfg.MOSS_QUANT_ENABLED:
+            return
+        if not mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED:
+            logger.info("跳过 moss_daily_optimize：MOSS_QUANT_DAILY_OPTIMIZE_ENABLED=0")
             return
         out = run_daily_optimize_batch(
             capital=capital,

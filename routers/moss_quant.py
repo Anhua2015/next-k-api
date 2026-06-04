@@ -1291,6 +1291,11 @@ async def post_daily_optimize_run(body: DailyOptimizeRunRequest = DailyOptimizeR
 
     if not cfg.MOSS_QUANT_ENABLED:
         raise HTTPException(503, "moss_quant_disabled")
+    if not cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED:
+        raise HTTPException(
+            503,
+            "daily_optimize_disabled (set MOSS_QUANT_DAILY_OPTIMIZE_ENABLED=1 to enable)",
+        )
 
     if wt.moss_daily_optimize_busy():
         return {
