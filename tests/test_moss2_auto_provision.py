@@ -73,7 +73,18 @@ class TestMoss2AutoProvision(unittest.TestCase):
             self.assertTrue(
                 should_auto_enable(
                     {"reason": "regime_hint_only"},
-                    {"ok": True, "status": "approved", "candidate": {}},
+                    {
+                        "ok": True,
+                        "status": "approved",
+                        "candidate": {
+                            "summary": {
+                                "total_trades": 20,
+                                "sharpe": 0.8,
+                                "max_drawdown": 0.15,
+                            },
+                            "discipline": {"ev": {"ev_per_trade_pct": 0.02}},
+                        },
+                    },
                 )
             )
 
@@ -117,6 +128,44 @@ class TestMoss2AutoProvision(unittest.TestCase):
             mock_ev.assert_not_called()
         prof = get_profile(conn, pid)
         self.assertEqual(prof.get("evolution_status"), "approved")
+
+    def test_format_provision_summary(self):
+        from moss2.auto_provision import format_provision_summary
+
+        text = format_provision_summary(
+            {
+                "created": 1,
+                "updated": 0,
+                "maintained": 0,
+                "skipped": 1,
+                "enabled_profiles": 1,
+                "sync_enabled_approved": 0,
+                "results": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "action": "create",
+                        "recommended_template": "balanced",
+                        "suggest_reason": "backtest_selection_pass",
+                        "auto_enabled": True,
+                        "enable_reason": "suggest_selection_pass",
+                        "evolve": {
+                            "candidate": {
+                                "summary": {
+                                    "sharpe": 1.1,
+                                    "total_return": 0.04,
+                                    "max_drawdown": -0.12,
+                                    "total_trades": 35,
+                                },
+                                "discipline": {"ev": {"ev_per_trade_pct": 0.02}},
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+        self.assertIn("BTCUSDT", text)
+        self.assertIn("Sharpe 1.1", text)
+        self.assertIn("四模板", text)
 
     def test_run_lane_counts_actions(self):
         from moss2.auto_provision import run_lane_auto_provision

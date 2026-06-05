@@ -43,6 +43,9 @@ MOSS2_HL_ENABLED = False
 MOSS2_DEFAULT_VARIANT: FactoryVariant = MOSS2_OPS_VARIANT
 MOSS2_DEFAULT_TEMPLATE = "balanced"
 MOSS2_VERBOSE_LOG = True
+# QuantStats HTML tearsheet（回测 / 纸面结算）
+MOSS2_QUANTSTATS_ENABLED = env_truthy("MOSS2_QUANTSTATS_ENABLED", default=True)
+MOSS2_QUANTSTATS_DEFAULT_BENCHMARK = "BTCUSDT"
 
 # 实盘 / Protocol（lane=moss2 时发信号；无 PROTOCOL_API_URL 时 sender 自动跳过）
 MOSS2_REAL_MODE = lane_allows_moss2()
@@ -74,8 +77,19 @@ MOSS2_EVOLVE_INTERVAL_DAYS = 7
 MOSS2_EVOLVE_LIMIT_BARS = 4500
 # 全自动运维：建 Profile / 进化发布 / 启用（与 Moss1 寻优无关）
 MOSS2_AUTO_PROVISION_ENABLED = True
-MOSS2_AUTO_PROVISION_ON_START = True
-MOSS2_AUTO_PROVISION_WEEKLY = True
+# 拉 CSV 成功后自动接 25 核建 Profile→进化→启用（默认开，无需维护面板手点）
+MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP = env_truthy(
+    "MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP", default=True
+)
+# 链式开启时默认不再单独 +12min 启动 provision / 周日 04:45 重复跑（可用 env 覆盖）
+MOSS2_AUTO_PROVISION_ON_START = env_truthy(
+    "MOSS2_AUTO_PROVISION_ON_START",
+    default=not MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP,
+)
+MOSS2_AUTO_PROVISION_WEEKLY = env_truthy(
+    "MOSS2_AUTO_PROVISION_WEEKLY",
+    default=not MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP,
+)
 MOSS2_AUTO_PROVISION_BACKTEST_BARS = 4500
 MOSS2_AUTO_REPROVISION_EXISTING = False
 MOSS2_AUTO_ENABLE_PROFILES = True
@@ -306,6 +320,24 @@ def auto_provision_scheduler_enabled() -> bool:
     )
 
 
+def data_bootstrap_allowed(*, manual: bool = False) -> bool:
+    """调度或维护面板手动拉 CSV。"""
+    if not MOSS2_ENABLED or not MOSS2_DATA_BOOTSTRAP_ENABLED:
+        return False
+    if manual:
+        return True
+    return MOSS2_SCHEDULER_ENABLED
+
+
+def auto_provision_allowed(*, manual: bool = False) -> bool:
+    """调度、链式 bootstrap 后或维护面板手动全自动。"""
+    if not MOSS2_ENABLED or not MOSS2_AUTO_PROVISION_ENABLED:
+        return False
+    if manual:
+        return True
+    return MOSS2_SCHEDULER_ENABLED
+
+
 def moss2_runtime_snapshot() -> Dict[str, object]:
     snap = moss_lane_snapshot()
     return {
@@ -331,8 +363,14 @@ def moss2_runtime_snapshot() -> Dict[str, object]:
         "data_bootstrap_weekly": MOSS2_DATA_BOOTSTRAP_WEEKLY,
         "data_bootstrap_clean_before_fetch": MOSS2_DATA_BOOTSTRAP_CLEAN_BEFORE_FETCH,
         "auto_provision": MOSS2_AUTO_PROVISION_ENABLED,
+        "chain_provision_after_bootstrap": MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP,
         "auto_provision_on_start": MOSS2_AUTO_PROVISION_ON_START,
         "auto_provision_weekly": MOSS2_AUTO_PROVISION_WEEKLY,
+        "full_auto_note": (
+            "调度器：启动/每周拉 CSV 后链式全自动建 Profile；15m 纸面扫描；周日 evolve/cull"
+            if MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP
+            else "调度器：拉 CSV 与建 Profile 分离（可手点维护面板）"
+        ),
         "auto_enable_profiles": MOSS2_AUTO_ENABLE_PROFILES,
         "auto_enable_on_approved": MOSS2_AUTO_ENABLE_ON_APPROVED,
         "evolve_auto_approve": MOSS2_EVOLVE_AUTO_APPROVE,
@@ -349,6 +387,7 @@ def moss2_runtime_snapshot() -> Dict[str, object]:
         "portfolio_max_open_positions": MOSS2_PORTFOLIO_MAX_OPEN_POSITIONS,
         "cull_enabled": MOSS2_CULL_ENABLED,
         "scan_interval_minutes": MOSS2_SCAN_INTERVAL_MINUTES,
+        "quantstats_enabled": MOSS2_QUANTSTATS_ENABLED,
         "default_template": MOSS2_DEFAULT_TEMPLATE,
         "seed_bases_count": len(MOSS2_SEED_BASES),
         "seed_bases": list(MOSS2_SEED_BASES),

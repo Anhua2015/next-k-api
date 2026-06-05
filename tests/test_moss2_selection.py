@@ -10,7 +10,7 @@ class TestMoss2Selection(unittest.TestCase):
     def test_passes_backtest_gates(self):
         from moss2.selection import passes_backtest_gates
 
-        summ = {"total_trades": 10, "sharpe": 0.5, "max_drawdown": 0.2}
+        summ = {"total_trades": 12, "sharpe": 0.6, "max_drawdown": 0.15}
         disc = {"ev": {"ev_per_trade_pct": 0.1}}
         self.assertTrue(passes_backtest_gates(summ, disc))
         self.assertFalse(

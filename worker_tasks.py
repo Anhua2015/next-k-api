@@ -788,11 +788,17 @@ def run_moss2_data_bootstrap_task(
     if not _moss2_data_bootstrap_lock.acquire(blocking=False):
         logger.warning("[moss2] skip data_bootstrap: previous run still active")
         return
+    chain_after = False
+    chain_ctx = context
     try:
-        from moss2.config import data_bootstrap_scheduler_enabled
+        from moss2.config import (
+            MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP,
+            data_bootstrap_allowed,
+        )
         from moss2.data_bootstrap import bootstrap_seed_data, startup_bootstrap_needed
 
-        if not data_bootstrap_scheduler_enabled():
+        manual = context == "manual"
+        if not data_bootstrap_allowed(manual=manual):
             return
         if context == "startup" and not force:
             need, reason = startup_bootstrap_needed(force=False)
@@ -827,30 +833,59 @@ def run_moss2_data_bootstrap_task(
                 stats.get("skipped"),
                 stats.get("failed"),
             )
+            from moss2.config import MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP
+
+            if MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP:
+                logger.info(
+                    "[moss2] chain auto_provision after bootstrap ctx=%s", context
+                )
+                run_moss2_auto_provision_task(
+                    force_evolve=False,
+                    trigger="chain_after_bootstrap",
+                    bootstrap_context=context,
+                )
     except Exception as e:
         logger.exception("moss2_data_bootstrap failed: %s", e)
     finally:
         _moss2_data_bootstrap_lock.release()
 
 
-def run_moss2_auto_provision_task(*, force_evolve: bool = False) -> None:
+def run_moss2_auto_provision_task(
+    *,
+    force_evolve: bool = False,
+    trigger: str = "scheduler",
+    bootstrap_context: str | None = None,
+) -> None:
     """Moss2 全自动：25 核心币 suggest → 建 Profile → evolve → approve → 启用。"""
     if not _moss2_provision_lock.acquire(blocking=False):
         logger.warning("[moss2] skip auto_provision: previous run still active")
         return
     try:
-        from moss2.config import auto_provision_scheduler_enabled
+        from moss2.config import auto_provision_allowed
         from moss2.auto_provision import run_lane_auto_provision
         from accumulation_radar import init_db
 
-        if not auto_provision_scheduler_enabled():
+        manual = trigger in (
+            "manual",
+            "manual_sync",
+            "chain_after_bootstrap",
+        )
+        if not auto_provision_allowed(manual=manual):
             return
         conn = init_db()
         try:
             stats = run_lane_auto_provision(conn, force_evolve=force_evolve)
+            from moss2.provision_history import save_last_provision_run
+
+            save_last_provision_run(
+                stats,
+                trigger=trigger,
+                bootstrap_context=bootstrap_context,
+            )
             logger.info(
-                "[moss2] auto_provision worker done created=%s updated=%s maintained=%s "
-                "skipped=%s enabled=%s",
+                "[moss2] auto_provision worker done trigger=%s created=%s updated=%s "
+                "maintained=%s skipped=%s enabled=%s",
+                trigger,
                 stats.get("created"),
                 stats.get("updated"),
                 stats.get("maintained"),

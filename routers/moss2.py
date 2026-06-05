@@ -8,13 +8,25 @@ import sqlite3
 import threading
 from typing import Any, Dict, List, Optional
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from utils.maintenance_auth import require_maintenance_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/moss2", tags=["moss2"])
+
+
+def _moss2_bootstrap_hint() -> str:
+    from moss2 import config as c
+
+    base = "后台执行中；请看日志 [moss2] bootstrap"
+    if c.MOSS2_CHAIN_PROVISION_AFTER_BOOTSTRAP:
+        return base + "，完成后将链式自动建 Profile"
+    return base + "，完成后刷新 Moss2 看板"
 
 
 class ProfileCreate(BaseModel):
@@ -409,6 +421,82 @@ def moss2_backtest(body: BacktestRequest) -> Dict[str, Any]:
                 discipline=out["discipline"],
             )
         out["run_id"] = run_id
+        if pid is not None:
+            out["profile_id"] = pid
+        return out
+    finally:
+        conn.close()
+
+
+@router.get("/reports/status")
+def moss2_reports_status() -> Dict[str, Any]:
+    from moss2 import config as c
+    from moss2.reports.quantstats_report import quantstats_available, reports_dir
+
+    return {
+        "ok": True,
+        "enabled": bool(c.MOSS2_QUANTSTATS_ENABLED),
+        "quantstats_installed": quantstats_available(),
+        "reports_dir": str(reports_dir()),
+        "default_benchmark": c.MOSS2_QUANTSTATS_DEFAULT_BENCHMARK,
+    }
+
+
+@router.get("/reports/files/{filename}")
+def moss2_report_file(filename: str) -> FileResponse:
+    from moss2.reports.quantstats_report import reports_dir
+
+    safe = Path(filename).name
+    if safe != filename or ".." in filename:
+        raise HTTPException(400, "invalid filename")
+    path = reports_dir() / safe
+    try:
+        path.resolve().relative_to(reports_dir().resolve())
+    except ValueError as exc:
+        raise HTTPException(404, "not found") from exc
+    if not path.is_file():
+        raise HTTPException(404, "report not found")
+    return FileResponse(path, media_type="text/html", filename=safe)
+
+
+@router.get("/profiles/{profile_id}/tearsheet")
+def moss2_profile_tearsheet(
+    profile_id: int,
+    mode: str = Query("backtest", pattern="^(backtest|paper)$"),
+    benchmark: Optional[str] = Query(None),
+    limit_bars: Optional[int] = Query(None, ge=500, le=8000),
+    run_backtest: bool = Query(
+        False, description="true=现场重跑回测再出报告（较慢）"
+    ),
+    format: str = Query("json", pattern="^(json|html)$"),
+) -> Any:
+    """QuantStats tearsheet：mode=backtest 用最近回测 equity；mode=paper 用纸面结算。"""
+    from moss2 import config as c
+    from moss2.db import get_profile
+    from moss2.reports.quantstats_report import build_tearsheet_for_profile
+
+    if not c.MOSS2_QUANTSTATS_ENABLED:
+        raise HTTPException(503, "MOSS2_QUANTSTATS_ENABLED=0")
+    conn = _conn()
+    try:
+        prof = get_profile(conn, profile_id)
+        if not prof:
+            raise HTTPException(404, "profile not found")
+        out = build_tearsheet_for_profile(
+            conn,
+            prof,
+            mode=mode,
+            benchmark_symbol=benchmark or c.MOSS2_QUANTSTATS_DEFAULT_BENCHMARK,
+            limit_bars=limit_bars,
+            run_fresh_backtest=run_backtest,
+        )
+        if not out.get("ok"):
+            raise HTTPException(400, out.get("error") or "tearsheet_failed")
+        if str(format).lower() == "html":
+            path = Path(out["path"])
+            if not path.is_file():
+                raise HTTPException(500, "report file missing")
+            return HTMLResponse(path.read_text(encoding="utf-8"))
         return out
     finally:
         conn.close()
@@ -502,6 +590,17 @@ async def moss2_paper_scan_trigger(
     }
 
 
+@router.get("/maintenance/last-auto-run")
+def moss2_last_auto_run() -> Dict[str, Any]:
+    """调度器/链式全自动最近一次结果（summary_text + 统计）。"""
+    from moss2.provision_history import load_last_provision_run
+
+    row = load_last_provision_run()
+    if not row:
+        return {"ok": True, "has_run": False, "hint": "尚无自动运维记录"}
+    return {"ok": True, "has_run": True, **row}
+
+
 @router.post("/maintenance/bootstrap-data")
 async def moss2_bootstrap_data(
     force: bool = False,
@@ -521,7 +620,7 @@ async def moss2_bootstrap_data(
         "accepted": True,
         "task": "moss2_data_bootstrap",
         "force": force,
-        "hint": "后台执行中；请看服务端日志 [moss2] bootstrap，完成后刷新 Moss2 看板",
+        "hint": _moss2_bootstrap_hint(),
     }
 
 
@@ -540,14 +639,37 @@ async def moss2_cull_profiles(_: None = Depends(require_maintenance_token)) -> D
 @router.post("/maintenance/auto-provision")
 async def moss2_auto_provision(
     force_evolve: bool = False,
+    sync: bool = Query(
+        False,
+        description="true=同步跑完 25 核并返回汇总（数分钟，易超时；默认后台）",
+    ),
     _: None = Depends(require_maintenance_token),
 ) -> Dict[str, Any]:
-    """后台执行 25 核心全自动 Profile 运维；HTTP 立即返回。"""
+    """25 核心 suggest→建 Profile→进化→启用。回测在 suggest/evolve 内；sync 时返回汇总。"""
+    from moss2.auto_provision import run_lane_auto_provision
+
+    if sync:
+        conn = _conn()
+        try:
+            stats = run_lane_auto_provision(conn, force_evolve=force_evolve)
+            from moss2.provision_history import save_last_provision_run
+
+            save_last_provision_run(
+                stats, trigger="manual_sync", bootstrap_context=None
+            )
+            stats["accepted"] = False
+            stats["sync"] = True
+            return stats
+        finally:
+            conn.close()
+
     from worker_tasks import run_moss2_auto_provision_task
 
     def _work() -> None:
         try:
-            run_moss2_auto_provision_task(force_evolve=force_evolve)
+            run_moss2_auto_provision_task(
+                force_evolve=force_evolve, trigger="manual"
+            )
         except Exception:
             logger.exception("moss2 auto-provision background failed")
 
@@ -556,7 +678,7 @@ async def moss2_auto_provision(
         "accepted": True,
         "task": "moss2_auto_provision",
         "force_evolve": force_evolve,
-        "hint": "后台执行中；请看日志 [moss2] auto_provision，完成后刷新 Profile 列表",
+        "hint": "后台执行中；请看日志 [moss2] auto_provision，完成后刷新 Profile 列表；需要汇总可带 ?sync=true（较慢）",
     }
 
 

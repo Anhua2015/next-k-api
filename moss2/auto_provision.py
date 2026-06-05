@@ -320,6 +320,8 @@ def provision_symbol(
     )
     row["suggest_reason"] = suggestion.get("reason")
     row["recommended_template"] = suggestion.get("recommended_template")
+    if suggestion.get("selection_best"):
+        row["selection_best"] = suggestion["selection_best"]
 
     if not suggestion.get("ok"):
         row["reason"] = suggestion.get("reason") or "suggest_failed"
@@ -438,7 +440,7 @@ def run_lane_auto_provision(
         enabled_n,
         synced,
     )
-    return {
+    out = {
         "ok": True,
         "lane": "moss2",
         "bases": len(bases),
@@ -451,3 +453,68 @@ def run_lane_auto_provision(
         "auto_approve": cfg.MOSS2_EVOLVE_AUTO_APPROVE,
         "results": results,
     }
+    out["summary_text"] = format_provision_summary(out)
+    return out
+
+
+def _result_metrics(r: Dict[str, Any]) -> Dict[str, Any]:
+    """从单币 provision 结果提取回测指标（evolve 候选或 suggest selection_best）。"""
+    ev = r.get("evolve") or {}
+    cand = ev.get("candidate") or {}
+    summ = cand.get("summary") or {}
+    disc = cand.get("discipline") or {}
+    if not summ:
+        best = r.get("selection_best")
+        if isinstance(best, dict):
+            summ = best.get("summary") or {}
+            disc = best.get("discipline") or disc
+    if summ:
+        return {
+            "sharpe": summ.get("sharpe"),
+            "return_pct": round(float(summ.get("total_return") or 0) * 100, 2),
+            "mdd_pct": round(abs(float(summ.get("max_drawdown") or 0)) * 100, 2),
+            "trades": summ.get("total_trades"),
+            "ev_pct": (disc.get("ev") or {}).get("ev_per_trade_pct"),
+            "source": "evolve",
+        }
+    return {
+        "sharpe": None,
+        "return_pct": None,
+        "mdd_pct": None,
+        "trades": None,
+        "ev_pct": None,
+        "source": r.get("suggest_reason") or "",
+    }
+
+
+def format_provision_summary(stats: Dict[str, Any]) -> str:
+    """维护面板可读的 25 核全自动汇总（含回测闸门结果）。"""
+    n_bases = int(stats.get("bases") or 0)
+    head = f"{n_bases} 核全自动" if n_bases else "全自动"
+    lines = [
+        f"{head} · 新建 {stats.get('created', 0)} · 更新 {stats.get('updated', 0)}"
+        f" · 维持 {stats.get('maintained', 0)} · 跳过 {stats.get('skipped', 0)}"
+        f" · 本轮启用 {stats.get('enabled_profiles', 0)}"
+        f" · 补救启用 {stats.get('sync_enabled_approved', 0)}",
+        "回测发生在 suggest（四模板+窄搜）与 evolve（未过关时）；拉 CSV / 启用已批准 不回测",
+        "",
+    ]
+    for r in stats.get("results") or []:
+        sym = r.get("symbol") or "?"
+        act = r.get("action") or "?"
+        tpl = r.get("recommended_template") or "—"
+        sr = r.get("suggest_reason") or ""
+        en = "启用" if r.get("auto_enabled") or r.get("enabled") else "未启用"
+        reason = r.get("enable_reason") or r.get("reason") or ""
+        m = _result_metrics(r)
+        bt = ""
+        if m.get("sharpe") is not None:
+            bt = (
+                f" | bt Sharpe {m.get('sharpe')} ret {m.get('return_pct')}%"
+                f" mdd {m.get('mdd_pct')}% trades {m.get('trades')}"
+            )
+        lines.append(
+            f"  {sym} [{act}] tpl={tpl} suggest={sr} {en}"
+            f" ({reason}){bt}"
+        )
+    return "\n".join(lines)
