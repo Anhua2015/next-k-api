@@ -702,6 +702,10 @@ def run_moss_quant_paper_task() -> None:
                 logger.info(
                     "跳过 moss_quant_paper：MOSS_QUANT_PAPER_ENABLED=0（15m 扫描已关闭）"
                 )
+            elif mq_cfg.MOSS_QUANT_ENABLED and not mq_cfg.moss_quant_lane_scheduler_allowed():
+                logger.info(
+                    "跳过 moss_quant_paper：active_lane=moss2（设 MOSS_QUANT_FORCE_SCHEDULER=1 可强开）"
+                )
             return
         conn = init_db()
         try:
@@ -1036,6 +1040,11 @@ def run_moss_daily_optimize_task(
             return
         if not mq_cfg.MOSS_QUANT_DAILY_OPTIMIZE_ENABLED:
             logger.info("跳过 moss_daily_optimize：MOSS_QUANT_DAILY_OPTIMIZE_ENABLED=0")
+            return
+        if not mq_cfg.moss_quant_lane_scheduler_allowed():
+            logger.info(
+                "跳过 moss_daily_optimize：active_lane=moss2（设 MOSS_QUANT_FORCE_SCHEDULER=1 可强开）"
+            )
             return
         out = run_daily_optimize_batch(
             capital=capital,

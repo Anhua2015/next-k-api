@@ -110,11 +110,21 @@ MOSS_QUANT_PAPER_SOURCE_OF_TRUTH = env_truthy(
 MOSS_QUANT_VERBOSE_LOG = env_truthy("MOSS_QUANT_VERBOSE_LOG", default=True)
 
 
+def moss_quant_lane_scheduler_allowed() -> bool:
+    """Protocol 槽在 moss2 时默认不跑 Moss1 定时任务（避免与 Moss2 双扫）。"""
+    from moss_lane import active_moss_lane
+
+    if active_moss_lane() != "moss_quant":
+        return env_truthy("MOSS_QUANT_FORCE_SCHEDULER", default=False)
+    return True
+
+
 def paper_scheduler_enabled() -> bool:
     return (
         MOSS_QUANT_ENABLED
         and MOSS_QUANT_PAPER_ENABLED
         and MOSS_QUANT_SCHEDULER_ENABLED
+        and moss_quant_lane_scheduler_allowed()
     )
 
 
@@ -332,6 +342,7 @@ def moss_runtime_switch_snapshot() -> Dict[str, bool]:
         "enabled": MOSS_QUANT_ENABLED,
         "paper": MOSS_QUANT_PAPER_ENABLED,
         "scheduler": MOSS_QUANT_SCHEDULER_ENABLED,
+        "lane_scheduler_allowed": moss_quant_lane_scheduler_allowed(),
         "paper_scheduler": paper_scheduler_enabled(),
         "daily_optimize": MOSS_QUANT_DAILY_OPTIMIZE_ENABLED,
         "daily_optimize_scheduler": daily_optimize_scheduler_enabled(),
@@ -366,6 +377,7 @@ def daily_optimize_scheduler_enabled() -> bool:
         MOSS_QUANT_ENABLED
         and MOSS_QUANT_DAILY_OPTIMIZE_ENABLED
         and MOSS_QUANT_SCHEDULER_ENABLED
+        and moss_quant_lane_scheduler_allowed()
     )
 
 

@@ -150,6 +150,25 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
             id="moss_quant_paper_scan",
             replace_existing=True,
         )
+        logging.getLogger(__name__).info(
+            "scheduler: moss_quant_paper_scan every %sm",
+            MOSS_QUANT_SCAN_INTERVAL_MINUTES,
+        )
+    else:
+        try:
+            from moss_quant.config import moss_runtime_switch_snapshot
+
+            snap = moss_runtime_switch_snapshot()
+            logging.getLogger(__name__).info(
+                "scheduler: moss_quant_paper_scan OFF enabled=%s paper=%s "
+                "lane_allowed=%s active_lane=%s",
+                snap.get("enabled"),
+                snap.get("paper"),
+                snap.get("lane_scheduler_allowed"),
+                snap.get("moss_active_lane"),
+            )
+        except ImportError:
+            pass
     try:
         from moss_quant.config import (
             daily_optimize_scheduler_enabled,
@@ -174,6 +193,25 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
             id="moss_daily_optimize",
             replace_existing=True,
         )
+        logging.getLogger(__name__).info(
+            "scheduler: moss_daily_optimize cron %02d:%02d UTC",
+            dh,
+            dm,
+        )
+    else:
+        try:
+            from moss_quant.config import moss_runtime_switch_snapshot
+
+            snap = moss_runtime_switch_snapshot()
+            logging.getLogger(__name__).info(
+                "scheduler: moss_daily_optimize OFF enabled=%s daily_optimize=%s "
+                "lane_allowed=%s",
+                snap.get("enabled"),
+                snap.get("daily_optimize"),
+                snap.get("lane_scheduler_allowed"),
+            )
+        except ImportError:
+            pass
     try:
         from datetime import datetime, timedelta, timezone
 

@@ -1996,8 +1996,11 @@ class TestMossQuant(unittest.TestCase):
             importlib.reload(mq_cfg)
             snap = mq_cfg.moss_runtime_switch_snapshot()
             self.assertTrue(snap["enabled"])
-            self.assertTrue(snap["paper_scheduler"])
-            self.assertTrue(snap["daily_optimize_bootstrap"])
+            # active_lane=moss2 时 Moss1 定时任务默认不注册
+            self.assertFalse(snap["lane_scheduler_allowed"])
+            self.assertFalse(snap["paper_scheduler"])
+            self.assertFalse(snap["daily_optimize_scheduler"])
+            self.assertFalse(snap["daily_optimize_bootstrap"])
             self.assertTrue(snap["recent_pick"])
             self.assertTrue(snap["pool_governance"])
 
