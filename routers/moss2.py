@@ -663,7 +663,14 @@ async def moss2_auto_provision(
         finally:
             conn.close()
 
-    from worker_tasks import run_moss2_auto_provision_task
+    from worker_tasks import (
+        moss2_bootstrap_busy,
+        moss2_provision_busy,
+        run_moss2_auto_provision_task,
+    )
+
+    busy = moss2_provision_busy()
+    boot_busy = moss2_bootstrap_busy()
 
     def _work() -> None:
         try:
@@ -674,11 +681,19 @@ async def moss2_auto_provision(
             logger.exception("moss2 auto-provision background failed")
 
     threading.Thread(target=_work, daemon=True).start()
+    hint = "后台执行中；约 5–30 分钟。页面将自动轮询汇总，或刷新 Moss2 看板。"
+    if boot_busy:
+        hint = "CSV 拉取进行中，完成后将链式自动建 Profile；" + hint
+    elif busy:
+        hint = "上一轮全自动仍在执行，本次请求已排队（若锁释放后会再试需手动点一次）；" + hint
     return {
         "accepted": True,
         "task": "moss2_auto_provision",
         "force_evolve": force_evolve,
-        "hint": "后台执行中；请看日志 [moss2] auto_provision，完成后刷新 Profile 列表；需要汇总可带 ?sync=true（较慢）",
+        "provision_busy": busy,
+        "bootstrap_busy": boot_busy,
+        "hint": hint,
+        "poll": "/api/moss2/maintenance/last-auto-run",
     }
 
 

@@ -54,6 +54,14 @@ def moss2_heavy_work_active() -> bool:
     return _moss2_data_bootstrap_lock.locked() or _moss2_provision_lock.locked()
 
 
+def moss2_provision_busy() -> bool:
+    return _moss2_provision_lock.locked()
+
+
+def moss2_bootstrap_busy() -> bool:
+    return _moss2_data_bootstrap_lock.locked()
+
+
 def _safe_float(value: Any, default: float) -> float:
     try:
         return float(value)
