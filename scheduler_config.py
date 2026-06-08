@@ -27,7 +27,6 @@ def embed_scheduler_enabled() -> bool:
 S6_FUTURES_ALPHA_SCHEDULER_ENABLED = env_truthy("S6_FUTURES_ALPHA_SCHEDULER_ENABLED")
 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED = env_truthy("ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED")
 ORB_SCHEDULER_ENABLED = env_truthy("ORB_SCHEDULER_ENABLED", default=True)
-ORB_SCAN_INTERVAL_MINUTES = max(1, _int_env_orb_scan_interval())
 
 
 def _int_env_orb_scan_interval() -> int:
@@ -40,6 +39,9 @@ def _int_env_orb_scan_interval() -> int:
                 "Invalid ORB_SCAN_INTERVAL_MINUTES=%r, using default", raw
             )
     return default_scan_interval_minutes()
+
+
+ORB_SCAN_INTERVAL_MINUTES = max(1, _int_env_orb_scan_interval())
 
 ZCT_VWAP_SCAN_INTERVAL_MINUTES = max(
     1, int(os.getenv("ZCT_VWAP_SCAN_INTERVAL_MINUTES", "7") or 7)
