@@ -30,6 +30,7 @@ from routers import jiezhen as jiezhen_router
 from routers import moss_quant as moss_quant_router
 from routers import moss2 as moss2_router
 from routers import momentum as momentum_router
+from routers import orb as orb_router
 from routers import zct as zct_router
 import worker_tasks as wt
 
@@ -136,6 +137,7 @@ if sched_cfg.env_truthy("NEXT_K_RADAR_API_ENABLED"):
     app.include_router(radar_router.router)
 app.include_router(accumulation_router.router)
 app.include_router(zct_router.router)
+app.include_router(orb_router.router)
 app.include_router(momentum_router.router)
 app.include_router(jiezhen_router.router)
 app.include_router(moss_quant_router.router)

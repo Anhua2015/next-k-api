@@ -24,6 +24,7 @@ _RADAR_SCRIPT = _API_DIR / "accumulation_radar.py"
 _S2_FUNDING_SCRIPT = _API_DIR / "s2_oi_funding_rate_scanner.py"
 _S6_ALPHA_SCRIPT = _API_DIR / "s6_futures_alpha_autonomous_trading_v1.py"
 _ZCT_VWAP_SCRIPT = _API_DIR / "zct_vwap_signal_scanner.py"
+_ORB_SCRIPT = _API_DIR / "orb_scanner.py"
 _ZCT_TOUCH_POOL_JOB = _API_DIR / "zct_vwap_asset_pool_daily_job.py"
 _ZCT_TOUCH_POOL_PRUNE = _API_DIR / "zct_touch_pool_intraday_prune.py"
 
@@ -34,6 +35,7 @@ _subprocess_locks: Dict[str, threading.Lock] = {
     "s6_alpha": threading.Lock(),
     "zct_vwap_scan": threading.Lock(),
     "zct_vwap_resolve": threading.Lock(),
+    "orb_scan": threading.Lock(),
     "zct_touch_pool": threading.Lock(),
 }
 _heat_watch_refresh_lock = threading.Lock()
@@ -542,6 +544,28 @@ def run_zct_vwap_resolve_only_task() -> None:
         logger.info("ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED=0，跳过 ZCT VWAP 结算")
         return
     run_zct_vwap_resolve_only_subprocess()
+
+
+def _orb_scan_enabled() -> bool:
+    from scheduler_config import ORB_SCHEDULER_ENABLED
+
+    return bool(ORB_SCHEDULER_ENABLED)
+
+
+def run_orb_scan_subprocess() -> None:
+    logger.info("Starting orb_scanner subprocess")
+    _run_subprocess_locked(
+        "orb_scan",
+        [sys.executable, str(_ORB_SCRIPT)],
+        cwd=_ORB_SCRIPT.parent,
+    )
+
+
+def run_orb_scan_task() -> None:
+    if not _orb_scan_enabled():
+        logger.info("ORB_SCHEDULER_ENABLED=0，跳过 ORB 纸面扫描")
+        return
+    run_orb_scan_subprocess()
 
 
 def run_zct_touch_pool_4h_subprocess() -> None:

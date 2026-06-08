@@ -227,6 +227,56 @@ def fetch_top_movers() -> List[Dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+def fetch_klines_forward(
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: Optional[int] = None,
+) -> List[List[Any]]:
+    """从 start_ms 起分页拉取 K 线（含 start 根），直到 end_ms。"""
+    if end_ms is None:
+        end_ms = int(time.time() * 1000)
+    out: List[List[Any]] = []
+    cur = int(start_ms)
+    cap = 150_000
+    while cur <= end_ms and len(out) < cap:
+        est_w = kline_request_weight(1500)
+        _wait_kline_slot(est_w)
+        try:
+            data, _status = api_get_raw(
+                "/fapi/v1/klines",
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "startTime": int(cur),
+                    "endTime": int(end_ms),
+                    "limit": 1500,
+                },
+            )
+        finally:
+            _kline_slot_guard.mark_used()
+        batch = data if isinstance(data, list) else []
+        if not batch:
+            break
+        for row in batch:
+            if not row:
+                continue
+            ot = int(row[0])
+            if ot < int(start_ms):
+                continue
+            if ot > int(end_ms):
+                break
+            out.append(row)
+        last_open = int(batch[-1][0])
+        nxt = last_open + 1
+        if nxt <= cur:
+            break
+        cur = nxt
+        if len(batch) < 1500:
+            break
+    return out
+
+
 def klines_to_df(rows: List[List[Any]]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()

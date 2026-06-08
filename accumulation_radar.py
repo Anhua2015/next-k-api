@@ -2047,6 +2047,12 @@ def init_db():
     except ImportError:
         pass
     try:
+        from orb.db import migrate_orb_tables
+
+        migrate_orb_tables(c)
+    except ImportError:
+        pass
+    try:
         from moss2.db import migrate_moss2_tables
 
         migrate_moss2_tables(c)

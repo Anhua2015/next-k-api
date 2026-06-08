@@ -9,6 +9,8 @@ from typing import Any
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from orb.config import default_scan_interval_minutes
+
 
 def env_truthy(name: str, *, default: bool = False) -> bool:
     raw = os.getenv(name, "")
@@ -24,6 +26,20 @@ def embed_scheduler_enabled() -> bool:
 
 S6_FUTURES_ALPHA_SCHEDULER_ENABLED = env_truthy("S6_FUTURES_ALPHA_SCHEDULER_ENABLED")
 ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED = env_truthy("ZCT_VWAP_SIGNAL_SCHEDULER_ENABLED")
+ORB_SCHEDULER_ENABLED = env_truthy("ORB_SCHEDULER_ENABLED", default=True)
+ORB_SCAN_INTERVAL_MINUTES = max(1, _int_env_orb_scan_interval())
+
+
+def _int_env_orb_scan_interval() -> int:
+    raw = os.getenv("ORB_SCAN_INTERVAL_MINUTES")
+    if raw is not None and str(raw).strip():
+        try:
+            return int(float(str(raw).strip()))
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Invalid ORB_SCAN_INTERVAL_MINUTES=%r, using default", raw
+            )
+    return default_scan_interval_minutes()
 
 ZCT_VWAP_SCAN_INTERVAL_MINUTES = max(
     1, int(os.getenv("ZCT_VWAP_SCAN_INTERVAL_MINUTES", "7") or 7)
@@ -93,6 +109,12 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
                 IntervalTrigger(minutes=ZCT_VWAP_RESOLVE_INTERVAL_MINUTES),
                 id="zct_vwap_resolve_only",
             )
+    if ORB_SCHEDULER_ENABLED:
+        sch.add_job(
+            wt.run_orb_scan_task,
+            IntervalTrigger(minutes=ORB_SCAN_INTERVAL_MINUTES),
+            id="orb_scanner",
+        )
     if MOM_SCHEDULER_ENABLED:
         from momentum_config import (
             MOM_SCAN_INTERVAL_MINUTES,

@@ -56,6 +56,7 @@ _CRON_TASK_FUNCS: Dict[str, Any] = {
     "moss2_paper_scan": wt.run_moss2_paper_task,
     "moss2_scan": wt.run_moss2_paper_task,
     "m2_paper": wt.run_moss2_paper_task,
+    "orb_scan": wt.run_orb_scan_task,
     "moss_daily_optimize": wt.run_moss_daily_optimize_task,
     "mq_daily_optimize": wt.run_moss_daily_optimize_task,
     "top_trader": lambda: wt.run_top_trader_radar_task(force=True),
