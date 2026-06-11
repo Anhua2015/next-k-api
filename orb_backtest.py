@@ -8,11 +8,13 @@ import json
 import sys
 from dataclasses import replace
 
+from env_loader import load_env_oi
 from orb.backtest import run_backtest
 from orb.config import OrbConfig, DEFAULT_SYMBOLS
 
 
 def main() -> int:
+    load_env_oi()
     ap = argparse.ArgumentParser(description="ORB 量价策略 — walk-forward 回测")
     ap.add_argument("--days", type=float, default=14.0)
     ap.add_argument("--symbols", type=str, default="")

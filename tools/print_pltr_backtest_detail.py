@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from binance_fapi import api_get_raw  # noqa: E402
+from env_loader import load_env_oi  # noqa: E402
 from orb.backtest import run_backtest  # noqa: E402
 from orb.config import OrbConfig  # noqa: E402
 
@@ -47,6 +48,7 @@ def days_since_onboard(symbol: str, *, end_ms: int | None = None) -> float:
 
 
 def main() -> None:
+    load_env_oi()
     ap = argparse.ArgumentParser(description="ORB compound backtest detail")
     ap.add_argument("--symbol", default="PLTRUSDT", help="e.g. INTCUSDT")
     ap.add_argument("--days", type=float, default=None, help="lookback calendar days")
