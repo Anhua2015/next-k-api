@@ -179,6 +179,82 @@ def list_robot_wallet_balances(
     ]
 
 
+def list_robot_summaries(
+    conn: sqlite3.Connection,
+    *,
+    count: int,
+    initial_equity_usdt: float,
+) -> List[Dict[str, Any]]:
+    """按 robot_id 汇总 V2 资金池状态（R1..Rn）。"""
+    prev_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    try:
+        init = max(0.0, float(initial_equity_usdt or 0.0))
+        n = max(1, int(count))
+        cur.execute(
+            """
+            SELECT robot_id,
+                   COUNT(*) AS settled_count,
+                   SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN outcome = 'loss' THEN 1 ELSE 0 END) AS losses,
+                   COALESCE(SUM(pnl_usdt), 0) AS total_pnl_usdt
+            FROM orb_settlements
+            WHERE robot_id IS NOT NULL
+            GROUP BY robot_id
+            """
+        )
+        settle_by_rid = {int(r["robot_id"]): dict(r) for r in cur.fetchall() if r["robot_id"] is not None}
+        cur.execute(
+            """
+            SELECT robot_id, symbol, side, virtual_notional_usdt
+            FROM orb_signals
+            WHERE outcome IS NULL AND side IN ('LONG','SHORT') AND sl_price IS NOT NULL
+              AND robot_id IS NOT NULL
+            """
+        )
+        open_by_rid: Dict[int, Dict[str, Any]] = {}
+        for r in cur.fetchall():
+            open_by_rid[int(r["robot_id"])] = dict(r)
+        cur.execute("SELECT robot_id, enabled FROM orb_robots")
+        bot_rows = {int(r["robot_id"]): dict(r) for r in cur.fetchall()}
+        out: List[Dict[str, Any]] = []
+        for rid in range(1, n + 1):
+            bot = bot_rows.get(rid, {})
+            st = settle_by_rid.get(rid, {})
+            wins = int(st.get("wins") or 0)
+            losses = int(st.get("losses") or 0)
+            touch = wins + losses
+            settled = int(st.get("settled_count") or 0)
+            pnl = round(float(st.get("total_pnl_usdt") or 0), 4)
+            wallet = round(
+                robot_wallet_balance(conn, rid, initial_equity_usdt=init, sync=False),
+                4,
+            )
+            op = open_by_rid.get(rid)
+            sym = str(op["symbol"]).upper() if op and op.get("symbol") else None
+            out.append(
+                {
+                    "robot_id": rid,
+                    "label": f"R{rid}",
+                    "symbol": sym,
+                    "enabled": bool(int(bot.get("enabled", 1) or 1)),
+                    "initial_equity_usdt": round(init, 4),
+                    "wallet_balance_usdt": wallet,
+                    "realized_pnl_usdt": pnl,
+                    "settled_count": settled,
+                    "wins": wins,
+                    "losses": losses,
+                    "touch_win_rate": round(wins / touch, 4) if touch else None,
+                    "open_side": str(op["side"]).upper() if op else None,
+                    "open_notional_usdt": round(float(op["virtual_notional_usdt"] or 0), 4) if op else None,
+                }
+            )
+        return out
+    finally:
+        conn.row_factory = prev_factory
+
+
 def sync_robot_wallet(conn: sqlite3.Connection, robot_id: int, *, initial_equity_usdt: float) -> float:
     return robot_wallet_balance(
         conn,

@@ -11,9 +11,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
 from accumulation_radar import init_db
-from orb.core.db import clear_orb_tables, ensure_symbol_bots, list_symbol_bot_summaries, migrate_orb_tables
+from orb.core.db import clear_orb_tables, migrate_orb_tables
 from orb.core.live_settings import live_notify_status
+from orb.v2.config import OrbV2Config
+from orb.v2.db import migrate_orb_v2_tables
 from orb.v2.paper import run_scan_v2
+from orb.v2.robots import ensure_orb_robots, list_robot_summaries, robot_count_from_env, robot_equity_from_env
 from orb.core.session_today import build_session_today
 from utils.maintenance_auth import require_maintenance_token
 
@@ -44,16 +47,17 @@ def _status(row: Dict[str, Any]) -> str:
 
 
 def load_summary() -> Dict[str, Any]:
-    from orb.core.config import OrbConfig
-
-    cfg = OrbConfig.from_env()
+    v2 = OrbV2Config.from_env()
+    cfg = v2.base
+    robot_count = robot_count_from_env()
+    robot_equity = robot_equity_from_env()
     conn = init_db()
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
         migrate_orb_tables(cur)
-        bot_equity = cfg.per_symbol_bot_equity()
-        ensure_symbol_bots(cur, cfg.symbol_list(), initial_equity_usdt=bot_equity)
+        migrate_orb_v2_tables(cur)
+        ensure_orb_robots(cur, count=robot_count, initial_equity_usdt=robot_equity)
         conn.commit()
         cur.execute(
             "SELECT COUNT(*) FROM orb_signals WHERE outcome IS NULL AND side IN ('LONG','SHORT') AND sl_price IS NOT NULL"
@@ -66,22 +70,34 @@ def load_summary() -> Dict[str, Any]:
         by_oc = {str(x[0]): int(x[1]) for x in cur.fetchall()}
         w, l = int(by_oc.get("win", 0)), int(by_oc.get("loss", 0))
         touch = w + l
-        per_symbol = list_symbol_bot_summaries(
-            conn, symbols=cfg.symbol_list(), initial_equity_usdt=bot_equity
+        robots = list_robot_summaries(
+            conn, count=robot_count, initial_equity_usdt=robot_equity
         )
         conn.commit()
+        gate = v2.load_gate()
+        symbols = v2.symbol_list()
         return _with_live_status(
             {
                 "ok": True,
-                "lane": "orb",
+                "lane": v2.lane,
+                "strategy": "orb_v2",
+                "orb_version": 2,
                 "open_positions": open_n,
                 "settled_trades": settled,
                 "sum_pnl_usdt": round(pnl, 4),
                 "touch_win_rate": round(w / touch, 4) if touch else None,
                 "outcome_breakdown": by_oc,
-                "symbol_bot_equity_usdt": round(bot_equity, 4),
-                "symbol_bot_count": len(cfg.symbol_list()),
-                "per_symbol": per_symbol,
+                "robot_count": robot_count,
+                "robot_equity_usdt": round(robot_equity, 4),
+                "universe_count": len(symbols),
+                "symbols_file": str(v2.symbols_file),
+                "robots": robots,
+                "gate": {
+                    "min_p_true": gate.min_p_true,
+                    "max_opens_per_day": gate.max_opens_per_day,
+                    "robot_reuse_after_exit": gate.robot_reuse_after_exit,
+                    "day_abort_enabled": gate.day_abort_enabled,
+                },
                 "today": build_session_today(),
             },
         )
@@ -112,12 +128,14 @@ def load_signals(*, limit: int, offset: int, symbol: Optional[str], status: str)
         rows = [dict(r) for r in cur.execute(sql, params).fetchall()]
         for d in rows:
             d["status"] = _status(d)
+            rid = d.get("robot_id")
+            d["robot_label"] = f"R{int(rid)}" if rid is not None else None
             if d.get("reasons_json"):
                 try:
                     d["reasons"] = json.loads(d["reasons_json"])
                 except json.JSONDecodeError:
                     d["reasons"] = []
-        return {"ok": True, "lane": "orb", "count": len(rows), "signals": rows}
+        return {"ok": True, "lane": "orb_v2", "count": len(rows), "signals": rows}
     finally:
         conn.close()
 
@@ -128,8 +146,12 @@ def load_latest_run() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         migrate_orb_tables(cur)
-        cur.execute("SELECT * FROM orb_runs ORDER BY id DESC LIMIT 1")
+        migrate_orb_v2_tables(cur)
+        cur.execute("SELECT * FROM orb_v2_runs ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
+        if not row:
+            cur.execute("SELECT * FROM orb_runs ORDER BY id DESC LIMIT 1")
+            row = cur.fetchone()
         if not row:
             return {"ok": True, "has_run": False}
         d = dict(row)
@@ -219,6 +241,5 @@ async def orb_clear_db(_: None = Depends(require_maintenance_token)):
     conn = init_db()
     try:
         return {"ok": True, **clear_orb_tables(conn)}
-    except Exception as e:
-        logger.exception("orb clear-db failed: %s", e)
-        raise HTTPException(status_code=500, detail="orb_clear_db_failed") from e
+    finally:
+        conn.close()
