@@ -56,6 +56,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("DB init on startup skipped: %s", e)
 
+    try:
+        from orb.ml.live_bundle import ensure_live_bundle_on_startup, log_live_bundle_startup
+
+        copied = ensure_live_bundle_on_startup()
+        if copied:
+            logger.info("ORB live bundle bootstrapped on startup: %s", copied)
+        log_live_bundle_startup()
+    except Exception as e:
+        logger.warning("ORB live bundle startup check skipped: %s", e)
+
     yield
 
     sch = getattr(app.state, "accumulation_scheduler", None)

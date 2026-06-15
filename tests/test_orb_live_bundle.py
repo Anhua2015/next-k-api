@@ -30,6 +30,8 @@ def test_live_bundle_hint_ready():
     assert hint["severity"] in ("ok", "warn", "block")
     assert "data/orb/live" in hint.get("root", "").replace("\\", "/")
     assert "active_gbm" in hint
+    assert isinstance(hint.get("artifacts"), list)
+    assert len(hint["artifacts"]) >= 3
 
 
 def test_live_bundle_hint_fallback_message():

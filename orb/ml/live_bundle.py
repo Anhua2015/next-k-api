@@ -160,6 +160,84 @@ def bundle_status(*, relative_paths: bool = False) -> dict:
     }
 
 
+def _artifact_rows(*, relative_paths: bool = True) -> list[dict]:
+    """各产物路径与是否存在（供前端 / 运维诊断）。"""
+    from orb.ml.model.paths import GBM_PKL, PROFILES_JSON, resolve_gbm_path, resolve_profiles_path
+
+    fmt = _rel_path if relative_paths else str
+    root = live_bundle_root()
+    rows = [
+        ("live_gate.json", live_gate_json(), resolve_live_gate_path()),
+        ("breakout_gbm.pkl", live_gbm_pkl(), resolve_gbm_path()),
+        ("symbol_breakout_profiles.json", live_profiles_json(), resolve_profiles_path()),
+    ]
+    out: list[dict] = []
+    for name, live_p, active_p in rows:
+        out.append(
+            {
+                "name": name,
+                "live_path": fmt(live_p),
+                "live_exists": live_p.is_file(),
+                "active_path": fmt(active_p),
+                "active_exists": active_p.is_file(),
+                "from_live": _is_under_live_bundle(active_p),
+            }
+        )
+    # 回退源（便于排查 Railway 是否缺 data/ 目录）
+    out.append(
+        {
+            "name": "ml_gbm_fallback",
+            "live_path": fmt(GBM_PKL),
+            "live_exists": GBM_PKL.is_file(),
+            "active_path": fmt(GBM_PKL),
+            "active_exists": GBM_PKL.is_file(),
+            "from_live": False,
+        }
+    )
+    out.append(
+        {
+            "name": "ml_profiles_fallback",
+            "live_path": fmt(PROFILES_JSON),
+            "live_exists": PROFILES_JSON.is_file(),
+            "active_path": fmt(PROFILES_JSON),
+            "active_exists": PROFILES_JSON.is_file(),
+            "from_live": False,
+        }
+    )
+    return out
+
+
+def ensure_live_bundle_on_startup() -> list[str]:
+    """启动时补全 live 目录（从 config / ml 复制，不覆盖已有文件）。"""
+    if live_gbm_pkl().is_file() and live_gate_json().is_file() and live_profiles_json().is_file():
+        return []
+    return bootstrap_from_legacy(overwrite=False)
+
+
+def log_live_bundle_startup() -> None:
+    """API 启动时打印 Live 包自检（Railway 日志可见）。"""
+    import logging
+
+    log = logging.getLogger(__name__)
+    hint = live_bundle_hint()
+    sev = hint.get("severity", "?")
+    log.info(
+        "ORB live bundle [%s] root=%s env=%s",
+        sev,
+        hint.get("root"),
+        (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip() or "(default)",
+    )
+    for row in hint.get("artifacts") or []:
+        if row["name"].startswith("ml_"):
+            continue
+        mark = "OK" if row.get("live_exists") else "MISSING"
+        log.info("  live %-32s %s", row["name"], mark)
+    if sev != "ok":
+        log.warning("ORB live bundle: %s", hint.get("message"))
+        for step in hint.get("deploy_steps") or []:
+            log.warning("  → %s", step)
+
+
 def live_bundle_hint() -> dict:
     """前端 / 运维：Live 包是否就绪、是否从 data/orb/live 加载。"""
     st = bundle_status(relative_paths=True)
@@ -190,9 +268,15 @@ def live_bundle_hint() -> dict:
             missing.append("Profiles")
         message = (
             f"Live 包不完整（缺 {' / '.join(missing)}）。"
-            "请将文件放入 data/orb/live/ 并重新部署。"
+            "请将 data/orb/live/ 随 API 镜像一起部署（刷新页面无效）。"
         )
         severity = "block"
+        deploy_steps = [
+            "确认 git 已提交 data/orb/live/breakout_gbm.pkl 等文件",
+            "在 Railway 重新 Deploy next-k-api 服务",
+            "检查 ORB_LIVE_BUNDLE_ROOT 未指向空目录（留空即可）",
+            "本地可运行: python tools/orb/bootstrap_live_bundle.py",
+        ]
     elif not using:
         parts: list[str] = []
         if not using_gate:
@@ -203,15 +287,21 @@ def live_bundle_hint() -> dict:
             parts.append(f"Profiles → {st['profiles']}")
         if missing_in_live:
             message = (
-                f"data/orb/live 缺 {', '.join(missing_in_live)}，当前回退加载。"
-                "请确认镜像含 Live 包并重新 Deploy（刷新页面无效）。"
+                f"data/orb/live 缺 {', '.join(missing_in_live)}，当前从其他路径加载。"
+                "建议补全 Live 包并重新 Deploy。"
             )
+            deploy_steps = [
+                "将 Gate/GBM/Profiles 放入 data/orb/live/",
+                "git commit 后重新 Deploy API",
+            ]
         else:
             message = "部分产物未从 data/orb/live 加载：" + " · ".join(parts)
+            deploy_steps = ["确认 data/orb/live/ 含完整文件后重新 Deploy"]
         severity = "warn"
     else:
         message = f"Live 包就绪 · {st['live_bundle_root']} · 随 git 部署更新"
         severity = "ok"
+        deploy_steps = []
 
     return {
         "ok": True,
@@ -231,6 +321,9 @@ def live_bundle_hint() -> dict:
         "using_live_bundle_gate": using_gate,
         "using_live_bundle_gbm": using_gbm,
         "using_live_bundle_profiles": using_prof,
+        "artifacts": _artifact_rows(relative_paths=True),
+        "orb_live_bundle_root_env": (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip(),
+        "deploy_steps": deploy_steps,
         "message": message,
         "severity": severity,
     }
