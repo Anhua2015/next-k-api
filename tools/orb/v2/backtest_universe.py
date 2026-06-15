@@ -322,7 +322,7 @@ def main() -> int:
         help="eight_robots=8槽复利 | per_symbol=每标bot | fixed=固定名义",
     )
     ap.add_argument("--robot-count", type=int, default=8)
-    ap.add_argument("--robot-equity", type=float, default=10_000.0)
+    ap.add_argument("--robot-equity", type=float, default=1_000.0)
     ap.add_argument("--fixed-notional", type=float, default=1000.0, help="仅 sizing=fixed")
     ap.add_argument(
         "--no-live-filters",
