@@ -356,6 +356,10 @@ def clear_orb_tables(conn: sqlite3.Connection) -> dict[str, int]:
     for table, key in (
         ("orb_settlements", "deleted_settlements"),
         ("orb_signals", "deleted_signals"),
+        ("orb_v2_runs", "deleted_v2_runs"),
+        ("orb_v2_breakout_seen", "deleted_v2_breakout_seen"),
+        ("orb_v2_gate_day", "deleted_v2_gate_day"),
+        ("orb_robots", "deleted_robots"),
         ("orb_runs", "deleted_runs"),
         ("orb_symbol_bots", "deleted_symbol_bots"),
     ):

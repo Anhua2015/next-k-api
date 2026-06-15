@@ -117,7 +117,7 @@ class OrbV2Config:
 
         )
 
-        enabled = _env_truthy("ORB_V2_ENABLED", default=False)
+        enabled = _env_truthy("ORB_V2_ENABLED", default=True)
 
         shadow = _env_truthy("ORB_V2_SHADOW", default=False)
 
@@ -151,7 +151,8 @@ class OrbV2Config:
 
 
     def load_gate(self) -> LiveGateConfig:
-        return LiveGateConfig.from_json(resolve_gate_config_path())
+        path = self.gate_config_path if self.gate_config_path.is_file() else resolve_gate_config_path()
+        return LiveGateConfig.from_json(path)
 
 
 

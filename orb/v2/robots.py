@@ -130,15 +130,24 @@ def busy_robot_ids(cur: sqlite3.Cursor) -> set[int]:
     return {int(r[0]) for r in cur.fetchall() if r[0] is not None}
 
 
-def next_free_robot_id(cur: sqlite3.Cursor, *, count: int) -> Optional[int]:
+def next_free_robot_id(
+    cur: sqlite3.Cursor,
+    *,
+    count: int,
+    initial_equity_usdt: Optional[float] = None,
+) -> Optional[int]:
     busy = busy_robot_ids(cur)
     n = max(1, int(count))
+    init = robot_equity_from_env() if initial_equity_usdt is None else float(initial_equity_usdt)
+    conn = cur.connection
     for rid in range(1, n + 1):
         if rid in busy:
             continue
         cur.execute("SELECT enabled FROM orb_robots WHERE robot_id = ?", (rid,))
         row = cur.fetchone()
         if row is not None and int(row[0] or 0) == 0:
+            continue
+        if conn is not None and robot_wallet_balance(conn, rid, initial_equity_usdt=init, sync=False) <= 0:
             continue
         return rid
     return None

@@ -42,6 +42,7 @@ from orb.v2.config import OrbV2Config
 from orb.v2.db import mark_breakout_seen, migrate_orb_v2_tables
 from orb.v2.gate_state import load_gate_day_state, persist_gate_day_state, v2_session_traded
 from orb.v2.robots import (
+    busy_robot_ids,
     ensure_orb_robots,
     list_robot_wallet_balances,
     next_free_robot_id,
@@ -85,9 +86,15 @@ def _scan_params_v2(
     return base
 
 
-def _load_model(_v2: OrbV2Config) -> Optional[BreakoutModelBundle]:
+def _load_model(v2: OrbV2Config) -> Optional[BreakoutModelBundle]:
     bundle = BreakoutModelBundle.load_production()
-    if not bundle.is_ready:
+    if not bundle.is_ready or bundle.ranker.gbm is None:
+        logger.error(
+            "[orb_v2] production GBM required: gbm_path=%s exists=%s kind=%s",
+            bundle.gbm_path,
+            bundle.gbm_path.is_file(),
+            bundle.kind,
+        )
         return None
     return bundle
 
@@ -302,7 +309,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     gate_skips = 0
     for p_true, sym, sig, sync_n, feat in scored:
         if use_robots:
-            if count_open_positions(cur) >= gate.max_opens_per_day:
+            if len(busy_robot_ids(cur)) >= gate.max_opens_per_day:
                 break
         elif gate_state.opens >= gate.max_opens_per_day:
             break
@@ -386,7 +393,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 stats["skipped"].append({"symbol": sym, "reason": reason})
                 continue
 
-            if c.max_open_positions > 0 and count_open_positions(cur) >= c.max_open_positions:
+            if not use_robots and c.max_open_positions > 0 and count_open_positions(cur) >= c.max_open_positions:
                 if gate_pass and not v2.shadow:
                     rollback_open_decision(gate_state, symbol=sym)
                 mark_breakout_seen(
@@ -404,7 +411,9 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
 
             assigned_robot: Optional[int] = None
             if gate_pass and use_robots and not v2.shadow:
-                assigned_robot = next_free_robot_id(cur, count=robot_count)
+                assigned_robot = next_free_robot_id(
+                    cur, count=robot_count, initial_equity_usdt=robot_init
+                )
                 if assigned_robot is None:
                     rollback_open_decision(gate_state, symbol=sym)
                     mark_breakout_seen(
@@ -461,6 +470,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                         "entry": sig.price,
                     }
                 )
+                gate_skips += 1
                 continue
 
             mark_breakout_seen(
@@ -543,8 +553,9 @@ def run_scan_v2(*, do_resolve: bool = True) -> Dict[str, Any]:
 def run_resolve_only_v2() -> Dict[str, Any]:
     from accumulation_radar import init_db
 
+    v2 = OrbV2Config.from_env()
     conn = init_db()
     try:
-        return resolve_open_positions(conn)
+        return resolve_open_positions(conn, cfg=v2.base)
     finally:
         conn.close()
