@@ -57,6 +57,14 @@ async def lifespan(app: FastAPI):
         logger.warning("DB init on startup skipped: %s", e)
 
     try:
+        from orb.ml.paths import production_env_warnings
+
+        for msg in production_env_warnings():
+            logger.warning("ORB production env: %s", msg)
+    except Exception as e:
+        logger.warning("ORB production env check skipped: %s", e)
+
+    try:
         from orb.ml.live_bundle import ensure_live_bundle_on_startup, log_live_bundle_startup
 
         copied = ensure_live_bundle_on_startup()

@@ -20,11 +20,36 @@ from typing import Any, Dict, List
 # ============ 配置 ============
 SCRIPT_DIR = Path(__file__).parent
 ENV_FILE = SCRIPT_DIR / ".env.oi"
-ALERT_HISTORY_FILE = SCRIPT_DIR / "oi_funding_alerts.json"
-FR_SNAPSHOT_FILE = SCRIPT_DIR / "fr_snapshot.json"  # 上一次费率快照
 SIGNALS_HISTORY_FILE = SCRIPT_DIR / "s2_signals_history.json"  # 迁移后弃用，历史改存 accumulation.db
 CST = timezone(timedelta(hours=8))
 SIGNAL_HISTORY_DAYS = 2
+
+
+def _data_dir() -> Path:
+    return Path(os.getenv("DATA_DIR", str(SCRIPT_DIR)))
+
+
+def _runtime_json_path(name: str) -> Path:
+    """S2 运行时 JSON 放在 DATA_DIR；若项目根有旧文件则迁移一次。"""
+    import shutil
+
+    dest = _data_dir() / name
+    legacy = SCRIPT_DIR / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.is_file() and legacy.is_file():
+        try:
+            shutil.copy2(legacy, dest)
+        except OSError:
+            pass
+    return dest
+
+
+def _alert_history_file() -> Path:
+    return _runtime_json_path("oi_funding_alerts.json")
+
+
+def _fr_snapshot_file() -> Path:
+    return _runtime_json_path("fr_snapshot.json")
 
 
 def _accumulation_db_path() -> Path:
@@ -246,15 +271,16 @@ def send_tg(text):
 
 # ============ 去重 ============
 def load_alert_history():
-    if ALERT_HISTORY_FILE.exists():
+    path = _alert_history_file()
+    if path.exists():
         try:
-            return json.loads(ALERT_HISTORY_FILE.read_text())
+            return json.loads(path.read_text())
         except:
             return {}
     return {}
 
 def save_alert_history(history):
-    ALERT_HISTORY_FILE.write_text(json.dumps(history))
+    _alert_history_file().write_text(json.dumps(history))
 
 def is_duplicate(symbol, history):
     if symbol not in history:
@@ -277,10 +303,11 @@ def load_fr_snapshot():
     kind: "v2" | "legacy" | "empty"
     legacy = 旧版纯 {SYMBOL: rate}，无时间戳，易在部署后与当前费率差一档导致满屏「转负」。
     """
-    if not FR_SNAPSHOT_FILE.exists():
+    path = _fr_snapshot_file()
+    if not path.exists():
         return {}, None, "empty"
     try:
-        raw = json.loads(FR_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}, None, "empty"
     if not isinstance(raw, dict):
@@ -295,16 +322,17 @@ def load_fr_snapshot():
 
 def save_fr_snapshot(rates: dict):
     """写入带 _saved_at 的快照，供下一轮对比与间隔判断。"""
+    path = _fr_snapshot_file()
     payload = {
         "_saved_at": datetime.now(CST).isoformat(),
         "rates": rates,
     }
-    tmp = FR_SNAPSHOT_FILE.with_suffix(".json.tmp")
+    tmp = path.with_suffix(".json.tmp")
     tmp.write_text(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
-    tmp.replace(FR_SNAPSHOT_FILE)
+    tmp.replace(path)
 
 # ============ 核心扫描 ============
 def scan():

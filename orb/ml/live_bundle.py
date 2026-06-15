@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Iterable, List
 
-from orb.ml.paths import PROJECT_ROOT
+from orb.ml.paths import PROJECT_ROOT, is_risky_production_data_path, production_env_warnings, resolve_production_env_path
 
 # 实盘唯一参数目录（在 data/ 外，不受 DATA_DIR Volume 影响）
 LIVE_BUNDLE_DIR = PROJECT_ROOT / "orb_live"
@@ -30,23 +30,18 @@ REQUIRED_FILENAMES = (
 
 
 def _env_override_issue() -> str:
-    """ORB_LIVE_BUNDLE_ROOT 指向旧路径时给出明确修复提示。"""
-    raw = (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip()
-    if not raw:
-        return ""
-    norm = raw.replace("\\", "/").rstrip("/").lower()
-    if norm.endswith("data/orb/live") or norm == "orb/live":
-        return (
-            f"ORB_LIVE_BUNDLE_ROOT={raw} 仍在使用旧目录 data/orb/live（Volume 会盖住模型）。"
-            "请在 Railway 删除该环境变量，让程序默认读 orb_live/。"
-        )
-    return ""
+    warnings = production_env_warnings()
+    return warnings[0] if warnings else ""
+
+
+def _all_env_override_issues() -> list[str]:
+    return production_env_warnings()
 
 
 def live_bundle_root() -> Path:
-    """实盘参数根目录（可用 ORB_LIVE_BUNDLE_ROOT 覆盖）。"""
+    """实盘参数根目录（可用 ORB_LIVE_BUNDLE_ROOT 覆盖；忽略指向 data/ 的旧路径）。"""
     raw = (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip()
-    if raw:
+    if raw and not is_risky_production_data_path(raw):
         p = Path(raw)
         return p if p.is_absolute() else PROJECT_ROOT / p
     return LIVE_BUNDLE_DIR
@@ -97,25 +92,11 @@ def _first_existing(*paths: Path) -> Path:
 
 
 def resolve_live_gate_path() -> Path:
-    raw = (os.getenv("ORB_V2_GATE_CONFIG") or "").strip()
-    if raw:
-        p = Path(raw)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if p.is_file():
-            return p
-    return live_gate_json()
+    return resolve_production_env_path("ORB_V2_GATE_CONFIG", live_gate_json())
 
 
 def resolve_live_gbm_path() -> Path:
-    raw = (os.getenv("ORB_V2_GBM_PATH") or "").strip()
-    if raw:
-        p = Path(raw)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if p.is_file():
-            return p
-    return live_gbm_pkl()
+    return resolve_production_env_path("ORB_V2_GBM_PATH", live_gbm_pkl())
 
 
 def resolve_live_gbm_meta_path() -> Path:
@@ -123,14 +104,7 @@ def resolve_live_gbm_meta_path() -> Path:
 
 
 def resolve_live_profiles_path() -> Path:
-    raw = (os.getenv("ORB_V2_PROFILES_PATH") or "").strip()
-    if raw:
-        p = Path(raw)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if p.is_file():
-            return p
-    return live_profiles_json()
+    return resolve_production_env_path("ORB_V2_PROFILES_PATH", live_profiles_json())
 
 
 def _rel_path(p: Path) -> str:
@@ -220,8 +194,6 @@ def log_live_bundle_startup() -> None:
         mark = "OK" if row.get("live_exists") else "MISSING"
         log.info("  %-36s %s", row["name"], mark)
     env_issue = _env_override_issue()
-    if env_issue:
-        log.warning("ORB live bundle: %s", env_issue)
     if sev != "ok":
         log.warning("ORB live bundle: %s", hint.get("message"))
         for step in hint.get("deploy_steps") or []:
@@ -249,14 +221,18 @@ def live_bundle_hint() -> dict:
     if not prof_ok:
         missing.append("symbol_breakout_profiles.json")
 
-    env_issue = _env_override_issue()
+    env_issues = _all_env_override_issues()
+    env_issue = env_issues[0] if env_issues else ""
     deploy_steps = [
         "将 live_gate.json / breakout_gbm.pkl / symbol_breakout_profiles.json 放入 orb_live/",
         "确认 git 已提交 orb_live/breakout_gbm.pkl",
         "在 Railway 重新 Deploy next-k-api 服务",
     ]
-    if env_issue:
-        deploy_steps.insert(0, "删除 Railway 环境变量 ORB_LIVE_BUNDLE_ROOT（留空即读 orb_live/）")
+    if env_issues:
+        deploy_steps.insert(
+            0,
+            "删除 Railway 中指向 data/ 的 ORB 环境变量（ORB_LIVE_BUNDLE_ROOT、ORB_V2_*）",
+        )
 
     if not ready:
         message = (

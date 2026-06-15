@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from orb.ml.ranker import BreakoutRanker
+from orb.ml.live_bundle import resolve_live_gbm_path, resolve_live_profiles_path
 from orb.ml.model.paths import (
     GBM_META,
     MANIFEST_JSON,
@@ -103,10 +103,8 @@ class BreakoutModelBundle:
 
     @classmethod
     def load_production(cls) -> "BreakoutModelBundle":
-        """从 orb_live/ 加载 production 模型。"""
-        gbm_raw = (os.getenv("ORB_V2_GBM_PATH") or "").strip()
-        prof_raw = (os.getenv("ORB_V2_PROFILES_PATH") or "").strip()
+        """从 orb_live/ 加载 production 模型（忽略指向 data/ 的 env 覆盖）。"""
         return cls.load(
-            gbm_path=Path(gbm_raw) if gbm_raw else None,
-            profiles_path=Path(prof_raw) if prof_raw else None,
+            gbm_path=resolve_live_gbm_path(),
+            profiles_path=resolve_live_profiles_path(),
         )

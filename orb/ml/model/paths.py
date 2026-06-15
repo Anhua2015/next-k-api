@@ -5,7 +5,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from orb.ml.paths import CONFIG_V2, PROJECT_ROOT
+from orb.ml.paths import (
+    CONFIG_V2,
+    PROJECT_ROOT,
+    production_env_warnings,
+    resolve_production_env_path,
+)
 from orb.ml.live_bundle import (
     live_gbm_meta,
     live_gbm_pkl,
@@ -89,29 +94,15 @@ def staging_samples_path() -> Path:
 
 
 def _symbols_env_override_issue() -> str:
-    """ORB_V2_SYMBOLS_FILE 指向 data/ 时给出修复提示。"""
-    raw = (os.getenv("ORB_V2_SYMBOLS_FILE") or "").strip()
-    if not raw:
-        return ""
-    norm = raw.replace("\\", "/").rstrip("/").lower()
-    if "data/orb" in norm or norm.startswith("data/"):
-        return (
-            f"ORB_V2_SYMBOLS_FILE={raw} 指向 data/（Volume 会盖住标的文件）。"
-            "请删除该环境变量，默认读 config/orb/v2/symbols.txt。"
-        )
+    for w in production_env_warnings():
+        if w.startswith("ORB_V2_SYMBOLS_FILE"):
+            return w
     return ""
 
 
 def resolve_symbols_path() -> Path:
     """生产标的池：config/orb/v2/symbols.txt（git 部署，不受 DATA_DIR Volume 影响）。"""
-    raw = (os.getenv("ORB_V2_SYMBOLS_FILE") or "").strip()
-    if raw:
-        p = Path(raw)
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if p.is_file():
-            return p
-    return CONFIG_SYMBOLS
+    return resolve_production_env_path("ORB_V2_SYMBOLS_FILE", CONFIG_SYMBOLS)
 
 
 def resolve_train_symbols_path() -> Path:
@@ -164,7 +155,7 @@ def log_symbols_startup() -> None:
         (os.getenv("ORB_V2_SYMBOLS_FILE") or "").strip() or "(default config/orb/v2/symbols.txt)",
     )
     if st.get("env_issue"):
-        log.warning("ORB symbols: %s", st["env_issue"])
+        pass  # 由 main.py startup 统一打印 production_env_warnings
     if not st["ok"]:
         log.warning("ORB symbols: universe file missing or empty — scans will skip (orb_v2_no_symbols)")
 
