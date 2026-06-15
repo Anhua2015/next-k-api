@@ -17,8 +17,11 @@ from orb.ml.model.paths import (
     PROFILES_JSON,
     SAMPLES_JSON,
     ensure_model_dirs,
+    resolve_gbm_path,
+    resolve_profiles_path,
     resolve_symbols_path,
 )
+from orb.ml.live_bundle import live_bundle_root, resolve_live_gate_path
 
 
 def write_manifest(*, extra: Optional[Dict[str, Any]] = None) -> Path:
@@ -26,10 +29,12 @@ def write_manifest(*, extra: Optional[Dict[str, Any]] = None) -> Path:
     payload: Dict[str, Any] = {
         "version": 3,
         "ml_data_root": str(ML_DATA_ROOT),
+        "live_bundle_root": str(live_bundle_root()),
         "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "symbols": str(resolve_symbols_path()),
-        "gbm": str(GBM_PKL),
-        "profiles": str(PROFILES_JSON),
+        "gbm": str(resolve_gbm_path()),
+        "profiles": str(resolve_profiles_path()),
+        "gate_config": str(resolve_live_gate_path()),
         "samples": str(SAMPLES_JSON),
     }
     if GBM_META.is_file():

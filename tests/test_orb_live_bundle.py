@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from orb.ml.live_bundle import live_bundle_root, resolve_live_gate_path, resolve_live_gbm_path
+from orb.ml.live_bundle import live_bundle_root, resolve_live_gate_path
 from orb.ml.model import layout_status, resolve_gbm_path
 
 
 def test_live_bundle_root():
-    assert str(live_bundle_root()).replace("\\", "/").endswith("data/orb/live")
+    assert str(live_bundle_root()).replace("\\", "/").endswith("orb_live")
 
 
 def test_resolve_prefers_live_bundle():
-    assert "data/orb/live" in str(resolve_gbm_path()).replace("\\", "/")
+    assert "orb_live" in str(resolve_gbm_path()).replace("\\", "/")
     assert str(resolve_live_gate_path()).endswith(".json")
 
 
 def test_layout_includes_live_bundle():
     st = layout_status()
     assert "live_bundle_root" in st
-    assert "data/orb/live" in st["live_bundle_root"].replace("\\", "/")
+    assert "orb_live" in st["live_bundle_root"].replace("\\", "/")
 
 
 def test_live_bundle_hint_ready():
@@ -28,29 +28,30 @@ def test_live_bundle_hint_ready():
     assert hint["ok"] is True
     assert "message" in hint
     assert hint["severity"] in ("ok", "warn", "block")
-    assert "data/orb/live" in hint.get("root", "").replace("\\", "/")
+    assert "orb_live" in hint.get("root", "").replace("\\", "/")
     assert "active_gbm" in hint
     assert isinstance(hint.get("artifacts"), list)
     assert len(hint["artifacts"]) >= 3
 
 
-def test_live_bundle_hint_fallback_message():
-    from orb.ml.live_bundle import live_bundle_hint, live_gbm_pkl
-    from orb.ml.model.paths import GBM_PKL, ensure_model_dirs
+def test_sync_live_bundle_from_ml_models(tmp_path, monkeypatch):
+    from orb.ml.live_bundle import live_bundle_root, sync_live_bundle_from_ml_models
+    import orb.ml.model.paths as mp
 
-    live_pkl = live_gbm_pkl()
-    if not live_pkl.is_file():
-        return
-    backup = live_pkl.read_bytes()
-    live_pkl.unlink()
-    ensure_model_dirs()
-    if not GBM_PKL.is_file():
-        GBM_PKL.write_bytes(backup)
-    try:
-        hint = live_bundle_hint()
-        assert hint["severity"] == "warn"
-        assert not hint["using_live_bundle_gbm"]
-        assert "breakout_gbm.pkl" in hint.get("message", "")
-        assert hint.get("active_gbm", "").replace("\\", "/")
-    finally:
-        live_pkl.write_bytes(backup)
+    live_dir = tmp_path / "orb_live"
+    models_dir = tmp_path / "models"
+    live_dir.mkdir()
+    models_dir.mkdir()
+    monkeypatch.setattr("orb.ml.live_bundle.live_bundle_root", lambda: live_dir)
+    monkeypatch.setattr(mp, "GBM_PKL", models_dir / "breakout_gbm.pkl")
+    monkeypatch.setattr(mp, "GBM_META", models_dir / "breakout_gbm.json")
+    monkeypatch.setattr(mp, "PROFILES_JSON", models_dir / "symbol_breakout_profiles.json")
+    monkeypatch.setattr(mp, "GBM_TRAIN_REPORT", models_dir / "breakout_gbm_train_report.json")
+    (models_dir / "breakout_gbm.pkl").write_bytes(b"pkl")
+    (models_dir / "breakout_gbm.json").write_text("{}", encoding="utf-8")
+    (models_dir / "symbol_breakout_profiles.json").write_text("{}", encoding="utf-8")
+
+    copied = sync_live_bundle_from_ml_models(overwrite=True)
+    assert copied
+    assert (live_dir / "breakout_gbm.pkl").is_file()
+    assert (live_dir / "symbol_breakout_profiles.json").is_file()

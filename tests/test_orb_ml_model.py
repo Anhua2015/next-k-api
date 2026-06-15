@@ -32,7 +32,7 @@ def test_model_bundle_loads_when_artifacts_exist():
 
 
 def test_model_paths_resolve():
-    assert str(resolve_gbm_path()).endswith(".pkl")
+    assert "orb_live" in str(resolve_gbm_path()).replace("\\", "/")
     assert str(resolve_profiles_path()).endswith(".json")
 
 
@@ -57,4 +57,4 @@ def test_model_layout_under_data_orb_ml():
     assert norm.endswith("data/orb/ml")
     st = layout_status()
     assert "data/orb/ml" in st["ml_data_root"].replace("\\", "/")
-    assert "live_bundle_root" in st
+    assert "orb_live" in st["live_bundle_root"].replace("\\", "/")

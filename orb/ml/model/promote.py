@@ -23,6 +23,7 @@ from orb.ml.model.paths import (
     staging_samples_path,
     staging_train_report_path,
 )
+from orb.ml.live_bundle import live_bundle_root, sync_live_bundle_from_ml_models
 
 
 def _atomic_copy(src: Path, dst: Path) -> None:
@@ -42,6 +43,14 @@ def archive_production(tag: str) -> Path:
     for src in (GBM_PKL, GBM_META, GBM_TRAIN_REPORT, PROFILES_JSON, SAMPLES_JSON):
         if src.is_file():
             shutil.copy2(src, dest / src.name)
+    live_root = live_bundle_root()
+    if live_root.is_dir():
+        live_dest = dest / "orb_live"
+        live_dest.mkdir(parents=True, exist_ok=True)
+        for name in ("live_gate.json", "breakout_gbm.pkl", "breakout_gbm.json", "symbol_breakout_profiles.json"):
+            src = live_root / name
+            if src.is_file():
+                shutil.copy2(src, live_dest / name)
     return dest
 
 
@@ -64,6 +73,9 @@ def promote_staging_to_production(*, tag: str = "") -> Dict[str, str]:
     for src, dst in pairs:
         _atomic_copy(src, dst)
         promoted[src.name] = str(dst)
+    live_synced = sync_live_bundle_from_ml_models(overwrite=True)
+    if live_synced:
+        promoted["orb_live_sync"] = ",".join(live_synced)
     return promoted
 
 

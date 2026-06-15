@@ -1,4 +1,4 @@
-"""ORB 突破排序大模型 — 产物路径（data/orb/live + data/orb/ml + config）。"""
+"""ORB 突破排序大模型 — 训练产物 data/orb/ml/；实盘参数 orb_live/。"""
 
 from __future__ import annotations
 
@@ -114,28 +114,16 @@ def resolve_symbols_no_coin_path() -> Path:
 
 
 def resolve_gbm_path() -> Path:
-    """Live 包 → data/orb/ml/models → staging（不读 output/）。"""
-    return _first_existing(
-        live_gbm_pkl(),
-        GBM_PKL,
-        STAGING_GBM_PKL,
-    )
+    """实盘只读 orb_live/（训练产物在 data/orb/ml/models/）。"""
+    return live_gbm_pkl()
 
 
 def resolve_gbm_meta_path() -> Path:
-    return _first_existing(
-        live_gbm_meta(),
-        GBM_META,
-        STAGING_GBM_META,
-    )
+    return live_gbm_meta()
 
 
 def resolve_profiles_path() -> Path:
-    return _first_existing(
-        live_profiles_json(),
-        PROFILES_JSON,
-        STAGING_PROFILES_JSON,
-    )
+    return live_profiles_json()
 
 
 def resolve_samples_path() -> Path:
@@ -146,11 +134,7 @@ def resolve_samples_path() -> Path:
 
 
 def resolve_train_report_path() -> Path:
-    return _first_existing(
-        live_train_report(),
-        GBM_TRAIN_REPORT,
-        STAGING_GBM_TRAIN_REPORT,
-    )
+    return live_train_report()
 
 
 def resolve_logistic_true_path() -> Path:

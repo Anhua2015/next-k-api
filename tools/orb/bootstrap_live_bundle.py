@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""初始化 data/orb/live/ 人工替换包（从当前 Gate + 模型复制）。"""
+"""初始化 orb_live/ 实盘参数包（从 data/orb/ml/models/ 复制）。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def main() -> int:
     load_env_oi()
     import argparse
 
-    ap = argparse.ArgumentParser(description="Bootstrap data/orb/live manual bundle")
+    ap = argparse.ArgumentParser(description="Bootstrap orb_live/ manual bundle")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
     copied = bootstrap_from_legacy(overwrite=bool(args.overwrite))

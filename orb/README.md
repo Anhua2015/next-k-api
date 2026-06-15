@@ -7,8 +7,8 @@ ML Live Gate + 8-robot 纸面扫描。
 | 用途 | 路径 |
 |------|------|
 | 定时/CLI 扫描 | `orb_scanner.py` → `orb/v2/paper.py` |
-| Live 人工包 | `data/orb/live/` |
-| Gate + 模型回退 | `config/orb/v2/` |
+| Live 人工包 | `orb_live/` |
+| 标的池配置 | `config/orb/v2/symbols.txt` |
 | 训练产物 | `data/orb/ml/` |
 | K 线缓存 | `data/orb/kline/` |
 | 回测报告 | `output/orb/v2/eval/` |

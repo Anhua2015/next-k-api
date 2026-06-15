@@ -72,7 +72,7 @@ def main() -> int:
     model = BreakoutModelBundle.load_production()
     ranker = model.ranker
     if not model.is_ready:
-        print("ML model not ready — check data/orb/live/", flush=True)
+        print("ML model not ready — check orb_live/", flush=True)
         return 1
     last_n = int(args.last_sessions) or int(args.last_days)
     if last_n > 0:

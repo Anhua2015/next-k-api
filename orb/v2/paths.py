@@ -1,10 +1,10 @@
-"""ORB 2.0 路径：Live 人工包 data/orb/live/ + 训练产物 data/orb/ml/。"""
+"""ORB 2.0 路径：实盘参数 orb_live/ + 训练产物 data/orb/ml/。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from orb.ml.live_bundle import resolve_live_gate_path
+from orb.ml.live_bundle import live_gate_json, resolve_live_gate_path
 from orb.ml.paths import CONFIG_V2, PROJECT_ROOT, V2_EVAL, V2_OUTPUT
 from orb.ml.model.manifest import archive_snapshot, write_manifest
 from orb.ml.model.paths import (
@@ -22,7 +22,7 @@ from orb.ml.model.paths import (
 )
 
 OUTPUT_DIR = V2_OUTPUT
-GATE_CONFIG = CONFIG_V2 / "live_gate.json"
+GATE_CONFIG = live_gate_json()
 SYMBOLS_FILE = resolve_symbols_path()
 
 

@@ -103,7 +103,7 @@ class BreakoutModelBundle:
 
     @classmethod
     def load_production(cls) -> "BreakoutModelBundle":
-        """从 env 或 data/orb/live/（再回退 ml/models）加载 production 模型。"""
+        """从 orb_live/ 加载 production 模型。"""
         gbm_raw = (os.getenv("ORB_V2_GBM_PATH") or "").strip()
         prof_raw = (os.getenv("ORB_V2_PROFILES_PATH") or "").strip()
         return cls.load(

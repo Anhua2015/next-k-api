@@ -1,4 +1,4 @@
-"""Live 人工替换包：随 git / 镜像发布的 data/orb/live/。"""
+"""ORB 实盘参数包：Gate + 大模型，统一在 orb_live/ 人工替换。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from typing import Iterable, List
 
 from orb.ml.paths import PROJECT_ROOT
 
-LIVE_BUNDLE_DIR = PROJECT_ROOT / "data" / "orb" / "live"
+# 实盘唯一参数目录（在 data/ 外，不受 DATA_DIR Volume 影响）
+LIVE_BUNDLE_DIR = PROJECT_ROOT / "orb_live"
 
 BUNDLE_FILENAMES = (
     "live_gate.json",
@@ -21,9 +22,15 @@ BUNDLE_FILENAMES = (
     "bundle_manifest.json",
 )
 
+REQUIRED_FILENAMES = (
+    "live_gate.json",
+    "breakout_gbm.pkl",
+    "symbol_breakout_profiles.json",
+)
+
 
 def live_bundle_root() -> Path:
-    """运行时读取目录，默认 data/orb/live（可用 ORB_LIVE_BUNDLE_ROOT 覆盖）。"""
+    """实盘参数根目录（可用 ORB_LIVE_BUNDLE_ROOT 覆盖）。"""
     raw = (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip()
     if raw:
         p = Path(raw)
@@ -31,24 +38,28 @@ def live_bundle_root() -> Path:
     return LIVE_BUNDLE_DIR
 
 
+def _bundle_file(name: str) -> Path:
+    return live_bundle_root() / name
+
+
 def live_gate_json() -> Path:
-    return live_bundle_root() / "live_gate.json"
+    return _bundle_file("live_gate.json")
 
 
 def live_gbm_pkl() -> Path:
-    return live_bundle_root() / "breakout_gbm.pkl"
+    return _bundle_file("breakout_gbm.pkl")
 
 
 def live_gbm_meta() -> Path:
-    return live_bundle_root() / "breakout_gbm.json"
+    return _bundle_file("breakout_gbm.json")
 
 
 def live_profiles_json() -> Path:
-    return live_bundle_root() / "symbol_breakout_profiles.json"
+    return _bundle_file("symbol_breakout_profiles.json")
 
 
 def live_train_report() -> Path:
-    return live_bundle_root() / "breakout_gbm_train_report.json"
+    return _bundle_file("breakout_gbm_train_report.json")
 
 
 def live_manifest() -> Path:
@@ -79,10 +90,7 @@ def resolve_live_gate_path() -> Path:
             p = PROJECT_ROOT / p
         if p.is_file():
             return p
-    return _first_existing(
-        live_gate_json(),
-        PROJECT_ROOT / "config" / "orb" / "v2" / "live_gate.json",
-    )
+    return live_gate_json()
 
 
 def resolve_live_gbm_path() -> Path:
@@ -97,7 +105,7 @@ def resolve_live_gbm_path() -> Path:
 
 
 def resolve_live_gbm_meta_path() -> Path:
-    return _first_existing(live_gbm_meta(), live_bundle_root() / "breakout_gbm.json")
+    return live_gbm_meta()
 
 
 def resolve_live_profiles_path() -> Path:
@@ -137,9 +145,6 @@ def bundle_status(*, relative_paths: bool = False) -> dict:
     prof_p = resolve_profiles_path()
     gate_p = resolve_live_gate_path()
     fmt = _rel_path if relative_paths else str
-    live_gate = live_gate_json()
-    live_gbm = live_gbm_pkl()
-    live_prof = live_profiles_json()
     return {
         "live_bundle_root": fmt(root),
         "gate": fmt(gate_p),
@@ -148,12 +153,6 @@ def bundle_status(*, relative_paths: bool = False) -> dict:
         "gbm_exists": gbm_p.is_file(),
         "profiles": fmt(prof_p),
         "profiles_exists": prof_p.is_file(),
-        "live_gate": fmt(live_gate),
-        "live_gate_exists": live_gate.is_file(),
-        "live_gbm": fmt(live_gbm),
-        "live_gbm_exists": live_gbm.is_file(),
-        "live_profiles": fmt(live_prof),
-        "live_profiles_exists": live_prof.is_file(),
         "using_live_bundle_gate": _is_under_live_bundle(gate_p),
         "using_live_bundle_gbm": _is_under_live_bundle(gbm_p),
         "using_live_bundle_profiles": _is_under_live_bundle(prof_p),
@@ -162,54 +161,30 @@ def bundle_status(*, relative_paths: bool = False) -> dict:
 
 def _artifact_rows(*, relative_paths: bool = True) -> list[dict]:
     """各产物路径与是否存在（供前端 / 运维诊断）。"""
-    from orb.ml.model.paths import GBM_PKL, PROFILES_JSON, resolve_gbm_path, resolve_profiles_path
+    from orb.ml.model.paths import resolve_gbm_path, resolve_profiles_path
 
     fmt = _rel_path if relative_paths else str
-    root = live_bundle_root()
     rows = [
-        ("live_gate.json", live_gate_json(), resolve_live_gate_path()),
-        ("breakout_gbm.pkl", live_gbm_pkl(), resolve_gbm_path()),
-        ("symbol_breakout_profiles.json", live_profiles_json(), resolve_profiles_path()),
+        ("live_gate.json", resolve_live_gate_path()),
+        ("breakout_gbm.pkl", resolve_gbm_path()),
+        ("symbol_breakout_profiles.json", resolve_profiles_path()),
     ]
-    out: list[dict] = []
-    for name, live_p, active_p in rows:
-        out.append(
-            {
-                "name": name,
-                "live_path": fmt(live_p),
-                "live_exists": live_p.is_file(),
-                "active_path": fmt(active_p),
-                "active_exists": active_p.is_file(),
-                "from_live": _is_under_live_bundle(active_p),
-            }
-        )
-    # 回退源（便于排查 Railway 是否缺 data/ 目录）
-    out.append(
+    return [
         {
-            "name": "ml_gbm_fallback",
-            "live_path": fmt(GBM_PKL),
-            "live_exists": GBM_PKL.is_file(),
-            "active_path": fmt(GBM_PKL),
-            "active_exists": GBM_PKL.is_file(),
-            "from_live": False,
+            "name": name,
+            "live_path": fmt(p),
+            "live_exists": p.is_file(),
+            "active_path": fmt(p),
+            "active_exists": p.is_file(),
+            "from_live": _is_under_live_bundle(p),
         }
-    )
-    out.append(
-        {
-            "name": "ml_profiles_fallback",
-            "live_path": fmt(PROFILES_JSON),
-            "live_exists": PROFILES_JSON.is_file(),
-            "active_path": fmt(PROFILES_JSON),
-            "active_exists": PROFILES_JSON.is_file(),
-            "from_live": False,
-        }
-    )
-    return out
+        for name, p in rows
+    ]
 
 
 def ensure_live_bundle_on_startup() -> list[str]:
-    """启动时补全 live 目录（从 config / ml 复制，不覆盖已有文件）。"""
-    if live_gbm_pkl().is_file() and live_gate_json().is_file() and live_profiles_json().is_file():
+    """启动时若 orb_live/ 缺文件，从训练目录 bootstrap。"""
+    if all(_bundle_file(name).is_file() for name in REQUIRED_FILENAMES):
         return []
     return bootstrap_from_legacy(overwrite=False)
 
@@ -225,13 +200,11 @@ def log_live_bundle_startup() -> None:
         "ORB live bundle [%s] root=%s env=%s",
         sev,
         hint.get("root"),
-        (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip() or "(default)",
+        (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip() or "(default orb_live/)",
     )
     for row in hint.get("artifacts") or []:
-        if row["name"].startswith("ml_"):
-            continue
         mark = "OK" if row.get("live_exists") else "MISSING"
-        log.info("  live %-32s %s", row["name"], mark)
+        log.info("  %-36s %s", row["name"], mark)
     if sev != "ok":
         log.warning("ORB live bundle: %s", hint.get("message"))
         for step in hint.get("deploy_steps") or []:
@@ -239,67 +212,43 @@ def log_live_bundle_startup() -> None:
 
 
 def live_bundle_hint() -> dict:
-    """前端 / 运维：Live 包是否就绪、是否从 data/orb/live 加载。"""
+    """前端 / 运维：Live 包是否就绪。"""
     st = bundle_status(relative_paths=True)
     gate_ok = bool(st["gate_exists"])
     gbm_ok = bool(st["gbm_exists"])
     prof_ok = bool(st["profiles_exists"])
     ready = gate_ok and gbm_ok and prof_ok
-    using_gate = bool(st["using_live_bundle_gate"])
-    using_gbm = bool(st["using_live_bundle_gbm"])
-    using_prof = bool(st["using_live_bundle_profiles"])
-    using = using_gate and using_gbm and using_prof
+    using = (
+        bool(st["using_live_bundle_gate"])
+        and bool(st["using_live_bundle_gbm"])
+        and bool(st["using_live_bundle_profiles"])
+    )
 
-    missing_in_live: list[str] = []
-    if not st.get("live_gate_exists"):
-        missing_in_live.append("live_gate.json")
-    if not st.get("live_gbm_exists"):
-        missing_in_live.append("breakout_gbm.pkl")
-    if not st.get("live_profiles_exists"):
-        missing_in_live.append("symbol_breakout_profiles.json")
+    missing: list[str] = []
+    if not gate_ok:
+        missing.append("live_gate.json")
+    if not gbm_ok:
+        missing.append("breakout_gbm.pkl")
+    if not prof_ok:
+        missing.append("symbol_breakout_profiles.json")
 
     if not ready:
-        missing = []
-        if not gate_ok:
-            missing.append("Gate")
-        if not gbm_ok:
-            missing.append("GBM")
-        if not prof_ok:
-            missing.append("Profiles")
         message = (
-            f"Live 包不完整（缺 {' / '.join(missing)}）。"
-            "请将 data/orb/live/ 随 API 镜像一起部署（刷新页面无效）。"
+            f"orb_live/ 不完整（缺 {', '.join(missing)}）。"
+            "请将 Gate + 模型文件放入 orb_live/ 后 git 提交并部署。"
         )
         severity = "block"
         deploy_steps = [
-            "确认 git 已提交 data/orb/live/breakout_gbm.pkl 等文件",
+            "将 live_gate.json / breakout_gbm.pkl / symbol_breakout_profiles.json 放入 orb_live/",
+            "确认 git 已提交 orb_live/breakout_gbm.pkl",
             "在 Railway 重新 Deploy next-k-api 服务",
-            "检查 ORB_LIVE_BUNDLE_ROOT 未指向空目录（留空即可）",
-            "本地可运行: python tools/orb/bootstrap_live_bundle.py",
         ]
     elif not using:
-        parts: list[str] = []
-        if not using_gate:
-            parts.append(f"Gate → {st['gate']}")
-        if not using_gbm:
-            parts.append(f"GBM → {st['gbm']}")
-        if not using_prof:
-            parts.append(f"Profiles → {st['profiles']}")
-        if missing_in_live:
-            message = (
-                f"data/orb/live 缺 {', '.join(missing_in_live)}，当前从其他路径加载。"
-                "建议补全 Live 包并重新 Deploy。"
-            )
-            deploy_steps = [
-                "将 Gate/GBM/Profiles 放入 data/orb/live/",
-                "git commit 后重新 Deploy API",
-            ]
-        else:
-            message = "部分产物未从 data/orb/live 加载：" + " · ".join(parts)
-            deploy_steps = ["确认 data/orb/live/ 含完整文件后重新 Deploy"]
+        message = f"参数未从 orb_live/ 加载（当前 root={st['live_bundle_root']}）"
         severity = "warn"
+        deploy_steps = ["检查 ORB_LIVE_BUNDLE_ROOT 是否指向 orb_live/"]
     else:
-        message = f"Live 包就绪 · {st['live_bundle_root']} · 随 git 部署更新"
+        message = f"orb_live/ 就绪 · 直接覆盖文件即可更新，下次 scan 自动生效"
         severity = "ok"
         deploy_steps = []
 
@@ -307,6 +256,7 @@ def live_bundle_hint() -> dict:
         "ok": True,
         "ready": ready,
         "using_live_bundle": using,
+        "bundle_dir": "orb_live",
         "root": st["live_bundle_root"],
         "active_gate": st["gate"],
         "active_gbm": st["gbm"],
@@ -314,13 +264,10 @@ def live_bundle_hint() -> dict:
         "gate_exists": gate_ok,
         "gbm_exists": gbm_ok,
         "profiles_exists": prof_ok,
-        "live_gate_exists": bool(st.get("live_gate_exists")),
-        "live_gbm_exists": bool(st.get("live_gbm_exists")),
-        "live_profiles_exists": bool(st.get("live_profiles_exists")),
-        "missing_in_live_bundle": missing_in_live,
-        "using_live_bundle_gate": using_gate,
-        "using_live_bundle_gbm": using_gbm,
-        "using_live_bundle_profiles": using_prof,
+        "missing_in_live_bundle": missing,
+        "using_live_bundle_gate": bool(st["using_live_bundle_gate"]),
+        "using_live_bundle_gbm": bool(st["using_live_bundle_gbm"]),
+        "using_live_bundle_profiles": bool(st["using_live_bundle_profiles"]),
         "artifacts": _artifact_rows(relative_paths=True),
         "orb_live_bundle_root_env": (os.getenv("ORB_LIVE_BUNDLE_ROOT") or "").strip(),
         "deploy_steps": deploy_steps,
@@ -344,15 +291,20 @@ def write_bundle_manifest(*, note: str = "", target: Path | None = None) -> Path
 
 
 def bootstrap_from_legacy(*, overwrite: bool = False) -> List[str]:
-    """从 legacy 路径复制到 data/orb/live/（提交 git 后随部署发布）。"""
+    """从 data/orb/ml/models/ 训练产物复制到 orb_live/（首次初始化用）。"""
     from orb.ml.model.paths import GBM_META, GBM_PKL, GBM_TRAIN_REPORT, PROFILES_JSON
-    from orb.ml.paths import CONFIG_V2
+
+    return sync_live_bundle_from_ml_models(overwrite=overwrite)
+
+
+def sync_live_bundle_from_ml_models(*, overwrite: bool = True) -> List[str]:
+    """将 data/orb/ml/models/ 同步到 orb_live/（训练 promote 后调用）。"""
+    from orb.ml.model.paths import GBM_META, GBM_PKL, GBM_TRAIN_REPORT, PROFILES_JSON
 
     dst_root = live_bundle_root()
     dst_root.mkdir(parents=True, exist_ok=True)
     copied: List[str] = []
     pairs: Iterable[tuple[Path, Path]] = (
-        (CONFIG_V2 / "live_gate.json", dst_root / "live_gate.json"),
         (GBM_PKL, dst_root / "breakout_gbm.pkl"),
         (GBM_META, dst_root / "breakout_gbm.json"),
         (PROFILES_JSON, dst_root / "symbol_breakout_profiles.json"),
@@ -361,6 +313,10 @@ def bootstrap_from_legacy(*, overwrite: bool = False) -> List[str]:
     for src, dst in pairs:
         if src.is_file() and (overwrite or not dst.is_file()):
             shutil.copy2(src, dst)
-            copied.append(str(dst.relative_to(PROJECT_ROOT)))
-    write_bundle_manifest(note="bootstrapped from legacy paths", target=dst_root)
+            try:
+                copied.append(str(dst.relative_to(PROJECT_ROOT)))
+            except ValueError:
+                copied.append(str(dst))
+    if copied:
+        write_bundle_manifest(note="synced from data/orb/ml/models", target=dst_root)
     return copied

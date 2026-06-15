@@ -265,13 +265,17 @@ def run_training_pipeline(
             clear_staging()
         elif not use_auto:
             from orb.ml.model.paths import GBM_META, GBM_PKL, PROFILES_JSON
+            from orb.ml.live_bundle import sync_live_bundle_from_ml_models
 
             shutil.copy2(staging_gbm, GBM_PKL)
             shutil.copy2(staging_meta, GBM_META)
             shutil.copy2(staging_report, GBM_TRAIN_REPORT)
             shutil.copy2(staging_profiles, PROFILES_JSON)
             shutil.copy2(staging_samples, SAMPLES_JSON)
+            live_synced = sync_live_bundle_from_ml_models(overwrite=True)
             report["promoted"] = "direct_overwrite"
+            if live_synced:
+                report["orb_live_sync"] = live_synced
 
     promoted_ok = isinstance(report.get("promoted"), dict) or report.get("promoted") == "direct_overwrite"
     if not skip_archive and promoted_ok:
