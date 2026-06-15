@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from orb.ml.samples import split_holdout_by_date  # noqa: E402
+from orb.ml.model.paths import ML_MODELS_DIR, ensure_model_dirs
 from orb.ml.features import (  # noqa: E402
     LABEL_MODES,
     RANK_FEATURE_NAMES,
@@ -97,7 +98,8 @@ def main() -> int:
         results[target] = entry
         print(f"[{target}] saved {out}")
 
-    report = path.with_name("orb_shared_breakout_train_report.json")
+    ensure_model_dirs()
+    report = ML_MODELS_DIR / "orb_shared_breakout_train_report.json"
     report.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(results, indent=2, ensure_ascii=False))
     return 0

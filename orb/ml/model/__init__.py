@@ -10,8 +10,10 @@ Example::
     p = bundle.predict_true(feat, symbol="TSLAUSDT")
 """
 
-from orb.ml.model.bundle import BreakoutModelBundle
-from orb.ml.model.manifest import archive_snapshot, write_manifest
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from orb.ml.model.paths import (
     ARCHIVE_DIR,
     ARTIFACT_DIR,
@@ -39,7 +41,19 @@ from orb.ml.model.paths import (
     resolve_symbols_path,
     resolve_train_report_path,
 )
-from orb.ml.model.train import bootstrap_from_legacy, run_training_pipeline, TrainingValidationError
+
+if TYPE_CHECKING:
+    from orb.ml.model.bundle import BreakoutModelBundle
+    from orb.ml.model.train import TrainingValidationError
+
+_LAZY = {
+    "BreakoutModelBundle": ("orb.ml.model.bundle", "BreakoutModelBundle"),
+    "archive_snapshot": ("orb.ml.model.manifest", "archive_snapshot"),
+    "write_manifest": ("orb.ml.model.manifest", "write_manifest"),
+    "bootstrap_from_legacy": ("orb.ml.model.train", "bootstrap_from_legacy"),
+    "run_training_pipeline": ("orb.ml.model.train", "run_training_pipeline"),
+    "TrainingValidationError": ("orb.ml.model.train", "TrainingValidationError"),
+}
 
 __all__ = [
     "BreakoutModelBundle",
@@ -58,6 +72,7 @@ __all__ = [
     "SAMPLES_JSON",
     "SYMBOLS_UNIVERSE",
     "SYMBOLS_UNIVERSE_NO_COIN",
+    "TrainingValidationError",
     "archive_snapshot",
     "bootstrap_from_legacy",
     "ensure_model_dirs",
@@ -71,6 +86,14 @@ __all__ = [
     "resolve_symbols_path",
     "resolve_train_report_path",
     "run_training_pipeline",
-    "TrainingValidationError",
     "write_manifest",
 ]
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        mod, attr = _LAZY[name]
+        import importlib
+
+        return getattr(importlib.import_module(mod), attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

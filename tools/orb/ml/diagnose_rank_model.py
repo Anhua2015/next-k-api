@@ -10,10 +10,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 
+from orb.ml.paths import V2_EVAL, default_shared_fake_model_path
+
 
 def main() -> None:
-    data = json.loads((ROOT / "output" / "rank_days_batch.json").read_text(encoding="utf-8"))
-    vocab = set(json.loads((ROOT / "output" / "orb_shared_fake_breakout_model.json").read_text())["symbol_vocab"])
+    batch_path = V2_EVAL / "rank_days_batch.json"
+    if not batch_path.is_file():
+        batch_path = ROOT / "output" / "rank_days_batch.json"
+    data = json.loads(batch_path.read_text(encoding="utf-8"))
+    vocab = set(json.loads(default_shared_fake_model_path().read_text())["symbol_vocab"])
 
     rows = []
     for d in data["days"]:

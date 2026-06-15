@@ -15,9 +15,13 @@ from orb.data.kline_fetch import fetch_universe_klines
 from orb.ml.model.auto_config import MlAutoConfig
 from orb.ml.model.manifest import archive_snapshot, write_manifest
 from orb.ml.model.paths import (
+    GBM_META,
+    GBM_PKL,
     GBM_TRAIN_REPORT,
+    LOGISTIC_FAKE_JSON,
+    LOGISTIC_TRUE_JSON,
     MANIFEST_JSON,
-    OLD_V2_ARTIFACT,
+    PROFILES_JSON,
     SAMPLES_JSON,
     SYMBOLS_UNIVERSE,
     SYMBOLS_UNIVERSE_NO_COIN,
@@ -31,7 +35,10 @@ from orb.ml.model.paths import (
 )
 from orb.ml.model.promote import clear_staging, ensure_staging_dirs, promote_staging_to_production
 from orb.ml.model.validate import validate_staging_artifacts
-from orb.ml.paths import CONFIG_V2, PROJECT_ROOT, V1_OUTPUT
+from orb.ml.paths import CONFIG_V2, PROJECT_ROOT
+
+_LEGACY_OUTPUT = PROJECT_ROOT / "output"
+_LEGACY_V2 = _LEGACY_OUTPUT / "orb" / "v2"
 
 _TOOLS_ML = PROJECT_ROOT / "tools" / "orb" / "ml"
 
@@ -52,33 +59,23 @@ def _run(cmd: list[str], *, label: str) -> None:
 
 def bootstrap_from_legacy() -> Dict[str, Any]:
     """首次部署：从旧 output/config 复制到 data/orb/ml/。"""
-    from orb.ml.model.paths import (
-        GBM_META,
-        GBM_PKL,
-        LOGISTIC_TRUE_JSON,
-        MANIFEST_JSON,
-        PROFILES_JSON,
-    )
-
     ensure_model_dirs()
     copied = []
     pairs = [
         (CONFIG_V2 / "symbols.txt", SYMBOLS_UNIVERSE),
         (CONFIG_V2 / "symbols_no_coin.txt", SYMBOLS_UNIVERSE_NO_COIN),
-        (OLD_V2_ARTIFACT / "breakout_samples.json", SAMPLES_JSON),
-        (OLD_V2_ARTIFACT / "breakout_gbm.pkl", GBM_PKL),
-        (OLD_V2_ARTIFACT / "breakout_gbm.json", GBM_META),
-        (OLD_V2_ARTIFACT / "symbol_breakout_profiles.json", PROFILES_JSON),
-        (OLD_V2_ARTIFACT / "model_manifest.json", MANIFEST_JSON),
-        (OLD_V2_ARTIFACT / "breakout_gbm_train_report.json", GBM_TRAIN_REPORT),
-        (PROJECT_ROOT / "output" / "orb_shared_true_breakout_model.json", LOGISTIC_TRUE_JSON),
-        (V1_OUTPUT / "breakout_samples.json", SAMPLES_JSON),
-        (V1_OUTPUT / "breakout_gbm.pkl", GBM_PKL),
-        (V1_OUTPUT / "breakout_gbm.json", GBM_META),
-        (V1_OUTPUT / "symbol_breakout_profiles.json", PROFILES_JSON),
-        (PROJECT_ROOT / "output" / "orb_shared_breakout_samples.json", SAMPLES_JSON),
-        (PROJECT_ROOT / "output" / "orb_shared_breakout_gbm.pkl", GBM_PKL),
-        (PROJECT_ROOT / "output" / "symbol_breakout_profiles.json", PROFILES_JSON),
+        (_LEGACY_V2 / "breakout_samples.json", SAMPLES_JSON),
+        (_LEGACY_V2 / "breakout_gbm.pkl", GBM_PKL),
+        (_LEGACY_V2 / "breakout_gbm.json", GBM_META),
+        (_LEGACY_V2 / "symbol_breakout_profiles.json", PROFILES_JSON),
+        (_LEGACY_V2 / "model_manifest.json", MANIFEST_JSON),
+        (_LEGACY_V2 / "breakout_gbm_train_report.json", GBM_TRAIN_REPORT),
+        (_LEGACY_OUTPUT / "orb_shared_true_breakout_model.json", LOGISTIC_TRUE_JSON),
+        (_LEGACY_OUTPUT / "orb_true_breakout_model.json", LOGISTIC_TRUE_JSON),
+        (_LEGACY_OUTPUT / "orb_shared_fake_breakout_model.json", LOGISTIC_FAKE_JSON),
+        (_LEGACY_OUTPUT / "orb_shared_breakout_samples.json", SAMPLES_JSON),
+        (_LEGACY_OUTPUT / "orb_shared_breakout_gbm.pkl", GBM_PKL),
+        (_LEGACY_OUTPUT / "symbol_breakout_profiles.json", PROFILES_JSON),
     ]
     for src, dst in pairs:
         if src.is_file() and not dst.is_file():

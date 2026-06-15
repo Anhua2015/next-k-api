@@ -23,6 +23,7 @@ from tools.rank_day_breakouts import (  # noqa: E402
     _ml_cfg,
     evaluate_day_pick6,
 )
+from orb.ml.paths import V2_EVAL  # noqa: E402
 from orb.ml.samples import parse_symbol_list  # noqa: E402
 from orb.ml.ranker import BreakoutRanker  # noqa: E402
 
@@ -82,7 +83,7 @@ def main() -> int:
     ap.add_argument("--early-min-sync", type=int, default=EARLY_TRAP_MIN_SYNC)
     ap.add_argument("--early-max-sync", type=int, default=EARLY_TRAP_MAX_SYNC)
     ap.add_argument("--day-gate-min-est", type=float, default=DAY_GATE_MIN_EST)
-    ap.add_argument("--json-out", default=str(ROOT / "output" / "rank_days_batch.json"))
+    ap.add_argument("--json-out", default=str(V2_EVAL / "rank_days_batch.json"))
     args = ap.parse_args()
 
     dates = [d.strip() for d in args.dates.split(",") if d.strip()]

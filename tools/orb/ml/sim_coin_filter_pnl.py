@@ -10,6 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from orb.ml.paths import (
+    default_shared_fake_model_path,
+    default_shared_samples_path,
+)
 from orb.ml.samples import split_holdout_by_date
 from orb.ml.features import BreakoutModel, score_rows
 
@@ -42,12 +46,19 @@ def report(subset: list[dict], fake_m: BreakoutModel, label: str) -> None:
 
 
 def main() -> int:
-    rows = json.loads((ROOT / "output" / "orb_shared_breakout_samples.json").read_text(encoding="utf-8"))["rows"]
+    samples_path = default_shared_samples_path()
+    fake_path = default_shared_fake_model_path()
+    if not samples_path.is_file():
+        print(f"Missing samples: {samples_path}")
+        return 1
+    if not fake_path.is_file():
+        print(f"Missing fake model: {fake_path}")
+        print("Run bootstrap_from_legacy() or tools/orb/ml/train_shared_breakout_model.py")
+        return 1
+    rows = json.loads(samples_path.read_text(encoding="utf-8"))["rows"]
     coin = [r for r in rows if r.get("symbol") == "COINUSDT"]
     train, holdout = split_holdout_by_date(coin, holdout_days=10)
-    fake_m = BreakoutModel.from_dict(
-        json.loads((ROOT / "output" / "orb_shared_fake_breakout_model.json").read_text(encoding="utf-8"))
-    )
+    fake_m = BreakoutModel.from_dict(json.loads(fake_path.read_text(encoding="utf-8")))
 
     print("Shared model | macro=off | same config as training\n")
     report(coin, fake_m, "COIN full 180d")

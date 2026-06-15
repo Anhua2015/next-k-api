@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional
 
 from orb.ml.features import FEATURE_NAMES, label_is_true_breakout
 
-from orb.ml.paths import V1_OUTPUT, default_profiles_path
+from orb.ml.model.paths import PROFILES_JSON, resolve_profiles_path
 
-DEFAULT_PROFILES_PATH = V1_OUTPUT / "symbol_breakout_profiles.json"
+DEFAULT_PROFILES_PATH = PROFILES_JSON
 
 PRIOR_MIN_SAMPLES = 15
 PRIOR_FULL_SAMPLES = 60

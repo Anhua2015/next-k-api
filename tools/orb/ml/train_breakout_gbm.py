@@ -13,7 +13,8 @@ sys.path.insert(0, str(ROOT))
 
 from orb.ml.gbm import DEFAULT_GBM_META, DEFAULT_GBM_PATH, rows_to_xy_gbm, save_gbm, score_gbm_holdout, train_gbm  # noqa: E402
 from orb.ml.samples import split_holdout_by_date  # noqa: E402
-from orb.ml.paths import DEFAULT_GBM_TRAIN_REPORT, default_shared_samples_path, ensure_v1_dirs  # noqa: E402
+from orb.ml.paths import default_gbm_train_report_path, default_shared_samples_path  # noqa: E402
+from orb.ml.model.paths import ensure_model_dirs  # noqa: E402
 
 
 def main() -> int:
@@ -23,10 +24,10 @@ def main() -> int:
     ap.add_argument("--label-mode", default="hold_30m", choices=("hold_30m", "true_breakout", "quality"))
     ap.add_argument("--out", default=str(DEFAULT_GBM_PATH))
     ap.add_argument("--meta-out", default=str(DEFAULT_GBM_META))
-    ap.add_argument("--report-out", default="", help="训练报告 JSON（默认 v1 output 路径）")
+    ap.add_argument("--report-out", default="", help="训练报告 JSON（默认 data/orb/ml/models/）")
     args = ap.parse_args()
 
-    ensure_v1_dirs()
+    ensure_model_dirs()
     data = json.loads(Path(args.samples).read_text(encoding="utf-8"))
     rows = list(data.get("rows") or [])
     if args.label_mode == "hold_30m" and not any("hold30_true" in r for r in rows):
@@ -48,7 +49,7 @@ def main() -> int:
     }
     if test_rows:
         report.update(score_gbm_holdout(model, test_rows))
-    rep_path = Path(args.report_out) if args.report_out.strip() else DEFAULT_GBM_TRAIN_REPORT
+    rep_path = Path(args.report_out) if args.report_out.strip() else default_gbm_train_report_path()
     rep_path.parent.mkdir(parents=True, exist_ok=True)
     rep_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(report, indent=2, ensure_ascii=False))

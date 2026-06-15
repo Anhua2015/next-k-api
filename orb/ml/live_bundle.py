@@ -131,12 +131,11 @@ def _is_under_live_bundle(p: Path) -> bool:
 def bundle_status(*, relative_paths: bool = False) -> dict:
     ensure_live_bundle_dir()
     from orb.ml.model.paths import resolve_gbm_path, resolve_profiles_path
-    from orb.v2.paths import resolve_gate_config_path
 
     root = live_bundle_root()
     gbm_p = resolve_gbm_path()
     prof_p = resolve_profiles_path()
-    gate_p = resolve_gate_config_path()
+    gate_p = resolve_live_gate_path()
     fmt = _rel_path if relative_paths else str
     live_gate = live_gate_json()
     live_gbm = live_gbm_pkl()

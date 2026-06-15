@@ -14,10 +14,10 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 from orb.ml.features import RANK_FEATURE_NAMES, rank_features
 
-from orb.ml.paths import V1_OUTPUT, default_gbm_path
+from orb.ml.model.paths import GBM_META, GBM_PKL
 
-DEFAULT_GBM_PATH = V1_OUTPUT / "breakout_gbm.pkl"
-DEFAULT_GBM_META = V1_OUTPUT / "breakout_gbm.json"
+DEFAULT_GBM_PATH = GBM_PKL
+DEFAULT_GBM_META = GBM_META
 
 
 @dataclass
@@ -136,7 +136,12 @@ def save_gbm(model: BreakoutGBM, path: Optional[Path] = None, meta_path: Optiona
 
 
 def load_gbm(path: Optional[Path] = None) -> Optional[BreakoutGBM]:
-    pkl = path or default_gbm_path()
+    if path is None:
+        from orb.ml.model.paths import resolve_gbm_path
+
+        pkl = resolve_gbm_path()
+    else:
+        pkl = path
     if not pkl.is_file():
         return None
     try:

@@ -1,23 +1,11 @@
-"""ORB 突破排序大模型 — 产物路径（data/orb/ml，非 output 回测目录）。"""
+"""ORB 突破排序大模型 — 产物路径（data/orb/live + data/orb/ml + config）。"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
-from orb.ml.paths import (
-    CONFIG_V2,
-    DEFAULT_GBM,
-    DEFAULT_GBM_META,
-    DEFAULT_GBM_TRAIN_REPORT,
-    DEFAULT_PROFILES,
-    DEFAULT_SAMPLES,
-    LEGACY_OUTPUT,
-    LEGACY_V2_OUTPUT,
-    PROJECT_ROOT,
-    V1_OUTPUT,
-    V2_OUTPUT,
-)
+from orb.ml.paths import CONFIG_V2, PROJECT_ROOT
 from orb.ml.live_bundle import (
     live_gbm_meta,
     live_gbm_pkl,
@@ -34,7 +22,6 @@ ARCHIVE_DIR = ML_DATA_ROOT / "archive"
 STAGING_MODELS_DIR = ML_DATA_ROOT / "staging" / "models"
 STAGING_SAMPLES_DIR = ML_DATA_ROOT / "staging" / "samples"
 
-# 规范路径（训练写入 / Live 加载默认）
 SYMBOLS_UNIVERSE = ML_SYMBOLS_DIR / "universe.txt"
 SYMBOLS_UNIVERSE_NO_COIN = ML_SYMBOLS_DIR / "universe_no_coin.txt"
 
@@ -55,15 +42,7 @@ STAGING_GBM_TRAIN_REPORT = STAGING_MODELS_DIR / "breakout_gbm_train_report.json"
 STAGING_PROFILES_JSON = STAGING_MODELS_DIR / "symbol_breakout_profiles.json"
 STAGING_SAMPLES_JSON = STAGING_SAMPLES_DIR / "breakout_samples.json"
 
-# 兼容旧 layout
-OLD_V2_ARTIFACT = V2_OUTPUT
 TRAIN_SYMBOLS_FILE = SYMBOLS_UNIVERSE
-LEGACY_GBM = LEGACY_OUTPUT / "orb_shared_breakout_gbm.pkl"
-LEGACY_PROFILES = LEGACY_OUTPUT / "symbol_breakout_profiles.json"
-LEGACY_SAMPLES = LEGACY_OUTPUT / "orb_shared_breakout_samples.json"
-LEGACY_LOGISTIC_TRUE = LEGACY_OUTPUT / "orb_shared_true_breakout_model.json"
-
-# 向后兼容别名
 ARTIFACT_DIR = ML_MODELS_DIR
 
 
@@ -135,13 +114,11 @@ def resolve_symbols_no_coin_path() -> Path:
 
 
 def resolve_gbm_path() -> Path:
+    """Live 包 → data/orb/ml/models → staging（不读 output/）。"""
     return _first_existing(
         live_gbm_pkl(),
         GBM_PKL,
-        OLD_V2_ARTIFACT / "breakout_gbm.pkl",
-        LEGACY_V2_OUTPUT / "breakout_gbm.pkl",
-        DEFAULT_GBM,
-        LEGACY_GBM,
+        STAGING_GBM_PKL,
     )
 
 
@@ -149,9 +126,7 @@ def resolve_gbm_meta_path() -> Path:
     return _first_existing(
         live_gbm_meta(),
         GBM_META,
-        OLD_V2_ARTIFACT / "breakout_gbm.json",
-        LEGACY_V2_OUTPUT / "breakout_gbm.json",
-        DEFAULT_GBM_META,
+        STAGING_GBM_META,
     )
 
 
@@ -159,19 +134,14 @@ def resolve_profiles_path() -> Path:
     return _first_existing(
         live_profiles_json(),
         PROFILES_JSON,
-        OLD_V2_ARTIFACT / "symbol_breakout_profiles.json",
-        LEGACY_V2_OUTPUT / "symbol_breakout_profiles.json",
-        DEFAULT_PROFILES,
-        LEGACY_PROFILES,
+        STAGING_PROFILES_JSON,
     )
 
 
 def resolve_samples_path() -> Path:
     return _first_existing(
         SAMPLES_JSON,
-        OLD_V2_ARTIFACT / "breakout_samples.json",
-        DEFAULT_SAMPLES,
-        LEGACY_SAMPLES,
+        STAGING_SAMPLES_JSON,
     )
 
 
@@ -179,18 +149,12 @@ def resolve_train_report_path() -> Path:
     return _first_existing(
         live_train_report(),
         GBM_TRAIN_REPORT,
-        OLD_V2_ARTIFACT / "breakout_gbm_train_report.json",
-        DEFAULT_GBM_TRAIN_REPORT,
+        STAGING_GBM_TRAIN_REPORT,
     )
 
 
 def resolve_logistic_true_path() -> Path:
-    return _first_existing(
-        LOGISTIC_TRUE_JSON,
-        V1_OUTPUT / "true_breakout_model.json",
-        LEGACY_LOGISTIC_TRUE,
-        LEGACY_OUTPUT / "orb_true_breakout_model.json",
-    )
+    return LOGISTIC_TRUE_JSON
 
 
 def layout_status() -> dict:

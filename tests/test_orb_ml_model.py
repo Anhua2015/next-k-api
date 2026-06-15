@@ -36,6 +36,20 @@ def test_model_paths_resolve():
     assert str(resolve_profiles_path()).endswith(".json")
 
 
+def test_runtime_paths_not_under_output():
+    from orb.ml.live_bundle import resolve_live_gate_path
+    from orb.ml.model.paths import resolve_gbm_path, resolve_profiles_path, resolve_samples_path
+
+    for p in (
+        resolve_gbm_path(),
+        resolve_profiles_path(),
+        resolve_samples_path(),
+        resolve_live_gate_path(),
+    ):
+        norm = str(p).replace("\\", "/").lower()
+        assert "/output/" not in norm, f"runtime path must not be under output/: {p}"
+
+
 def test_model_layout_under_data_orb_ml():
     from orb.ml.model import ML_DATA_ROOT, layout_status
 

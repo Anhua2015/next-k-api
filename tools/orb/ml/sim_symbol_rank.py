@@ -11,16 +11,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
+from orb.ml.paths import (
+    default_shared_fake_model_path,
+    default_shared_samples_path,
+    default_shared_true_model_path,
+)
 from orb.ml.features import BreakoutModel, score_rows
 
 
 def main() -> int:
-    rows = json.loads((ROOT / "output" / "orb_shared_breakout_samples.json").read_text(encoding="utf-8"))["rows"]
+    rows = json.loads(default_shared_samples_path().read_text(encoding="utf-8"))["rows"]
     fake_m = BreakoutModel.from_dict(
-        json.loads((ROOT / "output" / "orb_shared_fake_breakout_model.json").read_text(encoding="utf-8"))
+        json.loads(default_shared_fake_model_path().read_text(encoding="utf-8"))
     )
     true_m = BreakoutModel.from_dict(
-        json.loads((ROOT / "output" / "orb_shared_true_breakout_model.json").read_text(encoding="utf-8"))
+        json.loads(default_shared_true_model_path().read_text(encoding="utf-8"))
     )
 
     buckets: dict[tuple[str, int], list[dict]] = defaultdict(list)

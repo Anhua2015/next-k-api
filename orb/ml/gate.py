@@ -12,15 +12,11 @@ from orb.ml.ranker import BreakoutRanker
 from orb.ml.features import extract_features, label_is_true_breakout
 from orb.ml.profiles import load_profiles
 
-from orb.ml.paths import CONFIG_V1, CONFIG_V2, PROJECT_ROOT
+from orb.ml.live_bundle import resolve_live_gate_path
 
-DEFAULT_GATE_CONFIG = (
-    CONFIG_V2 / "live_gate.json"
-    if (CONFIG_V2 / "live_gate.json").is_file()
-    else CONFIG_V1 / "live_gate.json"
-    if (CONFIG_V1 / "live_gate.json").is_file()
-    else PROJECT_ROOT / "config" / "orb_live_gate.json"
-)
+
+def default_gate_config_path() -> Path:
+    return resolve_live_gate_path()
 
 
 @dataclass
@@ -41,7 +37,7 @@ class LiveGateConfig:
 
     @classmethod
     def from_json(cls, path: Optional[Path] = None) -> "LiveGateConfig":
-        p = path or DEFAULT_GATE_CONFIG
+        p = path or default_gate_config_path()
         if not p.is_file():
             return cls()
         d = json.loads(p.read_text(encoding="utf-8"))
