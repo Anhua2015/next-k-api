@@ -353,11 +353,13 @@ async def post_accumulation_oi_radar_refresh():
     def _work():
         try:
             _oi_radar_refresh_cooldown.mark_used()
-            from accumulation_radar import init_db, run_oi_hourly_radar
+            from accumulation_radar import init_db, run_oi_hourly_radar, _persist_oi_radar_snapshot
 
             conn = init_db()
             try:
-                run_oi_hourly_radar(conn, notify=False)
+                result = run_oi_hourly_radar(conn, notify=False)
+                if not result.get("ok"):
+                    _persist_oi_radar_snapshot(result)
             finally:
                 conn.close()
         except Exception:

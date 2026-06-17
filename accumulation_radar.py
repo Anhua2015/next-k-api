@@ -389,9 +389,8 @@ def enrich_liquidity_spring_batch(coin_data: Dict[str, Dict[str, Any]], pool_map
 
 
 def _persist_oi_radar_snapshot(payload: Dict[str, Any]) -> None:
-    """供 GET /api/accumulation/oi-radar 读盘；定时任务与后台 refresh 写入同一路径。"""
-    if not payload.get("ok"):
-        return
+    """供 GET /api/accumulation/oi-radar 读盘；定时任务与后台 refresh 写入同一路径。
+    也允许写入 error payload（ok=False），以便前端轮询提前获知失败原因。"""
     tmp = OI_RADAR_SNAPSHOT_PATH.with_suffix(".json.tmp")
     try:
         tmp.write_text(
