@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from orb.ml.ranker import BreakoutRanker
+from orb.core.breakout_score import passes_breakout_score
 from orb.ml.features import extract_features, label_is_true_breakout
 from orb.ml.profiles import load_profiles
 
@@ -34,6 +35,7 @@ class LiveGateConfig:
     day_abort_enabled: bool = False
     early_trap_bypass_min_p: float = 0.0
     robot_reuse_after_exit: bool = False
+    min_breakout_score: float = 0.0
 
     @classmethod
     def from_json(cls, path: Optional[Path] = None) -> "LiveGateConfig":
@@ -55,6 +57,7 @@ class LiveGateConfig:
             day_abort_enabled=bool(d.get("day_abort_enabled", False)),
             early_trap_bypass_min_p=float(d.get("early_trap_bypass_min_p", 0) or 0),
             robot_reuse_after_exit=bool(d.get("robot_reuse_after_exit", False)),
+            min_breakout_score=float(d.get("min_breakout_score", 0) or 0),
         )
 
 
@@ -100,6 +103,7 @@ def should_open(
     state: LiveGateDayState,
     gate: LiveGateConfig,
     profiles: Optional[Dict[str, Any]] = None,
+    breakout_score: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """突破当下调用：是否允许开这一单。"""
     if state.day_aborted:
@@ -121,6 +125,12 @@ def should_open(
     min_p = _effective_min_p(symbol, gate, profiles)
     if float(p_true) < min_p:
         return False, f"p_true<{min_p:.2f}"
+
+    min_bs = float(gate.min_breakout_score or 0)
+    if min_bs > 0:
+        ok_bs, reason_bs = passes_breakout_score(breakout_score, min_score=min_bs)
+        if not ok_bs:
+            return False, reason_bs
 
     return True, "open_ok"
 
@@ -152,6 +162,7 @@ def evaluate_open_decision(
     trade_row: Optional[Dict[str, Any]] = None,
     p_true: Optional[float] = None,
     p_fake: Optional[float] = None,
+    breakout_score: Optional[float] = None,
 ) -> Dict[str, Any]:
     """突破当下：打分 + 决策（供回测与将来 paper 共用）。"""
     p_true_v = float(p_true if p_true is not None else ranker.predict_true(feat, symbol=symbol))
@@ -165,6 +176,7 @@ def evaluate_open_decision(
         state=state,
         gate=gate,
         profiles=ranker.profiles,
+        breakout_score=breakout_score,
     )
     row: Dict[str, Any] = {
         "symbol": symbol,
@@ -175,6 +187,8 @@ def evaluate_open_decision(
         "opened": ok,
         "reason": reason,
     }
+    if breakout_score is not None:
+        row["breakout_score"] = round(float(breakout_score), 2)
     if trade_row:
         row.update(
             {

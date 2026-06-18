@@ -76,6 +76,7 @@ def _scan_params_v2(
             "orb_version": 2,
             "ml_ranker": model.kind,
             "gate_min_p_true": gate.min_p_true,
+            "gate_min_breakout_score": gate.min_breakout_score,
             "gate_max_opens": gate.max_opens_per_day,
             "gate_shadow": shadow,
             "sizing": "eight_robots" if use_robots else "per_symbol",
@@ -84,6 +85,32 @@ def _scan_params_v2(
         }
     )
     return base
+
+
+def _paper_breakout_score(
+    sym: str,
+    sig: OrbSignal,
+    cfg: OrbConfig,
+    *,
+    session_day: str,
+    now_ms: int,
+    df5_cache: Dict[str, Any],
+) -> Optional[float]:
+    from orb.core.breakout_score import breakout_kline_range_ms, breakout_score_for_signal
+    from orb.core.kline_cache import load_klines
+
+    if sym not in df5_cache:
+        fetch_start, end_ms = breakout_kline_range_ms(session_day, cfg)
+        df5_cache[sym] = load_klines(
+            sym,
+            cfg.signal_interval,
+            start_ms=fetch_start,
+            end_ms=end_ms,
+        )
+    df5 = df5_cache.get(sym)
+    if df5 is None or getattr(df5, "empty", True):
+        return None
+    return round(breakout_score_for_signal(sig, df5, cfg, now_ms=now_ms), 2)
 
 
 def _load_model(v2: OrbV2Config) -> Optional[BreakoutModelBundle]:
@@ -167,6 +194,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
         "sizing": "eight_robots" if use_robots else "per_symbol",
         "gate": {
             "min_p_true": gate.min_p_true,
+            "min_breakout_score": gate.min_breakout_score,
             "max_opens_per_day": gate.max_opens_per_day,
             "robot_reuse_after_exit": gate.robot_reuse_after_exit,
             "day_abort_enabled": gate.day_abort_enabled,
@@ -316,12 +344,25 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     scored.sort(key=lambda x: x[0], reverse=True)
 
     gate_skips = 0
+    need_breakout_score = float(gate.min_breakout_score or 0) > 0
+    df5_cache: Dict[str, Any] = {}
     for p_true, sym, sig, sync_n, feat in scored:
         if use_robots:
             if len(busy_robot_ids(cur)) >= gate.max_opens_per_day:
                 break
         elif gate_state.opens >= gate.max_opens_per_day:
             break
+
+        breakout_score: Optional[float] = None
+        if need_breakout_score:
+            breakout_score = _paper_breakout_score(
+                sym,
+                sig,
+                c,
+                session_day=session_day,
+                now_ms=now_ms,
+                df5_cache=df5_cache,
+            )
 
         if v2.shadow:
             from orb.ml.gate import record_scored_signal, should_open
@@ -335,6 +376,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 state=gate_state,
                 gate=gate,
                 profiles=model.ranker.profiles,
+                breakout_score=breakout_score,
             )
             decision = {
                 "symbol": sym,
@@ -345,6 +387,8 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 "opened": gate_pass,
                 "reason": reason,
             }
+            if breakout_score is not None:
+                decision["breakout_score"] = breakout_score
         else:
             decision = evaluate_open_decision(
                 model.ranker,
@@ -355,6 +399,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 gate=gate,
                 p_true=p_true,
                 p_fake=float(model.predict_fake(feat, symbol=sym)),
+                breakout_score=breakout_score,
             )
 
         gate_pass = bool(decision.get("opened"))
@@ -376,6 +421,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 {
                     "symbol": sym,
                     "p_true": decision.get("p_true"),
+                    "breakout_score": decision.get("breakout_score"),
                     "reason": reason,
                     "sync": sync_n,
                     "minutes_after_or": decision.get("minutes_after_or"),
@@ -508,6 +554,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 "sl": sig.sl_price,
                 "tp": sig.tp_price,
                 "p_true": decision.get("p_true"),
+                "breakout_score": decision.get("breakout_score"),
                 "notional_usdt": sig.paper_notional_usdt,
             }
             if assigned_robot is not None:

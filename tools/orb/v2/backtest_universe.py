@@ -194,6 +194,7 @@ def _write_trades_csv(days: List[dict], path: Path) -> None:
         "wallet_after",
         "p_true",
         "p_fake",
+        "breakout_score",
         "pnl_usdt",
         "true_breakout",
         "scan_et",
@@ -329,6 +330,12 @@ def main() -> int:
     ap.add_argument("--gate-config", default=str(resolve_gate_config_path()))
     ap.add_argument("--min-p", type=float, default=None)
     ap.add_argument(
+        "--min-breakout-score",
+        type=float,
+        default=None,
+        help="突破 bar 质量分下限（0=不过滤；默认读 gate-config）",
+    )
+    ap.add_argument(
         "--sizing",
         choices=("eight_robots", "per_symbol", "fixed"),
         default="eight_robots",
@@ -371,6 +378,8 @@ def main() -> int:
     gate = LiveGateConfig.from_json(Path(args.gate_config))
     if args.min_p is not None:
         gate.min_p_true = float(args.min_p)
+    if args.min_breakout_score is not None:
+        gate.min_breakout_score = float(args.min_breakout_score)
 
     model = BreakoutModelBundle.load_production()
     if not model.is_ready:
@@ -410,6 +419,7 @@ def main() -> int:
         f"[v2 universe] {len(syms)}/{len(all_syms)} syms | "
         f"{dates[0]} .. {dates[-1]} | {len(dates)} NYSE | "
         f"gate p>={gate.min_p_true} max={gate.max_opens_per_day} | {sizing_desc} | "
+        f"breakout>={gate.min_breakout_score:.0f} | "
         f"filters macro={cfg.macro_filter}",
         flush=True,
     )

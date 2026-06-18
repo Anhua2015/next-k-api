@@ -116,6 +116,7 @@ def load_summary() -> Dict[str, Any]:
                 "robots": robots,
                 "gate": {
                     "min_p_true": gate.min_p_true,
+                    "min_breakout_score": gate.min_breakout_score,
                     "max_opens_per_day": gate.max_opens_per_day,
                     "robot_reuse_after_exit": gate.robot_reuse_after_exit,
                     "day_abort_enabled": gate.day_abort_enabled,

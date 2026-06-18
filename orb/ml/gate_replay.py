@@ -57,6 +57,11 @@ def replay_day(
             continue
         if p < min_p:
             continue
+        min_bs = float(g.min_breakout_score or 0)
+        if min_bs > 0:
+            bs = ev.get("breakout_score")
+            if bs is None or float(bs) < min_bs:
+                continue
         if ev.get("pnl_usdt") is None:
             continue
         opens.append(ev)

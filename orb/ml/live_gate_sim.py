@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from orb.core.backtest import _daily_df_asof, _iter_scan_ms, _resolve_open, _SimOpen
+from orb.core.breakout_score import breakout_kline_range_ms, breakout_score_for_signal
 from orb.ml.ranker import BreakoutRanker
 from orb.core.config import OrbConfig
 from orb.ml.features import extract_features, label_is_true_breakout
@@ -249,9 +250,7 @@ def simulate_live_gate_day(
         if session_day_str(s, tz=tz, session_open_time=cfg.session_open_time) == session_date
     ]
 
-    warmup = cfg.daily_atr_warmup_ms() + bar * 96
-    fetch_start = extended_fetch_anchor_ms(anchor, cfg) - warmup
-    end_ms = close + bar * 4
+    fetch_start, end_ms = breakout_kline_range_ms(session_date, cfg)
     dfs5, dfs1, dfs_daily = {}, {}, {}
     for sym in symbols:
         dfs5[sym] = load_klines(sym, cfg.signal_interval, start_ms=fetch_start, end_ms=end_ms)
@@ -328,6 +327,14 @@ def simulate_live_gate_day(
             elif not robot_reuse and state.opens >= gate.max_opens_per_day:
                 break
 
+            df5_sym = dfs5.get(sym)
+            breakout_score: Optional[float] = None
+            if df5_sym is not None and not df5_sym.empty:
+                breakout_score = round(
+                    breakout_score_for_signal(sig, df5_sym, cfg, now_ms=int(scan_ms)),
+                    2,
+                )
+
             decision = evaluate_open_decision(
                 ranker,
                 symbol=sym,
@@ -337,6 +344,7 @@ def simulate_live_gate_day(
                 gate=gate,
                 p_true=p_rank,
                 p_fake=float(ranker.predict_fake(feat, symbol=sym)),
+                breakout_score=breakout_score,
             )
             decision["scan_et"] = scan_et
             decision["scan_open_ms"] = int(scan_ms)
