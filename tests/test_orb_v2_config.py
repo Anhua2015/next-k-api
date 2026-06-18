@@ -51,8 +51,10 @@ class TestOrbV2Config(unittest.TestCase):
         v2 = OrbV2Config.from_env()
         self.assertTrue(str(v2.symbols_file).replace("\\", "/").endswith("config/orb/v2/symbols.txt"))
         syms = v2.symbol_list()
-        self.assertEqual(len(syms), 38)
+        self.assertEqual(len(syms), 33)
         self.assertIn("COINUSDT", syms)
+        for removed in ("BRKBUSDT", "UBERUSDT", "DISUSDT", "SPYUSDT", "MUUSDT"):
+            self.assertNotIn(removed, syms)
 
     def test_from_env_uses_v2_symbols_file_not_orb_symbols(self):
         saved = {
@@ -65,7 +67,7 @@ class TestOrbV2Config(unittest.TestCase):
             os.environ.pop("ORB_V2_SYMBOLS_FILE", None)
             v2 = OrbV2Config.from_env()
             syms = v2.symbol_list()
-            self.assertGreaterEqual(len(syms), 35)
+            self.assertGreaterEqual(len(syms), 30)
             self.assertIn("COINUSDT", syms)
             self.assertNotIn("BTCUSDT", syms)
             self.assertNotEqual(syms, v2.base.symbol_list())
@@ -89,7 +91,7 @@ class TestOrbV2Config(unittest.TestCase):
         try:
             cfg = OrbConfig.from_env()
             cfg.macro_filter = False
-            dates = session_dates_from_cache("SPYUSDT", cfg)
+            dates = session_dates_from_cache("QQQUSDT", cfg)
             self.assertTrue(dates)
             for d in dates:
                 self.assertLess(pd.Timestamp(d).dayofweek, 5, d)

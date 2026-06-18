@@ -1,6 +1,6 @@
 {
   "global_true_rate": 0.1995,
-  "symbols": 43,
+  "symbols": 38,
   "profiles": {
     "AAPLUSDT": {
       "symbol": "AAPL",
@@ -62,18 +62,6 @@
       "median_minutes_after_or": 25.0,
       "median_sync": 1.0
     },
-    "BRKBUSDT": {
-      "symbol": "BRKB",
-      "n": 3,
-      "tier": "C",
-      "true_n": 0,
-      "true_rate": 0.0,
-      "hold30_n": 2,
-      "hold30_rate": 0.6667,
-      "avg_pnl_usdt": -8.43,
-      "median_minutes_after_or": 50.0,
-      "median_sync": 0.0
-    },
     "CBRSUSDT": {
       "symbol": "CBRS",
       "n": 3,
@@ -133,18 +121,6 @@
       "avg_pnl_usdt": 20.6,
       "median_minutes_after_or": 40.0,
       "median_sync": 2.0
-    },
-    "DISUSDT": {
-      "symbol": "DIS",
-      "n": 5,
-      "tier": "C",
-      "true_n": 1,
-      "true_rate": 0.2,
-      "hold30_n": 4,
-      "hold30_rate": 0.8,
-      "avg_pnl_usdt": 9.9,
-      "median_minutes_after_or": 50.0,
-      "median_sync": 0.0
     },
     "DRAMUSDT": {
       "symbol": "DRAM",
@@ -314,18 +290,6 @@
       "median_minutes_after_or": 10.0,
       "median_sync": 1.0
     },
-    "MUUSDT": {
-      "symbol": "MU",
-      "n": 29,
-      "tier": "B",
-      "true_n": 2,
-      "true_rate": 0.069,
-      "hold30_n": 14,
-      "hold30_rate": 0.4828,
-      "avg_pnl_usdt": -2.88,
-      "median_minutes_after_or": 15.0,
-      "median_sync": 1.0
-    },
     "NVDAUSDT": {
       "symbol": "NVDA",
       "n": 37,
@@ -434,18 +398,6 @@
       "median_minutes_after_or": 10.0,
       "median_sync": 1.0
     },
-    "SPYUSDT": {
-      "symbol": "SPY",
-      "n": 30,
-      "tier": "A",
-      "true_n": 4,
-      "true_rate": 0.1333,
-      "hold30_n": 10,
-      "hold30_rate": 0.3333,
-      "avg_pnl_usdt": 3.69,
-      "median_minutes_after_or": 15.0,
-      "median_sync": 2.0
-    },
     "TSLAUSDT": {
       "symbol": "TSLA",
       "n": 77,
@@ -469,18 +421,6 @@
       "avg_pnl_usdt": 2.06,
       "median_minutes_after_or": 25.0,
       "median_sync": 1.0
-    },
-    "UBERUSDT": {
-      "symbol": "UBER",
-      "n": 3,
-      "tier": "C",
-      "true_n": 0,
-      "true_rate": 0.0,
-      "hold30_n": 1,
-      "hold30_rate": 0.3333,
-      "avg_pnl_usdt": -8.43,
-      "median_minutes_after_or": 225.0,
-      "median_sync": 0.0
     },
     "USARUSDT": {
       "symbol": "USAR",
