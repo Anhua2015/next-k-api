@@ -114,6 +114,24 @@ class TestBreakoutScore(unittest.TestCase):
         self.assertTrue(ok3)
         self.assertEqual(reason3, "open_ok")
 
+    def test_gate_should_open_skips_breakout_when_disabled(self):
+        from orb.ml.gate import LiveGateConfig, LiveGateDayState, should_open
+
+        gate = LiveGateConfig(min_p_true=0.35, min_breakout_score=0.0, max_opens_per_day=8)
+        state = LiveGateDayState()
+        feat = {"minutes_after_or": 30.0}
+        ok, reason = should_open(
+            p_true=0.5,
+            symbol="TSLAUSDT",
+            feat=feat,
+            sync=0,
+            state=state,
+            gate=gate,
+            breakout_score=None,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "open_ok")
+
 
     def test_gate_replay_respects_breakout_score(self):
         from orb.ml.gate import LiveGateConfig

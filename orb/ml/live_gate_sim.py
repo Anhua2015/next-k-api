@@ -267,6 +267,7 @@ def simulate_live_gate_day(
     robots_used_today: set[int] = set()
     robot_busy: Dict[int, Dict[str, Any]] = {}
     robot_reuse = bool(gate.robot_reuse_after_exit and robot_wallets is not None)
+    need_breakout_score = float(gate.min_breakout_score or 0) > 0
     timeline: List[Dict[str, Any]] = []
 
     for scan_ms in scans:
@@ -329,7 +330,7 @@ def simulate_live_gate_day(
 
             df5_sym = dfs5.get(sym)
             breakout_score: Optional[float] = None
-            if df5_sym is not None and not df5_sym.empty:
+            if need_breakout_score and df5_sym is not None and not df5_sym.empty:
                 breakout_score = round(
                     breakout_score_for_signal(sig, df5_sym, cfg, now_ms=int(scan_ms)),
                     2,
