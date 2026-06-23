@@ -23,11 +23,11 @@ def robot_count_from_env() -> int:
 
 
 def robot_equity_from_env() -> float:
-    raw = os.getenv("ORB_V2_ROBOT_EQUITY", "1000")
+    raw = os.getenv("ORB_V2_ROBOT_EQUITY", "14")
     try:
         return max(0.0, float(str(raw).strip()))
     except ValueError:
-        return 1000.0
+        return 14.0
 
 
 def robot_reset_cap_from_env() -> float:
