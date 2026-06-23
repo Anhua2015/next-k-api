@@ -1545,26 +1545,6 @@ def api_get(endpoint, params=None):
     return None
 
 
-def _drop_legacy_strategy_tables(c: sqlite3.Cursor) -> None:
-    """删除已下线策略（ZCT / Moss / 动量 / 接针等）遗留 SQLite 表。"""
-    rows = c.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall()
-    drop_prefixes = (
-        "zct_",
-        "moss2_",
-        "moss_",
-        "mom_",
-        "jz_",
-    )
-    drop_exact = {
-        "bpc_telegram_dedup",
-        "_zct_migration_flags",
-    }
-    for (name,) in rows:
-        if name in drop_exact or any(name.startswith(p) for p in drop_prefixes):
-            c.execute(f"DROP TABLE IF EXISTS [{name}]")
-
 
 def init_db():
     """初始化数据库（WAL + busy_timeout 提升并发读写）。"""
@@ -1581,7 +1561,6 @@ def init_db():
     conn.execute(f"PRAGMA busy_timeout={busy_ms}")
     conn.execute("PRAGMA synchronous=NORMAL")
     c = conn.cursor()
-    _drop_legacy_strategy_tables(c)
     c.execute("""CREATE TABLE IF NOT EXISTS watchlist (
         symbol TEXT PRIMARY KEY,
         coin TEXT,
