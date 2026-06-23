@@ -1,0 +1,7 @@
+# Runtime dependencies
+-r requirements.txt
+
+# Tests and static checks
+pytest>=8.0.0
+httpx2>=0.27.0
+ruff>=0.8.0

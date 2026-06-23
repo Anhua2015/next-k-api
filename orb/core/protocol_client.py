@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import requests
 
@@ -22,13 +22,25 @@ def protocol_configured() -> bool:
     return bool(protocol_api_url())
 
 
+def _protocol_headers() -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("PROTOCOL_MAINTENANCE_TOKEN", "").strip()
+    if token:
+        headers["X-Maintenance-Token"] = token
+    return headers
+
+
 def ingest_signals(signals: List[Dict[str, Any]], *, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> Dict[str, Any]:
     """推送一批信号到 Next-k-protocol。"""
     if not signals:
         return {"scanned": 0, "traded": 0, "skipped": 0, "errors": 0, "details": []}
     url = f"{protocol_api_url()}/api/binance/signals/ingest"
-    headers = {"Content-Type": "application/json"}
-    resp = requests.post(url, json={"signals": signals}, headers=headers, timeout=timeout_sec)
+    resp = requests.post(
+        url,
+        json={"signals": signals},
+        headers=_protocol_headers(),
+        timeout=timeout_sec,
+    )
     if resp.status_code >= 400:
         body = resp.text[:500]
         raise RuntimeError(f"protocol ingest HTTP {resp.status_code}: {body}")

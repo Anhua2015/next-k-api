@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
@@ -16,6 +16,7 @@ from utils.volume_export import (
     resolve_data_dir,
     summarize_data_dir,
 )
+from utils.maintenance_auth import require_maintenance_token
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,9 @@ def _ensure_export_enabled() -> None:
 
 
 @router.get("/api/export-volume/info")
-async def export_volume_info() -> dict:
+async def export_volume_info(
+    _: None = Depends(require_maintenance_token),
+) -> dict:
     """打包前查看 DATA_DIR 路径与体量（不下载）。"""
     _ensure_export_enabled()
     summary = summarize_data_dir()
@@ -44,6 +47,7 @@ async def export_volume_info() -> dict:
 @router.get("/api/export-volume")
 async def export_volume_download(
     fmt: str = Query("zip", description="zip 或 tar.gz"),
+    _: None = Depends(require_maintenance_token),
 ) -> FileResponse:
     """
     将 DATA_DIR（Railway Volume，如 /data 或 /app/data）打包下载。

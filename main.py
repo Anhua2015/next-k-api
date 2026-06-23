@@ -33,6 +33,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _parse_cors_origins() -> list[str]:
+    raw = os.getenv("NEXT_K_CORS_ORIGINS", "").strip()
+    if not raw:
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+CORS_ORIGINS = _parse_cors_origins()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from datetime import datetime, timezone
@@ -110,10 +120,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Maintenance-Token"],
 )
 
 app.include_router(core_router.router)

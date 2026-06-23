@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from orb.v2.config import OrbV2Config, _load_symbols
 
@@ -80,26 +81,39 @@ class TestOrbV2Config(unittest.TestCase):
 
 
     def test_session_dates_from_cache_skips_weekends(self):
-        import os
-        from env_loader import load_env_oi
-        from orb.core.config import OrbConfig
-        from tools.orb.v2.backtest_symbol import session_dates_from_cache
         import pandas as pd
 
-        load_env_oi()
-        saved = os.environ.pop("ORB_SYMBOLS", None)
-        try:
+        from orb.core.config import OrbConfig
+        from tools.orb.v2.backtest_symbol import session_dates_from_cache
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"ORB_KLINE_CACHE_ROOT": tmp},
+            clear=False,
+        ):
+            cache = Path(tmp) / "QQQ" / "5m.csv"
+            cache.parent.mkdir(parents=True)
+            timestamps = [
+                pd.Timestamp("2026-06-05T14:00:00Z"),  # Friday
+                pd.Timestamp("2026-06-06T14:00:00Z"),  # Saturday
+                pd.Timestamp("2026-06-08T14:00:00Z"),  # Monday
+            ]
+            pd.DataFrame(
+                {
+                    "open_time": [int(ts.timestamp() * 1000) for ts in timestamps],
+                    "open": [1.0, 1.0, 1.0],
+                    "high": [1.0, 1.0, 1.0],
+                    "low": [1.0, 1.0, 1.0],
+                    "close": [1.0, 1.0, 1.0],
+                    "volume": [1.0, 1.0, 1.0],
+                }
+            ).to_csv(cache, index=False)
+
             cfg = OrbConfig.from_env()
             cfg.macro_filter = False
             dates = session_dates_from_cache("QQQUSDT", cfg)
-            self.assertTrue(dates)
-            for d in dates:
-                self.assertLess(pd.Timestamp(d).dayofweek, 5, d)
-        finally:
-            if saved is None:
-                os.environ.pop("ORB_SYMBOLS", None)
-            else:
-                os.environ["ORB_SYMBOLS"] = saved
+
+        self.assertEqual(dates, ["2026-06-05", "2026-06-08"])
 
 
 if __name__ == "__main__":

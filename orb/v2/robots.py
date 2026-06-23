@@ -193,6 +193,18 @@ def robot_settled_pnl(cur: sqlite3.Cursor, robot_id: int) -> float:
     return float(cur.fetchone()[0] or 0)
 
 
+def robot_initial_equity(cur: sqlite3.Cursor, robot_id: int) -> float:
+    """优先读取机器人建档本金，旧库缺行时回退当前环境配置。"""
+    cur.execute(
+        "SELECT initial_equity_usdt FROM orb_robots WHERE robot_id = ?",
+        (int(robot_id),),
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return robot_equity_from_env()
+    return max(0.0, float(row[0]))
+
+
 def busy_robot_ids(cur: sqlite3.Cursor) -> set[int]:
     cur.execute(
         """
@@ -418,14 +430,14 @@ def maybe_reset_robot_wallet_after_settle(
         return None
     cap = float(policy["cap_usdt"])
     floor = float(policy["floor_usdt"])
-    init = robot_equity_from_env()
+    cur = conn.cursor()
+    init = robot_initial_equity(cur, int(robot_id))
     balance = robot_wallet_balance(conn, int(robot_id), initial_equity_usdt=init, sync=False)
     _, evt = apply_robot_wallet_after_pnl(balance, 0.0)
     if evt is None:
         return None
 
     withdrawn = float(evt["withdrawn_usdt"])
-    cur = conn.cursor()
     trigger_sym = ""
     if trigger_signal_id is not None:
         cur.execute("SELECT symbol FROM orb_signals WHERE id = ?", (int(trigger_signal_id),))
