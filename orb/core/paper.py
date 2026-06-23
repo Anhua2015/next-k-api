@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""ORB 共享信号/结算逻辑（Live + 回测）。"""
+"""ORB 的可回放行情分析、纸面持仓和结算基础层。
+
+``orb.v2.paper`` 负责 ML 与资金池总编排，本模块负责更底层且可复用的工作：
+
+- 拉取并清洗信号 K 线和日线 ATR；
+- 丢弃尚未收盘的 forming bar，避免未来函数；
+- 在指定 ``now_ms`` 上生成可回放信号；
+- 写入/更新纸面仓位；
+- 沿未来 K 线解析 SL、TP、提前退出或收盘退出；
+- 可选地通知 Protocol 开仓和平仓。
+
+回测和生产扫描尽量共享这里的函数，以减少“回测能赚、实盘规则不同”的偏差。
+"""
 
 from __future__ import annotations
 
@@ -89,7 +101,7 @@ def _session_date_now(cfg: OrbConfig) -> str:
 
 
 def _drop_forming_bar(df: pd.DataFrame, cfg: OrbConfig, *, now_ms: Optional[int] = None) -> pd.DataFrame:
-    """去掉尚未收盘的最后一根 K 线，避免在 forming bar 上误判信号。"""
+    """去掉尚未收盘的最后一根 K 线，避免未来函数和盘中抖动误判。"""
     if df.empty:
         return df
     t = int(now_ms if now_ms is not None else time.time() * 1000)
@@ -170,7 +182,11 @@ def analyze_at_ms(
     bot_equity_usdt: Optional[float] = None,
     df5: Optional[pd.DataFrame] = None,
 ) -> OrbSignal:
-    """纸面 analyze_live 的可回放版本（now_ms = 扫描时刻）。"""
+    """在任意历史/当前时间点执行与生产一致的信号分析。
+
+    ``df5`` 和 ``daily_df`` 可由回测提前注入，生产不传时才访问 Binance。这个接口设计
+    让回测和 Live 共享 classify_signal、ATR 和仓位计算，而不是复制一份策略。
+    """
     sym = str(symbol).strip().upper()
     if df5 is not None:
         df = _signal_df_from_bars(df5, cfg, now_ms=now_ms)
@@ -489,4 +505,3 @@ def _idle_scan_skip_reason(cfg: OrbConfig, cur, *, now_ms: Optional[int] = None)
     if count_open_positions(cur) > 0:
         return None
     return "outside_regular_session_no_open_positions"
-

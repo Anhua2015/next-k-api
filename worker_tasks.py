@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""后台定时子进程任务：与 FastAPI 解耦，供 main / scheduler_main 共用。"""
+"""后台任务适配层。
+
+调度器只调用本文件中的短函数。耗时扫描尽量放入独立 Python 子进程，原因是：
+
+- 隔离扫描产生的内存、连接和第三方库状态；
+- 防止长任务阻塞 FastAPI 主线程；
+- 子进程异常不会直接终止 Web 服务；
+- 每类任务使用独立非阻塞锁，避免上一轮未结束时重入。
+"""
 
 from __future__ import annotations
 
@@ -29,6 +37,11 @@ _heat_watch_refresh_lock = threading.Lock()
 
 
 def _run_subprocess_locked(lock_key: str, argv: list[str], *, cwd: Path, env: dict | None = None) -> None:
+    """在任务级互斥锁保护下同步等待子进程。
+
+    此处的“同步等待”发生在 APScheduler 工作线程，不是 FastAPI 请求线程。若拿不到锁，
+    直接跳过本轮而不是排队；市场扫描更需要“最新一轮”，通常不应积压过期任务。
+    """
     lk = _subprocess_locks.get(lock_key)
     if lk is None:
         subprocess.run(argv, cwd=str(cwd), env=env, check=False)

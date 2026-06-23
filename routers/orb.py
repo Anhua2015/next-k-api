@@ -1,4 +1,8 @@
-"""ORB 量价策略 API。"""
+"""ORB V2 查询、诊断和维护 API。
+
+本路由不在普通 GET 请求中执行完整市场扫描；它读取 SQLite 汇总、最近运行、信号和
+生产模型状态。手工 scan 使用线程池，避免同步 Python 工作阻塞事件循环。
+"""
 
 from __future__ import annotations
 
@@ -56,6 +60,7 @@ def _status(row: Dict[str, Any]) -> str:
 
 
 def load_summary() -> Dict[str, Any]:
+    """聚合纸面仓位、结算、Robot 钱包、提现记录、Gate 配置和今日会话状态。"""
     v2 = OrbV2Config.from_env()
     cfg = v2.base
     robot_count = robot_count_from_env()
@@ -129,6 +134,7 @@ def load_summary() -> Dict[str, Any]:
 
 
 def load_signals(*, limit: int, offset: int, symbol: Optional[str], status: str) -> Dict[str, Any]:
+    """读取 ORB 信号表并把数据库状态翻译成前端友好的中文状态。"""
     conn = init_db()
     conn.row_factory = sqlite3.Row
     try:

@@ -1,4 +1,14 @@
-"""Next K API — OI 雷达、收筹看盘、ORB 策略 API。"""
+"""Next K API 进程入口。
+
+本服务是整个系统的“策略与数据层”，职责包括：
+
+1. 暴露收筹池、OI 雷达、S2 和 ORB 的查询/维护接口；
+2. 启动或连接 APScheduler，按计划触发后台扫描；
+3. 初始化 accumulation.db 和 ORB 生产模型包；
+4. 在 ORB 产生可执行信号后，通过 HTTP 调用 Next-k-protocol。
+
+注意：本进程不保存 Binance 密钥，也不直接调用需要签名的币安交易接口。
+"""
 
 from __future__ import annotations
 
@@ -34,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_cors_origins() -> list[str]:
+    """解析浏览器跨域白名单。
+
+    留空时返回 ``["*"]`` 是为了兼容当前静态前端和本地调试。CORS 只约束浏览器，
+    不能替代维护令牌；脚本或服务端客户端不受浏览器 CORS 机制限制。
+    """
     raw = os.getenv("NEXT_K_CORS_ORIGINS", "").strip()
     if not raw:
         return ["*"]
@@ -45,11 +60,19 @@ CORS_ORIGINS = _parse_cors_origins()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """FastAPI 生命周期。
+
+    启动检查采用“失败降级、继续提供 API”的策略：数据库或模型检查异常只记 warning，
+    避免一个非核心检查让健康接口完全不可用。真正执行 ORB 扫描时仍会再次验证生产模型，
+    因此不会在模型缺失时静默开仓。
+    """
     from datetime import datetime, timezone
 
     logger.info("Starting Next K API...")
     state.startup_time = datetime.now(timezone.utc)
 
+    # 单进程部署时由 API 自己运行调度器；多 worker/双进程部署必须关闭它，
+    # 否则每个 Web worker 都会重复注册同一批扫描任务。
     if embed_scheduler_enabled():
         _start_embedded_scheduler(app)
     else:
@@ -58,6 +81,7 @@ async def lifespan(app: FastAPI):
             "run: python scheduler_main.py"
         )
 
+    # 提前建表，使第一个前端请求不必承担数据库迁移延迟。
     try:
         from accumulation_radar import init_db
 
@@ -66,6 +90,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("DB init on startup skipped: %s", e)
 
+    # 仅打印高风险生产路径配置，例如误把运行模型指向可被 Volume 覆盖的 data/。
     try:
         from orb.ml.paths import production_env_warnings
 
@@ -74,6 +99,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("ORB production env check skipped: %s", e)
 
+    # orb_live/ 是生产运行包；必要时可从已存在的模型目录引导复制。
     try:
         from orb.ml.live_bundle import ensure_live_bundle_on_startup, log_live_bundle_startup
 
@@ -101,6 +127,7 @@ async def lifespan(app: FastAPI):
 
 
 def _start_embedded_scheduler(app: FastAPI) -> None:
+    """创建进程内调度器，并挂到 ``app.state`` 以便优雅关闭。"""
     import pytz
 
     tz = pytz.timezone("Asia/Shanghai")

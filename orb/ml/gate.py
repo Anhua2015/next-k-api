@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""实盘开单闸门：突破当下打分，过线且未超日限额才允许开单。"""
+"""ML Live Gate：对确定性 ORB 候选做概率排序和组合级风控。
+
+Gate 不负责发现突破，也不计算止损。它只回答“这个已形成的候选是否值得占用有限开仓
+槽位”，并维护日内开仓数、近期分数和 day-abort 状态。
+"""
 
 from __future__ import annotations
 
@@ -105,7 +109,7 @@ def should_open(
     profiles: Optional[Dict[str, Any]] = None,
     breakout_score: Optional[float] = None,
 ) -> Tuple[bool, str]:
-    """突破当下调用：是否允许开这一单。"""
+    """按固定顺序应用日内限制、早期拥挤陷阱、概率阈值和突破质量阈值。"""
     if state.day_aborted:
         return False, "day_aborted"
     if not gate.robot_reuse_after_exit and state.opens >= gate.max_opens_per_day:
@@ -164,7 +168,10 @@ def evaluate_open_decision(
     p_fake: Optional[float] = None,
     breakout_score: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """突破当下：打分 + 决策（供回测与将来 paper 共用）。"""
+    """完成一次可重放的打分决策，并同步更新内存中的日状态。
+
+    Paper 与回测共用此函数，确保研究和生产 Gate 的规则顺序一致。
+    """
     p_true_v = float(p_true if p_true is not None else ranker.predict_true(feat, symbol=symbol))
     p_fake_v = float(p_fake if p_fake is not None else ranker.predict_fake(feat, symbol=symbol))
     record_scored_signal(state, p_true=p_true_v, gate=gate)

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""ORB 纸面扫描 CLI（ML Live Gate）。"""
+"""ORB V2 扫描子进程入口。
+
+每次调度都会启动一个新的解释器运行本文件。真正的业务编排位于
+``orb.v2.paper.run_scan_v2``；本文件只负责参数解析、日志配置和退出码，
+因此同一套扫描逻辑也能被测试或维护接口直接调用。
+"""
 
 from __future__ import annotations
 

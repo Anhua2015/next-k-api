@@ -1,4 +1,10 @@
-"""ORB V2 共享 8-robot 资金池（Live 与回测共用）。"""
+"""ORB V2 共享 Robot 资金池。
+
+Robot 是虚拟资金账户而不是线程或外部服务。一个 Robot 同时最多占用一个未结算仓位；
+平仓后余额通过 ``初始本金 + settlements 总和`` 恢复，可再次分配。
+
+Live 与回测共用同一套余额/重置函数，是为了避免研究结果和生产执行使用不同的复利口径。
+"""
 
 from __future__ import annotations
 
@@ -78,7 +84,11 @@ def apply_robot_wallet_after_pnl(
     balance: float,
     pnl: float,
 ) -> tuple[float, Optional[Dict[str, Any]]]:
-    """结算后更新余额；若 >= cap 则提现至 floor（Live / 回测共用）。"""
+    """结算后更新余额；达到 cap 时生成一次“提现至 floor”的事件。
+
+    函数本身是纯计算，不写数据库。调用方把负的提现金额记入 settlement，使以后通过
+    settlement 求和仍能得到 floor，而不需要额外维护一列可变余额。
+    """
     policy = robot_reset_policy()
     new_balance = round(float(balance) + float(pnl), 4)
     if not policy.get("enabled"):
@@ -246,6 +256,11 @@ def robot_wallet_balance(
     initial_equity_usdt: float,
     sync: bool = True,
 ) -> float:
+    """从不可变账本重建余额，而不是相信缓存字段。
+
+    ``initial_equity_usdt`` 必须来自机器人建档记录；若错误地使用当前环境变量，部署后
+    修改初始本金会篡改所有历史 Robot 的计算余额。
+    """
     rid = int(robot_id)
     initial = max(0.0, float(initial_equity_usdt or 0.0))
     cur = conn.cursor()
@@ -422,7 +437,11 @@ def maybe_reset_robot_wallet_after_settle(
     trigger_signal_id: Optional[int] = None,
     session_date: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """结算后若机器人余额 >= cap，则提现至 floor 并重置账本。"""
+    """结算后若余额达到上限，追加一条负 PnL settlement 模拟提现。
+
+    这样 Robot 的余额始终可以用同一个公式重放：
+    ``initial_equity + trading settlements + reset settlements``。
+    """
     if trigger_signal_id is None:
         return None
     policy = robot_reset_policy()

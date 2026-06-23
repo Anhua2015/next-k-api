@@ -1,4 +1,12 @@
-"""ORB 纸面信号 → Next-k-protocol 实盘执行（开/平/止损）。"""
+"""把 ORB 领域对象转换成 Protocol 的交易协议。
+
+本模块是策略层与执行层的边界：
+
+- 输入是 ``OrbSignal`` 和 ``OrbConfig``；
+- 输出是 Protocol 能理解的 JSON payload；
+- 不直接调用 Binance；
+- 用稳定的 ``api_signal_id`` 保证开仓 HTTP 重试不会重复下单。
+"""
 
 from __future__ import annotations
 
@@ -44,6 +52,11 @@ def _close_signal_id(symbol: str, *, tag: str) -> str:
 
 
 def build_open_payload(sig: OrbSignal, cfg: OrbConfig) -> Dict[str, Any]:
+    """构造开仓动作。
+
+    纸面层保存的是名义仓位 ``notional``，Protocol 接口使用保证金和杠杆，因此这里做
+    ``margin = notional / leverage`` 的唯一转换。Protocol 不应再次做策略仓位计算。
+    """
     notional = float(sig.paper_notional_usdt or cfg.default_paper_notional())
     lev = _leverage(cfg)
     margin = _margin_from_notional(notional, cfg)
@@ -99,7 +112,11 @@ def build_close_payload(
 
 
 def live_ingest_succeeded(result: Optional[Dict[str, Any]]) -> bool:
-    """Return True when protocol ingest traded the signal (or live was not attempted)."""
+    """判断纸面状态是否可以保留。
+
+    ``None`` 表示本轮未尝试实盘（例如 live 关闭），不应回滚纸面交易；
+    明确的 error 或 errors>0 才表示实盘失败，需要上层撤销纸面开仓与 Gate 计数。
+    """
     if result is None:
         return True
     if result.get("skipped"):

@@ -1,3 +1,9 @@
+"""收筹/OI 查询接口和人工维护入口。
+
+查询接口尽量读取 SQLite 或磁盘快照，避免 HTTP 请求现场执行分钟级扫描；手工刷新接口
+采用后台线程、互斥锁和冷却器，把长任务从浏览器连接生命周期中解耦。
+"""
+
 from __future__ import annotations
 
 import json
@@ -331,8 +337,8 @@ async def post_accumulation_oi_radar_refresh():
     在后台线程执行完整扫描并写入 `oi_radar_snapshot.json`，立即返回，避免 HTTP 超时。
     与 GET 快照配合：前端轮询 GET 直至 `ok` 为 true。
 
-    无需维护令牌（主界面「刷新」可用）；通过并发锁 + OI_RADAR_REFRESH_COOLDOWN_SEC 防滥用。
-    清库 / trigger-cron 等维护接口无需鉴权。
+    无需维护令牌（主界面「刷新」可用）；通过并发锁 + OI_RADAR_REFRESH_COOLDOWN_SEC
+    防止重复点击和并发扫描。清库、trigger-cron 等维护接口需要维护令牌。
     """
     if not _oi_radar_refresh_lock.acquire(blocking=False):
         return {"accepted": False, "busy": True, "message": "已有扫描任务在执行中"}

@@ -1,4 +1,16 @@
-"""ORB 2.0 纸面扫描：ML Live Gate + 8-robot 资金池。"""
+"""ORB V2 扫描总编排：信号、ML Gate、资金池、纸面结算和实盘同步。
+
+本模块故意把多个子系统串在一个显式流程中，因为一次开仓需要保持以下状态一致：
+
+- 原始突破是否出现；
+- Gate 当日已打分/已开仓数量；
+- Robot 或单标钱包是否可用；
+- ``orb_signals`` 是否存在未结算纸面仓位；
+- Protocol 是否真的完成实盘开仓。
+
+最重要的事务规则是：先落纸面状态，再调用 Protocol；如果实盘失败，必须调用
+``_rollback_failed_live_open`` 同时撤销 breakout 标记、Gate 计数和纸面仓位。
+"""
 
 from __future__ import annotations
 
@@ -69,6 +81,11 @@ def _rollback_failed_live_open(
     stats: Dict[str, Any],
     live_open: Optional[Dict[str, Any]],
 ) -> None:
+    """撤销“Gate 已通过、纸面已写入、但实盘未成功”的半完成开仓。
+
+    SQLite 操作由调用方持有的事务连接完成，函数不自行 commit，使后续 Gate 状态持久化
+    和运行摘要能够与回滚一起提交。
+    """
     rollback_breakout_opened(cur, session_day, sym)
     rollback_open_decision(gate_state, symbol=sym)
     cur.execute(
@@ -151,6 +168,7 @@ def _paper_breakout_score(
 
 
 def _load_model(v2: OrbV2Config) -> Optional[BreakoutModelBundle]:
+    """加载生产模型；V2 实盘拒绝在 GBM 缺失时使用中性概率继续运行。"""
     bundle = BreakoutModelBundle.load(
         gbm_path=v2.gbm_path,
         profiles_path=v2.profiles_path,
@@ -192,6 +210,21 @@ def _apply_robot_notional(sig: OrbSignal, *, entry: float, sl: float, cfg: OrbCo
 
 
 def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config] = None) -> Dict[str, Any]:
+    """在已有 SQLite 连接上执行一轮完整 ORB V2 扫描。
+
+    高层阶段：
+
+    1. 加载配置、Gate 和生产模型；
+    2. 恢复钱包、Robot 与跨扫描 Gate 状态；
+    3. 先结算旧仓位，再为全标的生成候选；
+    4. 批量提取特征和模型打分，按 ``p_true`` 排序；
+    5. 逐候选执行 Gate、槽位检查、纸面落库和实盘推送；
+    6. 实盘失败时回滚；
+    7. 再结算一次本轮可能触发退出的仓位，保存运行摘要。
+
+    ``stats`` 不只是日志，也是维护接口和前端诊断的重要返回值，因此每个拒绝分支都尽量
+    写入稳定的 reason code。
+    """
     v2 = cfg or OrbV2Config.from_env()
     c = v2.base
     if not v2.enabled:
@@ -249,6 +282,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
         return stats
     stats["ml_model"] = model.status()
 
+    # 每轮扫描都执行幂等迁移，以兼容 Railway Volume 上的旧数据库。
     conn.row_factory = __import__("sqlite3").Row
     migrate_orb_tables(conn.cursor())
     migrate_orb_v2_tables(conn.cursor())
@@ -257,6 +291,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     now_ms = int(time.time() * 1000)
     bot_equity = c.per_symbol_bot_equity()
 
+    # Gate 的 robot_reuse_after_exit 决定使用共享 Robot 池还是每标独立钱包。
     robot_wallets: Optional[List[float]] = None
     signal_equity = bot_equity
     if use_robots:
@@ -283,6 +318,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
         if is_macro_skip_day(session_day):
             logger.info("[orb_v2] macro skip day %s — new entries blocked in signal layer", session_day)
 
+    # 非交易时段也不能无脑返回：如果仍有纸面持仓，必须继续执行 resolve。
     idle_reason = _idle_scan_skip_reason(c, cur, now_ms=now_ms)
     if idle_reason:
         logger.info("[orb_v2] idle skip: %s", idle_reason)
@@ -331,6 +367,8 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 continue
             daily_cache[sym] = _load_daily_df(sym, c, now_ms=now_ms)
 
+    # 第一遍只生成“策略上可行动”的候选，不立即开仓。随后统一排序，保证有限槽位优先
+    # 分配给模型概率更高的候选，而不是 symbols.txt 中排得更靠前的标的。
     candidates: List[Tuple[str, OrbSignal]] = []
     for sym in syms:
         try:
@@ -367,6 +405,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             logger.warning("[orb_v2] candidate %s failed: %s", sym, exc)
             stats["skipped"].append({"symbol": sym, "reason": "error", "error": str(exc)})
 
+    # 同方向同步突破数量是 ML 特征，也用于识别开盘早期的拥挤假突破。
     sync_by_sym: Dict[str, int] = {}
     for sym, sig in candidates:
         side = str(sig.side)
@@ -467,6 +506,8 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             continue
 
         try:
+            # 从这里开始是一个“逻辑事务”：Gate 计数、breakout 标记、纸面信号和实盘结果
+            # 必须共同成功。任何中途异常都要根据已完成阶段执行对应回滚。
             open_persisted = False
             open_marked = False
             hold = fetch_open_hold(cur, sym, default_notional=c.default_paper_notional())
@@ -567,6 +608,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 gate_skips += 1
                 continue
 
+            # 先标记并写纸面开仓，确保 resolve 和前端读取拥有完整记录。
             mark_breakout_seen(
                 cur,
                 session_date=session_day,
@@ -601,6 +643,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             if assigned_robot is not None:
                 open_row["robot_id"] = assigned_robot
             stats["opens"].append(open_row)
+            # 最后跨服务调用 Protocol。失败时不能留下“纸面有仓、币安无仓”的幽灵状态。
             live_open = _live_open(sig, c)
             if live_open is not None:
                 stats["live"].append({"action": "open", "symbol": sym, "result": live_open})
@@ -632,6 +675,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 stats["skipped"].append({"symbol": sym, "reason": "open_error", "error": str(exc)})
             logger.warning("[orb_v2] open %s failed: %s", sym, exc)
 
+    # Gate 状态必须落库，因为下一次扫描运行在全新的子进程中。
     persist_gate_day_state(cur, session_day, gate_state)
     conn.commit()
     resolve_post = resolve_open_positions(conn, cfg=c, now_ms=now_ms) if do_resolve else {}

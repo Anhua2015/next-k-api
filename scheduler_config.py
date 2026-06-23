@@ -1,4 +1,9 @@
-"""APScheduler 任务注册与开关（main 内嵌调度 / scheduler_main 共用）。"""
+"""APScheduler 任务注册与开关。
+
+``main.py`` 的内嵌调度器和 ``scheduler_main.py`` 的独立调度进程共用本模块，
+保证两种部署模式的任务表完全一致。这里只描述“何时运行”，实际业务在
+``worker_tasks.py``；这种拆分方便测试 cron 配置而不执行真实扫描。
+"""
 
 from __future__ import annotations
 
@@ -61,7 +66,12 @@ ORB_SCAN_CRON_SECOND = _int_env_orb_scan_cron_second()
 
 
 def orb_scan_cron_kwargs(interval_minutes: int, *, second: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    """Binance K 线 UTC 边界对齐的 cron 参数；interval 须能整除 60。"""
+    """生成与 Binance K 线收盘边界对齐的 cron 参数。
+
+    例如 5 分钟 K 线在 UTC 的 00/05/10/... 分钟结束，扫描在对应分钟第 5 秒运行，
+    给交易所少量时间完成 K 线落盘。不能整除 60 的周期无法用简单 cron 表达，
+    调用方会回退到相对时间 IntervalTrigger。
+    """
     n = max(1, int(interval_minutes))
     if 60 % n != 0:
         return None
@@ -72,7 +82,11 @@ def orb_scan_cron_kwargs(interval_minutes: int, *, second: Optional[int] = None)
 
 
 def register_scheduled_jobs(sch: Any, wt: Any) -> None:
-    """向 BackgroundScheduler / BlockingScheduler 注册与 worker_tasks 对齐的 cron。"""
+    """向任意 APScheduler 实例注册系统任务。
+
+    ``wt`` 作为参数注入而不是在模块顶层绑定，测试可传入假的 worker 对象，只验证
+    job id、触发时间和开关，不触发网络请求或子进程。
+    """
     sch.add_job(wt.run_pool_task, "cron", hour=10, minute=0, id="pool_daily")
     sch.add_job(
         wt.run_heat_watch_refresh_task,

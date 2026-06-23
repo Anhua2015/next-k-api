@@ -1,4 +1,9 @@
-"""ORB 纸面 SQLite 表。"""
+"""ORB 纸面交易账本和单标机器人数据访问函数。
+
+``orb_signals`` 保存每个标的当前/最近一笔信号，``orb_settlements`` 是追加式已实现账本，
+``orb_runs`` 保存扫描摘要。钱包余额优先从初始本金和 settlement 重建，缓存余额只用于
+展示，不作为不可恢复的唯一真相。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ def _utc_now() -> str:
 
 
 def migrate_orb_tables(c: sqlite3.Cursor) -> None:
+    """幂等创建基础 ORB 表和索引；允许每次扫描安全调用。"""
     c.execute(
         """CREATE TABLE IF NOT EXISTS orb_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

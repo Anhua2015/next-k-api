@@ -1,4 +1,9 @@
-"""ORB 量价信号：突破 / 回踩 + 成交量确认。"""
+"""ORB 确定性信号层。
+
+这里不使用机器学习：先根据交易日、会话、Opening Range、突破/回踩、成交量和 VWAP
+生成 ``OrbSignal``。ML 只在后续 V2 Gate 中对已经满足基础策略的候选进行排序和过滤。
+这种分层使模型无法绕过交易时段、止损有效性等硬规则。
+"""
 
 from __future__ import annotations
 
@@ -126,7 +131,11 @@ def compute_position_notional(
     cfg: OrbConfig,
     bot_equity_usdt: Optional[float] = None,
 ) -> float:
-    """固定名义优先；否则按单标机器人本金的风险百分比定仓。"""
+    """固定名义优先；否则按“止损触发时亏损预算”反推名义仓位。
+
+    ``position_safety_pct`` 会从理论风险预算中扣除安全垫，用于吸收滑点、手续费和数量
+    取整误差。
+    """
     fixed = float(getattr(cfg, "fixed_notional_usdt", 0.0) or 0.0)
     if fixed > 0:
         return fixed
@@ -223,6 +232,11 @@ def classify_signal(
     daily_atr: Optional[float] = None,
     bot_equity_usdt: Optional[float] = None,
 ) -> OrbSignal:
+    """把某个时刻之前的 K 线分类为 LONG、SHORT 或带原因码的 FLAT。
+
+    FLAT 不是异常，而是扫描系统的正常结果。稳定 reason code 会被回测、调试日志和前端
+    共同使用，因此新增过滤器时应为每个退出分支提供明确原因。
+    """
     c = cfg or OrbConfig.from_env()
     sym = str(symbol).strip().upper()
     flat = lambda reason: OrbSignal(sym, 0.0, "FLAT", "ORB_NO_TRADE", "low", [reason])
