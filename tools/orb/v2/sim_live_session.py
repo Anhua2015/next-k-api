@@ -48,7 +48,15 @@ from tools.orb.v2.backtest_universe import universe_session_dates  # noqa: E402
 
 import pandas as pd  # noqa: E402
 
-FEE_USDT = 0.10
+DEFAULT_FEE_BPS_PER_SIDE = 4.0  # 单边费率 bps；往返开平 ×2
+
+
+def trade_fee_usdt(notional_usdt: float, *, fee_bps_per_side: float) -> float:
+    """按名义本金计费：fee = notional × (bps/10000) × 2（开+平）。"""
+    n = max(0.0, float(notional_usdt or 0.0))
+    bps = max(0.0, float(fee_bps_per_side))
+    return round(n * (bps / 10000.0) * 2.0, 4)
+
 
 TRADE_CSV_FIELDS = [
     "session_date",
@@ -98,6 +106,7 @@ def simulate_live_session(
     cfg: OrbConfig,
     robot_wallets: List[float],
     respect_env_filters: bool = True,
+    fee_bps_per_side: float = DEFAULT_FEE_BPS_PER_SIDE,
 ) -> Dict[str, Any]:
     tz = cfg.session_tz
     ts = pd.Timestamp(f"{session_date} 12:00:00", tz=tz)
@@ -283,10 +292,14 @@ def simulate_live_session(
                 continue
 
             gross = float(trade_row.get("pnl_usdt") or 0)
-            net = round(gross - FEE_USDT, 2)
+            fee = trade_fee_usdt(
+                float(trade_row.get("notional_usdt") or 0),
+                fee_bps_per_side=fee_bps_per_side,
+            )
+            net = round(gross - fee, 2)
             trade_row["pnl_usdt_gross"] = round(gross, 2)
             trade_row["pnl_usdt"] = net
-            trade_row["fee_usdt"] = FEE_USDT
+            trade_row["fee_usdt"] = fee
             trade_row["breakout_score"] = breakout_score
             trade_row["p_true"] = p_true
             trade_row["scan_et"] = scan_et
@@ -310,6 +323,7 @@ def simulate_live_session(
 
     gross_pnl = round(sum(float(t.get("pnl_usdt_gross") or 0) for t in trades), 2)
     net_pnl = round(sum(float(t.get("pnl_usdt") or 0) for t in trades), 2)
+    fees_pnl = round(sum(float(t.get("fee_usdt") or 0) for t in trades), 2)
     bs_skips = sum(1 for g in gate_skips if str(g.get("reason") or "").startswith("breakout_score"))
 
     return {
@@ -318,12 +332,13 @@ def simulate_live_session(
         "gate": gate.__dict__,
         "robot_equity_usdt": robot_equity_from_env(),
         "robot_count": len(robot_wallets),
+        "fee_bps_per_side": float(fee_bps_per_side),
         "opens": len(trades),
         "gate_skips": len(gate_skips),
         "bs_skips": bs_skips,
         "gross_pnl_usdt": gross_pnl,
         "net_pnl_usdt": net_pnl,
-        "fees_usdt": round(len(trades) * FEE_USDT, 2),
+        "fees_usdt": fees_pnl,
         "trades": trades,
         "gate_skip_detail": gate_skips,
         "timeline_len": len(timeline),
@@ -340,6 +355,7 @@ def simulate_live_sessions(
     cfg: OrbConfig,
     robot_wallets: List[float],
     respect_env_filters: bool = True,
+    fee_bps_per_side: float = DEFAULT_FEE_BPS_PER_SIDE,
 ) -> List[Dict[str, Any]]:
     days: List[Dict[str, Any]] = []
     for d in dates:
@@ -351,6 +367,7 @@ def simulate_live_sessions(
             cfg=cfg,
             robot_wallets=robot_wallets,
             respect_env_filters=respect_env_filters,
+            fee_bps_per_side=fee_bps_per_side,
         )
         days.append(day)
     return days
@@ -431,6 +448,13 @@ def main() -> int:
     ap.add_argument("--json-out", default="")
     ap.add_argument("--csv-out", default="")
     ap.add_argument("--daily-csv-out", default="")
+    ap.add_argument("--robot-equity", type=float, default=0.0, help="每 robot 初始资金 U（覆盖 .env.oi）")
+    ap.add_argument(
+        "--fee-bps",
+        type=float,
+        default=DEFAULT_FEE_BPS_PER_SIDE,
+        help="单边手续费 bps，往返开平按 notional×2 计费（默认 4=0.04%%）",
+    )
     ap.add_argument("--no-live-filters", action="store_true")
     ap.add_argument("--quiet-detail", action="store_true")
     args = ap.parse_args()
@@ -449,13 +473,14 @@ def main() -> int:
         return 1
 
     rc = robot_count_from_env()
-    re = robot_equity_from_env()
+    re = float(args.robot_equity) if float(args.robot_equity) > 0 else robot_equity_from_env()
+    fee_bps = max(0.0, float(args.fee_bps))
     wallets = init_robot_wallets(count=rc, equity_usdt=re)
 
     print(
         f"[live sim] {dates[0]} .. {dates[-1]} | {len(dates)} sessions | "
         f"{len(syms)} syms | gate p>={gate.min_p_true} bs>={gate.min_breakout_score:.0f} | "
-        f"robots={rc}x{re}U",
+        f"robots={rc}x{re}U | fee={fee_bps}bps/side×2 on notional",
         flush=True,
     )
 
@@ -471,6 +496,7 @@ def main() -> int:
             cfg=cfg,
             robot_wallets=wallets,
             respect_env_filters=not bool(args.no_live_filters),
+            fee_bps_per_side=fee_bps,
         )
         days.append(day)
         if not args.quiet_detail:
@@ -483,11 +509,14 @@ def main() -> int:
     total_bs_skips = sum(int(d.get("bs_skips") or 0) for d in days)
 
     tag = dates[0] if len(dates) == 1 else f"{dates[0]}_{dates[-1]}"
+    eq_tag = f"_eq{int(re)}" if float(args.robot_equity) > 0 else ""
     out_dir = ROOT / "output" / "orb" / "v2" / "eval"
-    json_path = Path(args.json_out) if args.json_out.strip() else out_dir / f"live_sim_{tag}.json"
-    csv_path = Path(args.csv_out) if args.csv_out.strip() else out_dir / f"live_sim_{tag}.trades.csv"
+    json_path = Path(args.json_out) if args.json_out.strip() else out_dir / f"live_sim_{tag}{eq_tag}.json"
+    csv_path = Path(args.csv_out) if args.csv_out.strip() else out_dir / f"live_sim_{tag}{eq_tag}.trades.csv"
     daily_csv_path = (
-        Path(args.daily_csv_out) if args.daily_csv_out.strip() else out_dir / f"live_sim_{tag}.daily.csv"
+        Path(args.daily_csv_out)
+        if args.daily_csv_out.strip()
+        else out_dir / f"live_sim_{tag}{eq_tag}.daily.csv"
     )
 
     payload = {
@@ -496,6 +525,11 @@ def main() -> int:
         "gate": gate.__dict__,
         "robot_equity_usdt": re,
         "robot_count": rc,
+        "fee_model": {
+            "bps_per_side": fee_bps,
+            "round_trip": True,
+            "formula": "notional * (bps/10000) * 2",
+        },
         "summary": {
             "total_opens": total_opens,
             "total_gross_pnl_usdt": total_gross,

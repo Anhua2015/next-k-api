@@ -19,8 +19,11 @@ def main() -> None:
     lines.append("")
     lines.append("## 回测口径")
     lines.append("- 逻辑: orb/v2/paper.py + df5_for_breakout_score + Gate BS>=45")
-    lines.append("- 资金: 8 robot x 14U，跨日复利，robot_reuse")
-    lines.append("- 费用: 0.10U/笔")
+    re = meta.get("robot_equity_usdt", 14)
+    lines.append(f"- 资金: 8 robot x {re}U，跨日复利，robot_reuse")
+    fm = meta.get("fee_model") or {}
+    bps = fm.get("bps_per_side", 4)
+    lines.append(f"- 费用: notional × {bps}bps/边 × 2（开平往返）")
     lines.append("- 数据: 本地 K 线缓存 33 标")
     dr = meta["date_range"]
     lines.append(f"- 区间: {dr['from']} ~ {dr['to']} ({dr['sessions']} sessions)")
