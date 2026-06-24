@@ -202,7 +202,7 @@ class TestOrbPaper(unittest.TestCase):
             INSERT INTO orb_signals (
                 recorded_at_utc, symbol, play, side, confidence,
                 entry_price, entry_bar_open_ms, sl_price, tp_price, session_date
-            ) VALUES ('t','QQQUSDT','ORB_BREAKOUT_LONG','LONG','high',100,1_710_000_000_000,99,NULL,'2024-03-15')
+            ) VALUES ('t','QQQUSDT','ORB_BREAKOUT_LONG','LONG','high',100,1710000000000,99,NULL,'2024-03-15')
             """
         )
         conn.commit()
