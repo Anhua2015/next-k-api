@@ -153,7 +153,10 @@ while [[ $WAIT_COUNT -lt $WAIT_MAX ]]; do
 done
 
 if [[ $WAIT_COUNT -ge $WAIT_MAX ]]; then
-    warn "API 未在 ${WAIT_MAX}s 内响应，可能仍在加载中。请检查：$API_LOG"
+    error "API 未在 ${WAIT_MAX}s 内通过健康检查。请检查：$API_LOG"
+    kill -TERM "$API_PID" 2>/dev/null || true
+    rm -f "$API_PID_FILE"
+    exit 1
 fi
 
 # ── 9. 单进程模式下跳过独立调度器 ────────────────────────────────────────────
