@@ -72,6 +72,40 @@ def orb_scan_cron_kwargs(interval_minutes: int, *, second: Optional[int] = None)
     return {"minute": f"*/{n}", "second": sec, "timezone": ORB_SCAN_CRON_TZ}
 
 
+def orb_or_arm_cron_kwargs() -> Optional[Dict[str, Any]]:
+    """美东 RTH：session_open + OR 分钟数 → OR 结束时刻触发 scan（preplace 武装）。"""
+    from orb.core.config import OrbConfig
+
+    c = OrbConfig.from_env()
+    if not c.arm_at_or_close:
+        return None
+    open_t = (c.session_open_time or "09:30").strip()
+    if not open_t:
+        return None
+    parts = open_t.split(":")
+    try:
+        oh = int(parts[0])
+        om = int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        logger.warning("Invalid ORB_SESSION_OPEN=%r for or_arm cron", open_t)
+        return None
+    total_min = oh * 60 + om + max(1, int(c.or_minutes))
+    arm_h = (total_min // 60) % 24
+    arm_m = total_min % 60
+    tz_name = (c.session_tz or "America/New_York").strip()
+    try:
+        tz = pytz.timezone(tz_name)
+    except Exception:
+        tz = ORB_PREMARKET_KLINE_TZ
+    return {
+        "hour": arm_h,
+        "minute": arm_m,
+        "second": ORB_SCAN_CRON_SECOND,
+        "timezone": tz,
+        "day_of_week": "mon-fri",
+    }
+
+
 def register_scheduled_jobs(sch: Any, wt: Any) -> None:
     """向 BackgroundScheduler / BlockingScheduler 注册与 worker_tasks 对齐的 cron。"""
     sch.add_job(wt.run_pool_task, "cron", hour=10, minute=0, id="pool_daily")
@@ -93,6 +127,22 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
                 replace_existing=True,
                 **cron_kw,
             )
+            or_arm_kw = orb_or_arm_cron_kwargs()
+            if or_arm_kw:
+                sch.add_job(
+                    wt.run_orb_scan_task,
+                    "cron",
+                    id="orb_or_arm",
+                    replace_existing=True,
+                    **or_arm_kw,
+                )
+                logger.info(
+                    "orb_or_arm cron: %02d:%02d:%02d %s (preplace at OR close)",
+                    or_arm_kw["hour"],
+                    or_arm_kw["minute"],
+                    or_arm_kw["second"],
+                    or_arm_kw["timezone"],
+                )
         else:
             logger.warning(
                 "ORB_SCAN_INTERVAL_MINUTES=%s 无法对齐 UTC 整分 cron（须整除 60），"
@@ -105,6 +155,22 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
                 id="orb_scanner",
                 replace_existing=True,
             )
+            or_arm_kw = orb_or_arm_cron_kwargs()
+            if or_arm_kw:
+                sch.add_job(
+                    wt.run_orb_scan_task,
+                    "cron",
+                    id="orb_or_arm",
+                    replace_existing=True,
+                    **or_arm_kw,
+                )
+                logger.info(
+                    "orb_or_arm cron: %02d:%02d:%02d %s (preplace at OR close)",
+                    or_arm_kw["hour"],
+                    or_arm_kw["minute"],
+                    or_arm_kw["second"],
+                    or_arm_kw["timezone"],
+                )
     if ORB_V2_MONTHLY_TRAIN_ENABLED:
         sch.add_job(
             wt.run_orb_v2_monthly_train_task,

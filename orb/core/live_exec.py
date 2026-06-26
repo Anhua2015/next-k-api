@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from orb.core.config import OrbConfig
 from orb.core.kline_cache import norm_symbol
 from orb.core.protocol_client import (
     LIVE_PENDING_NOTE,
+    LIVE_PENDING_OCO_NOTE,
     SOURCE_ORB,
     ingest_signals,
     lookup_signal,
     protocol_configured,
     reconcile_pending_entries,
 )
-from orb.core.signals import OrbSignal
+from orb.core.signals import OrbSignal, PreplaceArmBundle, limit_price_for_side
 
 logger = logging.getLogger(__name__)
+
+_PENDING_STATUSES = frozenset({"submitted", "received", "pending", ""})
+_TERMINAL_STATUSES = frozenset({"cancelled", "error", "skipped", "skipped_duplicate"})
 
 
 def live_enabled(cfg: OrbConfig) -> bool:
@@ -46,12 +51,21 @@ def _open_signal_id(sig: OrbSignal) -> str:
     return f"orb:open:{sig.symbol}:{sess}:{bar}"
 
 
+def _preplace_signal_id(sig: OrbSignal) -> str:
+    bar = int(sig.entry_bar_open_ms or 0)
+    sess = (sig.session_date or "").strip()
+    side = str(sig.side).upper()
+    return f"orb:preplace:{sig.symbol}:{sess}:{bar}:{side}"
+
+
 def _close_signal_id(symbol: str, *, signal_id: int, tag: str) -> str:
     sym = norm_symbol(symbol)
     return f"orb:close:{sym}:{int(signal_id)}:{str(tag or 'resolve').strip().lower()}"
 
 
 def _live_entry_type(cfg: OrbConfig) -> str:
+    if bool(getattr(cfg, "arm_at_or_close", False)):
+        return "STOP_LIMIT"
     raw = str(getattr(cfg, "live_entry_type", "") or "stoplimit_gap").strip().lower()
     if raw in ("stoplimit_gap", "stoplimit", "stop_limit", "stop-limit"):
         return "STOP_LIMIT"
@@ -74,7 +88,69 @@ def live_open_is_pending(result: Optional[Dict[str, Any]]) -> bool:
     return ingest_detail_action(result) == "submitted"
 
 
-def build_open_payload(sig: OrbSignal, cfg: OrbConfig) -> Dict[str, Any]:
+def live_open_any_pending(result: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if live_open_is_pending(result):
+        return True
+    for detail in result.get("details") or []:
+        if str(detail.get("action") or "").lower() == "submitted":
+            return True
+    return False
+
+
+def live_preplace_oco_succeeded(result: Optional[Dict[str, Any]]) -> bool:
+    """OCO 双腿均 submitted/traded 且无 error。"""
+    if not isinstance(result, dict) or result.get("skipped") is True:
+        return True
+    if result.get("error") or int(result.get("errors") or 0) > 0:
+        return False
+    details = result.get("details") or []
+    if len(details) < 2:
+        return False
+    ok = frozenset({"submitted", "traded", "duplicate"})
+    for detail in details:
+        act = str(detail.get("action") or "").lower()
+        if act == "error":
+            return False
+        if act not in ok:
+            return False
+    return True
+
+
+def _parse_proto_result(proto: Dict[str, Any]) -> Dict[str, Any]:
+    raw = proto.get("result")
+    if raw is None:
+        raw = proto.get("result_json") or {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _preplace_api_id(*, sym: str, session_date: str, or_end_ms: int, leg_side: str) -> str:
+    return f"orb:preplace:{str(sym).strip().upper()}:{session_date or ''}:{int(or_end_ms)}:{leg_side.upper()}"
+
+
+def _lookup_oco_legs(*, sym: str, session_date: str, or_end_ms: int) -> Dict[str, Dict[str, Any]]:
+    legs: Dict[str, Dict[str, Any]] = {}
+    for leg_side in ("LONG", "SHORT"):
+        api_id = _preplace_api_id(sym=sym, session_date=session_date, or_end_ms=or_end_ms, leg_side=leg_side)
+        try:
+            proto = lookup_signal(source=SOURCE_ORB, api_signal_id=api_id)
+        except Exception as exc:
+            logger.warning("[orb] protocol lookup %s failed: %s", api_id, exc)
+            continue
+        if proto:
+            legs[leg_side] = proto
+    return legs
+
+
+def build_open_payload(sig: OrbSignal, cfg: OrbConfig, *, oco_peer_api_id: Optional[str] = None) -> Dict[str, Any]:
     notional = float(sig.paper_notional_usdt or cfg.default_paper_notional())
     lev = _leverage(cfg)
     margin = _margin_from_notional(notional, cfg)
@@ -88,22 +164,30 @@ def build_open_payload(sig: OrbSignal, cfg: OrbConfig) -> Dict[str, Any]:
                 implied,
                 lev,
             )
+    entry = float(sig.price) if sig.price else None
+    side_u = str(sig.side).upper()
+    limit_px = limit_price_for_side(entry=entry, side=side_u, cfg=cfg) if entry else None
+    api_id = _preplace_signal_id(sig) if cfg.arm_at_or_close else _open_signal_id(sig)
     payload: Dict[str, Any] = {
         "source": SOURCE_ORB,
-        "api_signal_id": _open_signal_id(sig),
+        "api_signal_id": api_id,
         "symbol": str(sig.symbol).strip().upper(),
-        "side": str(sig.side).upper(),
+        "side": side_u,
         "margin_usdt": round(margin, 4),
         "leverage": lev,
-        "entry_price": float(sig.price) if sig.price else None,
+        "entry_price": entry,
+        "limit_price": limit_px,
         "sl_price": float(sig.sl_price) if sig.sl_price is not None else None,
         "tp_price": float(sig.tp_price) if sig.tp_price is not None else None,
         "play": sig.play or "ORB",
         "confidence": sig.confidence or "high",
         "action": "open",
         "entry_type": _live_entry_type(cfg),
-        "client_ref": _open_signal_id(sig),
+        "allow_gap_market": not bool(getattr(cfg, "arm_at_or_close", False)),
+        "client_ref": api_id,
     }
+    if oco_peer_api_id:
+        payload["oco_peer_api_id"] = oco_peer_api_id
     return payload
 
 
@@ -149,6 +233,8 @@ def live_ingest_succeeded(result: Optional[Dict[str, Any]]) -> bool:
         return False
     if int(result.get("traded") or 0) >= 1:
         return True
+    if int(result.get("submitted") or 0) >= 1:
+        return True
     if action in ("traded", "submitted"):
         return True
     for detail in result.get("details") or []:
@@ -167,6 +253,22 @@ def notify_open(sig: OrbSignal, cfg: OrbConfig) -> Dict[str, Any]:
         return {"skipped": True, "reason": "not_actionable"}
     payload = build_open_payload(sig, cfg)
     return ingest_signals([payload])
+
+
+def notify_preplace_arm(bundle: PreplaceArmBundle, cfg: OrbConfig) -> Dict[str, Any]:
+    if not live_enabled(cfg):
+        return {"skipped": True, "reason": "live_disabled"}
+    long_sig = bundle.long_sig
+    short_sig = bundle.short_sig
+    long_id = _preplace_signal_id(long_sig)
+    short_id = _preplace_signal_id(short_sig)
+    payloads: List[Dict[str, Any]] = []
+    if cfg.preplace_oco:
+        payloads.append(build_open_payload(long_sig, cfg, oco_peer_api_id=short_id))
+        payloads.append(build_open_payload(short_sig, cfg, oco_peer_api_id=long_id))
+    else:
+        payloads.append(build_open_payload(long_sig, cfg))
+    return ingest_signals(payloads)
 
 
 def notify_close(
@@ -192,6 +294,99 @@ def notify_close(
     return ingest_signals([payload])
 
 
+def _promote_oco_fill(
+    cur,
+    *,
+    sid: int,
+    sym: str,
+    leg_side: str,
+    proto: Dict[str, Any],
+) -> None:
+    """成交后：用成交腿的 protocol 回报刷新 side/entry/SL/仓位。"""
+    result = _parse_proto_result(proto)
+    side = str(proto.get("side") or result.get("side") or leg_side).upper()
+    fill_px = float(result.get("entry_price") or proto.get("entry_price") or 0)
+    sl_px = proto.get("sl_price")
+    if sl_px is None:
+        sl_px = result.get("sl_price")
+    tp_px = proto.get("tp_price")
+    if tp_px is None:
+        tp_px = result.get("tp_price")
+    notion = result.get("notional_usdt")
+    if notion is None:
+        notion = proto.get("notional_usdt")
+    sl_f = float(sl_px) if sl_px is not None else None
+    tp_f = float(tp_px) if tp_px is not None else None
+    notion_f = float(notion) if notion is not None else None
+    cur.execute(
+        """
+        UPDATE orb_signals SET
+            side=?, play=?, entry_price=?, sl_price=?, tp_price=?,
+            virtual_notional_usdt=?, notes=NULL, confidence='high'
+        WHERE id=? AND outcome IS NULL
+        """,
+        (
+            side,
+            f"ORB_PREPLACE_{side}",
+            fill_px if fill_px > 0 else None,
+            sl_f,
+            tp_f,
+            round(notion_f, 4) if notion_f is not None and notion_f > 0 else None,
+            int(sid),
+        ),
+    )
+    logger.info(
+        "[orb] preplace fill promoted %s id=%s side=%s fill=%.6f sl=%s notion=%s",
+        sym,
+        sid,
+        side,
+        fill_px,
+        sl_f,
+        notion_f,
+    )
+
+
+def _sync_oco_pending_row(
+    cur,
+    *,
+    sid: int,
+    sym: str,
+    session_date: str,
+    or_end_ms: int,
+) -> bool:
+    """对账单条 pending OCO：成交 promote；双腿均终态且无成交则回滚。"""
+    legs = _lookup_oco_legs(sym=sym, session_date=session_date, or_end_ms=or_end_ms)
+    if not legs:
+        return False
+
+    for leg_side in ("LONG", "SHORT"):
+        proto = legs.get(leg_side)
+        if not proto:
+            continue
+        if str(proto.get("status") or "").lower() == "traded":
+            _promote_oco_fill(cur, sid=int(sid), sym=str(sym), leg_side=leg_side, proto=proto)
+            return True
+
+    if len(legs) < 2:
+        return False
+
+    statuses = {str(legs[s].get("status") or "").lower() for s in legs}
+    if statuses & _PENDING_STATUSES:
+        return False
+
+    if all(st in _TERMINAL_STATUSES for st in statuses):
+        cur.execute(
+            """
+            DELETE FROM orb_signals
+            WHERE id=? AND outcome IS NULL AND COALESCE(notes, '') = ?
+            """,
+            (int(sid), LIVE_PENDING_OCO_NOTE),
+        )
+        logger.info("[orb] rolled back pending OCO id=%s symbol=%s statuses=%s", sid, sym, sorted(statuses))
+        return True
+    return False
+
+
 def sync_live_pending_entries(conn: sqlite3.Connection, cfg: OrbConfig) -> int:
     """对账 pending STOP 入场：成交清标记，取消则回滚纸面持仓。"""
     if not live_enabled(cfg):
@@ -204,16 +399,28 @@ def sync_live_pending_entries(conn: sqlite3.Connection, cfg: OrbConfig) -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, symbol, session_date, entry_bar_open_ms
+        SELECT id, symbol, session_date, entry_bar_open_ms, notes
         FROM orb_signals
-        WHERE outcome IS NULL AND COALESCE(notes, '') = ?
-          AND side IN ('LONG', 'SHORT') AND sl_price IS NOT NULL
+        WHERE outcome IS NULL AND COALESCE(notes, '') IN (?, ?)
+          AND sl_price IS NOT NULL
         """,
-        (LIVE_PENDING_NOTE,),
+        (LIVE_PENDING_NOTE, LIVE_PENDING_OCO_NOTE),
     )
     rows = cur.fetchall()
     changed = 0
-    for sid, sym, session_date, entry_bar in rows:
+    for sid, sym, session_date, entry_bar, notes in rows:
+        note_s = str(notes or "")
+        if note_s == LIVE_PENDING_OCO_NOTE:
+            if _sync_oco_pending_row(
+                cur,
+                sid=int(sid),
+                sym=str(sym),
+                session_date=str(session_date or ""),
+                or_end_ms=int(entry_bar or 0),
+            ):
+                changed += 1
+            continue
+
         api_id = f"orb:open:{str(sym).strip().upper()}:{session_date or ''}:{int(entry_bar or 0)}"
         try:
             proto = lookup_signal(source=SOURCE_ORB, api_signal_id=api_id)

@@ -66,6 +66,28 @@ class TestOrbLiveExec(unittest.TestCase):
         self.assertAlmostEqual(p["close_price"], 155.0)
         self.assertEqual(p["api_signal_id"], "orb:close:COINUSDT:99:loss")
 
+    def test_preplace_open_payload_stop_limit_no_gap(self):
+        cfg = replace(OrbConfig(), live_enabled=True, arm_at_or_close=True, max_chase_ticks=30)
+        sig = OrbSignal(
+            symbol="COINUSDT",
+            price=100.0,
+            side="SHORT",
+            play="ORB_PREPLACE_SHORT",
+            confidence="high",
+            reasons=[],
+            sl_price=101.0,
+            tp_price=None,
+            session_date="2026-06-09",
+            entry_bar_open_ms=1_700_000_000_000,
+            paper_notional_usdt=850.0,
+        )
+        p = build_open_payload(sig, cfg, oco_peer_api_id="orb:preplace:COINUSDT:2026-06-09:1700000000000:LONG")
+        self.assertEqual(p["entry_type"], "STOP_LIMIT")
+        self.assertFalse(p["allow_gap_market"])
+        self.assertAlmostEqual(p["limit_price"], 99.7)
+        self.assertEqual(p["oco_peer_api_id"], "orb:preplace:COINUSDT:2026-06-09:1700000000000:LONG")
+        self.assertTrue(p["api_signal_id"].endswith(":SHORT"))
+
 
 if __name__ == "__main__":
     unittest.main()

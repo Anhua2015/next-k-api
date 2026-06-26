@@ -285,6 +285,7 @@ def count_open_positions(cur: sqlite3.Cursor) -> int:
         """
         SELECT COUNT(*) FROM orb_signals
         WHERE outcome IS NULL AND side IN ('LONG','SHORT') AND sl_price IS NOT NULL
+          AND COALESCE(notes, '') NOT IN ('live_pending_entry', 'live_pending_oco')
         """
     )
     return int(cur.fetchone()[0] or 0)
@@ -298,7 +299,7 @@ def fetch_open_for_resolve(cur: sqlite3.Cursor, *, default_notional: float) -> l
         FROM orb_signals
         WHERE outcome IS NULL AND sl_price IS NOT NULL AND entry_bar_open_ms IS NOT NULL
           AND side IN ('LONG','SHORT')
-          AND COALESCE(notes, '') != 'live_pending_entry'
+          AND COALESCE(notes, '') NOT IN ('live_pending_entry', 'live_pending_oco')
         ORDER BY id ASC
         """,
         (default_notional,),

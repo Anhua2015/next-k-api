@@ -9,6 +9,7 @@ from orb.core.live_exec import (
     build_close_payload,
     live_ingest_succeeded,
     live_open_is_pending,
+    live_preplace_oco_succeeded,
 )
 
 
@@ -53,6 +54,26 @@ class TestLiveIngestSucceeded(unittest.TestCase):
             build_close_payload("COIN", "LONG", tag="loss", signal_id=42)["api_signal_id"],
             "orb:close:COINUSDT:42:loss",
         )
+
+    def test_preplace_oco_requires_both_legs(self) -> None:
+        ok = {
+            "traded": 0,
+            "errors": 0,
+            "details": [{"action": "submitted"}, {"action": "submitted"}],
+        }
+        self.assertTrue(live_preplace_oco_succeeded(ok))
+        partial = {
+            "traded": 0,
+            "errors": 0,
+            "details": [{"action": "submitted"}, {"action": "error"}],
+        }
+        self.assertFalse(live_preplace_oco_succeeded(partial))
+        one_leg = {
+            "traded": 0,
+            "errors": 0,
+            "details": [{"action": "submitted"}],
+        }
+        self.assertFalse(live_preplace_oco_succeeded(one_leg))
 
 
 if __name__ == "__main__":

@@ -38,10 +38,285 @@ class OrbSignal:
     paper_notional_usdt: Optional[float] = None
     volume: float = 0.0
     vol_ma: float = 0.0
+    preplace_arm: Optional["PreplaceArmBundle"] = None
 
     @property
     def regime(self) -> str:
         return "ORB"
+
+
+@dataclass
+class PreplaceArmBundle:
+    """OR 收盘武装：双挂 STOP（OCO），无 5m 突破确认。"""
+
+    long_sig: OrbSignal
+    short_sig: OrbSignal
+    or_end_ms: int
+
+
+def limit_price_for_side(*, entry: float, side: str, cfg: OrbConfig) -> float:
+    chase = max(0, int(cfg.max_chase_ticks)) * float(cfg.tick_size)
+    if str(side).upper() == "LONG":
+        return round(float(entry) + chase, 8)
+    return round(float(entry) - chase, 8)
+
+
+def worst_fill_for_preplace(*, stop_entry: float, side: str, cfg: OrbConfig) -> float:
+    """Preplace 保守定价：STOP 触发价 + 限价追价上限 = 最差成交价。"""
+    return limit_price_for_side(entry=stop_entry, side=side, cfg=cfg)
+
+
+def effective_risk_pct(cfg: OrbConfig, *, for_preplace: bool = False) -> float:
+    """Preplace 可选缩放 risk_pct（默认 1.0；position_safety_pct 已留安全垫）。"""
+    base = max(0.0, float(cfg.risk_pct or 0.0))
+    if not for_preplace:
+        return base
+    explicit = float(getattr(cfg, "preplace_risk_pct", 0.0) or 0.0)
+    if explicit > 0:
+        return explicit
+    scale = float(getattr(cfg, "preplace_risk_scale", 1.0) or 1.0)
+    return base * scale
+
+
+def first_post_or_bar_open_ms(*, or_end_ms: int) -> int:
+    """OR 窗口最后一毫秒之后的第一根 K 线 open_time。"""
+    return int(or_end_ms) + 1
+
+
+def or_end_ms_for_anchor(*, anchor_ms: int, cfg: OrbConfig) -> int:
+    return int(anchor_ms) + max(1, int(cfg.or_minutes)) * 60_000 - 1
+
+
+def should_arm_preplace(*, now_ms: int, or_end_ms: int) -> bool:
+    """时钟已过 OR 结束即可武装（不等 post-OR 5m 收盘）。"""
+    return int(now_ms) > int(or_end_ms)
+
+
+def _build_preplace_side_signal(
+    *,
+    sym: str,
+    side: str,
+    entry_px: float,
+    or_high: float,
+    or_low: float,
+    or_mid: float,
+    width_pct: float,
+    session_date: str,
+    or_end_ms: int,
+    cfg: OrbConfig,
+    daily_atr: Optional[float],
+    bot_equity_usdt: Optional[float],
+    reasons: List[str],
+) -> Optional[OrbSignal]:
+    side_u = str(side).upper()
+    stop_px = round(float(entry_px), 8)
+    worst_px = worst_fill_for_preplace(stop_entry=stop_px, side=side_u, cfg=cfg)
+    sl, tp, r_unit = compute_sl_tp(
+        side=side_u,
+        entry=worst_px,
+        or_high=or_high,
+        or_low=or_low,
+        cfg=cfg,
+        daily_atr=daily_atr,
+    )
+    if sl is None:
+        return None
+    if (cfg.exit_mode or "").strip().lower() != "eod" and tp is None:
+        return None
+    notion = compute_position_notional(
+        entry=worst_px, sl=sl, cfg=cfg, bot_equity_usdt=bot_equity_usdt, for_preplace=True
+    )
+    return OrbSignal(
+        symbol=sym,
+        price=stop_px,
+        side=side_u,
+        play=f"ORB_PREPLACE_{side_u}",
+        confidence="high",
+        reasons=list(reasons)
+        + [
+            f"preplace_arm_{side_u.lower()}",
+            f"stop_entry={stop_px:.6f}",
+            f"worst_entry={worst_px:.6f}",
+            f"risk_pct={effective_risk_pct(cfg, for_preplace=True):.4f}",
+        ],
+        or_high=round(or_high, 8),
+        or_low=round(or_low, 8),
+        or_mid=round(or_mid, 8),
+        or_width_pct=round(width_pct, 4),
+        session_date=session_date,
+        entry_bar_open_ms=int(or_end_ms),
+        sl_price=sl,
+        tp_price=tp,
+        r_unit=r_unit,
+        paper_notional_usdt=round(notion, 4),
+    )
+
+
+def classify_or_preplace_arm(
+    symbol: str,
+    df: pd.DataFrame,
+    *,
+    asof_open_ms: int,
+    cfg: Optional[OrbConfig] = None,
+    session_traded: bool = False,
+    daily_atr: Optional[float] = None,
+    bot_equity_usdt: Optional[float] = None,
+    now_ms: Optional[int] = None,
+) -> OrbSignal:
+    """OR 收盘武装：前置过滤 + 双 STOP，不做 5m 突破确认。"""
+    c = cfg or OrbConfig.from_env()
+    sym = str(symbol).strip().upper()
+    clock_ms = int(now_ms if now_ms is not None else asof_open_ms)
+    flat = lambda reason: OrbSignal(sym, 0.0, "FLAT", "ORB_NO_TRADE", "low", [reason])
+
+    if df.empty:
+        return flat("empty_df")
+    if (c.session_open_time or "").strip():
+        anchor = session_anchor_ms(int(clock_ms), tz=c.session_tz, session_open_time=c.session_open_time)
+        if int(clock_ms) < anchor:
+            return flat("session_not_open")
+    block = (
+        trading_session_block_reason(
+            int(clock_ms),
+            tz=c.session_tz,
+            session_open_time=c.session_open_time,
+            session_close_time=c.session_close_time,
+            market=c.market,
+        )
+        if c.regular_session_only
+        else None
+    )
+    if block:
+        return flat(block)
+
+    probe_ms = int(asof_open_ms)
+    sess = session_slice(
+        df, probe_ms, tz=c.session_tz, session_open_time=c.session_open_time
+    )
+    if len(sess) < 3:
+        return flat("session_too_short")
+
+    pack = compute_opening_range(
+        sess,
+        or_minutes=c.or_minutes,
+        bar_step_ms=c.bar_step_ms(),
+        asof_open_ms=probe_ms,
+        tz=c.session_tz,
+        session_open_time=c.session_open_time,
+    )
+    if not pack:
+        return flat("or_not_ready")
+
+    or_high = float(pack["or_high"])
+    or_low = float(pack["or_low"])
+    width_pct = float(pack["or_width_pct"])
+    or_end_ms = int(pack["or_end_ms"])
+    arm_ms = first_post_or_bar_open_ms(or_end_ms=or_end_ms)
+    session_date = str(pack["session_date"])
+
+    if c.macro_filter and is_macro_skip_day(session_date):
+        return flat("macro_event_day")
+    if not should_arm_preplace(now_ms=clock_ms, or_end_ms=or_end_ms):
+        return flat("or_window_in_progress")
+    if c.one_trade_per_session and session_traded:
+        return flat("session_already_traded")
+    if c.min_or_width_pct > 0 and width_pct < c.min_or_width_pct:
+        return flat("or_too_narrow")
+    if c.max_or_width_pct > 0 and width_pct > c.max_or_width_pct:
+        return flat("or_too_wide")
+    if c.trade_window_minutes > 0:
+        if int(clock_ms) > or_end_ms + int(c.trade_window_minutes) * 60_000:
+            return flat("trade_window_expired")
+
+    sess_pos = sess.reset_index(drop=True)
+    or_rows = sess_pos[sess_pos["open_time"] <= or_end_ms]
+    if or_rows.empty:
+        return flat("bar_not_found")
+    bar_idx = int(or_rows.index[-1])
+    vol_ok, vol, vma = _volume_ok(sess_pos, bar_idx, period=c.vol_ma_period, mult=c.vol_mult)
+    if c.vol_mult > 0 and not vol_ok:
+        return flat("volume_filter")
+
+    vwap = _session_vwap(sess_pos)
+    reasons = [
+        f"or_h={or_high:.6f}",
+        f"or_l={or_low:.6f}",
+        f"width={width_pct:.3f}%",
+        f"vol={vol:.2f}/ma={vma:.2f}",
+        f"vwap={vwap:.6f}",
+        f"mode=preplace_arm",
+        f"or_end_ms={or_end_ms}",
+        f"arm_ms={arm_ms}",
+        f"clock_ms={clock_ms}",
+    ]
+    if daily_atr:
+        reasons.append(f"atr={daily_atr:.6f}")
+
+    long_entry = entry_price_for_side(
+        side="LONG",
+        or_high=or_high,
+        or_low=or_low,
+        tick_size=c.tick_size,
+        tick_offset=c.entry_tick_offset,
+    )
+    short_entry = entry_price_for_side(
+        side="SHORT",
+        or_high=or_high,
+        or_low=or_low,
+        tick_size=c.tick_size,
+        tick_offset=c.entry_tick_offset,
+    )
+    long_sig = _build_preplace_side_signal(
+        sym=sym,
+        side="LONG",
+        entry_px=long_entry,
+        or_high=or_high,
+        or_low=or_low,
+        or_mid=float(pack["or_mid"]),
+        width_pct=width_pct,
+        session_date=session_date,
+        or_end_ms=arm_ms,
+        cfg=c,
+        daily_atr=daily_atr,
+        bot_equity_usdt=bot_equity_usdt,
+        reasons=reasons,
+    )
+    short_sig = _build_preplace_side_signal(
+        sym=sym,
+        side="SHORT",
+        entry_px=short_entry,
+        or_high=or_high,
+        or_low=or_low,
+        or_mid=float(pack["or_mid"]),
+        width_pct=width_pct,
+        session_date=session_date,
+        or_end_ms=arm_ms,
+        cfg=c,
+        daily_atr=daily_atr,
+        bot_equity_usdt=bot_equity_usdt,
+        reasons=reasons,
+    )
+    if long_sig is None or short_sig is None:
+        return OrbSignal(sym, 0.0, "FLAT", "ORB_NO_TRADE", "low", reasons + ["sl_tp_failed"])
+
+    bundle = PreplaceArmBundle(long_sig=long_sig, short_sig=short_sig, or_end_ms=arm_ms)
+    return OrbSignal(
+        symbol=sym,
+        price=0.0,
+        side="FLAT",
+        play="ORB_PREPLACE_ARM",
+        confidence="high",
+        reasons=reasons + ["preplace_arm_ready"],
+        or_high=round(or_high, 8),
+        or_low=round(or_low, 8),
+        or_mid=round(float(pack["or_mid"]), 8),
+        or_width_pct=round(width_pct, 4),
+        session_date=session_date,
+        entry_bar_open_ms=int(arm_ms),
+        volume=round(vol, 4),
+        vol_ma=round(vma, 4),
+        preplace_arm=bundle,
+    )
 
 
 def _volume_ok(df: pd.DataFrame, idx: int, *, period: int, mult: float) -> Tuple[bool, float, float]:
@@ -125,6 +400,8 @@ def compute_position_notional(
     sl: float,
     cfg: OrbConfig,
     bot_equity_usdt: Optional[float] = None,
+    for_preplace: bool = False,
+    risk_pct_override: Optional[float] = None,
 ) -> float:
     """固定名义优先；否则按单标机器人本金的风险百分比定仓。"""
     fixed = float(getattr(cfg, "fixed_notional_usdt", 0.0) or 0.0)
@@ -136,7 +413,12 @@ def compute_position_notional(
     risk_frac = abs(entry - sl) / entry
     if risk_frac <= 0:
         return float(cfg.default_paper_notional())
-    budget = equity * cfg.risk_pct * (1.0 - cfg.position_safety_pct)
+    risk_pct = (
+        float(risk_pct_override)
+        if risk_pct_override is not None
+        else effective_risk_pct(cfg, for_preplace=for_preplace)
+    )
+    budget = equity * risk_pct * (1.0 - cfg.position_safety_pct)
     return budget / risk_frac
 
 

@@ -18,7 +18,7 @@ from orb.core.db import (
     symbol_bot_enabled,
     symbol_bot_wallet_balance,
 )
-from orb.core.signals import OrbSignal, compute_position_notional
+from orb.core.signals import OrbSignal, compute_position_notional, worst_fill_for_preplace
 from orb.ml.features import extract_features
 from orb.ml.gate import (
     LiveGateConfig,
@@ -41,8 +41,16 @@ from orb.core.paper import (
     resolve_open_positions,
 )
 from orb.v2.config import OrbV2Config
-from orb.core.live_exec import live_enabled, live_ingest_succeeded, live_open_is_pending, sync_live_pending_entries
-from orb.core.protocol_client import LIVE_PENDING_NOTE
+from orb.core.live_exec import (
+    live_enabled,
+    live_ingest_succeeded,
+    live_open_any_pending,
+    live_open_is_pending,
+    live_preplace_oco_succeeded,
+    notify_preplace_arm,
+    sync_live_pending_entries,
+)
+from orb.core.protocol_client import LIVE_PENDING_NOTE, LIVE_PENDING_OCO_NOTE
 from orb.v2.db import mark_breakout_seen, migrate_orb_v2_tables, rollback_breakout_opened
 from orb.v2.gate_state import load_gate_day_state, persist_gate_day_state, v2_session_traded
 from orb.v2.robots import (
@@ -212,9 +220,26 @@ def _record_v2_run(
     )
 
 
-def _apply_robot_notional(sig: OrbSignal, *, entry: float, sl: float, cfg: OrbConfig, bot_equity: float) -> None:
+def _apply_robot_notional(
+    sig: OrbSignal,
+    *,
+    entry: float,
+    sl: float,
+    cfg: OrbConfig,
+    bot_equity: float,
+    for_preplace: bool = False,
+) -> None:
+    sizing_entry = entry
+    if for_preplace:
+        sizing_entry = worst_fill_for_preplace(stop_entry=entry, side=str(sig.side), cfg=cfg)
     sig.paper_notional_usdt = round(
-        compute_position_notional(entry=entry, sl=sl, cfg=cfg, bot_equity_usdt=bot_equity),
+        compute_position_notional(
+            entry=sizing_entry,
+            sl=sl,
+            cfg=cfg,
+            bot_equity_usdt=bot_equity,
+            for_preplace=for_preplace,
+        ),
         4,
     )
 
@@ -415,12 +440,17 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 sym,
                 cfg=c,
                 now_ms=now_ms,
-                session_traded=False,
+                session_traded=c.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2),
                 daily_df=daily_cache.get(sym),
                 bot_equity_usdt=bot_wallet,
                 df5=df5_cache[sym],
             )
             if not is_actionable(sig, c):
+                if sig.reasons and sig.reasons[-1] not in (
+                    "or_window_in_progress",
+                    "session_already_traded",
+                ):
+                    stats["skipped"].append({"symbol": sym, "reason": sig.reasons[-1]})
                 continue
             candidates.append((sym, sig))
         except Exception as exc:
@@ -429,17 +459,40 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
 
     sync_by_sym: Dict[str, int] = {}
     for sym, sig in candidates:
-        side = str(sig.side)
-        sync_by_sym[sym] = sum(1 for s2, g2 in candidates if s2 != sym and str(g2.side) == side)
+        bundle = sig.preplace_arm
+        gate_sig = bundle.long_sig if bundle is not None else sig
+        side = str(gate_sig.side)
+        sync_by_sym[sym] = sum(
+            1
+            for s2, g2 in candidates
+            if s2 != sym
+            and str(
+                (g2.preplace_arm.long_sig if g2.preplace_arm is not None else g2).side
+            )
+            == side
+        )
 
     scored: List[Tuple[float, str, OrbSignal, int, Dict[str, float]]] = []
     for sym, sig in candidates:
         sync_n = int(sync_by_sym.get(sym, 0))
-        feat = extract_features(sig, c, sync_same_side=sync_n)
-        if ml_enabled and model is not None:
-            p_true = float(model.predict_true(feat, symbol=sym))
+        bundle = sig.preplace_arm
+        if bundle is not None:
+            feat_long = extract_features(bundle.long_sig, c, sync_same_side=sync_n)
+            feat_short = extract_features(bundle.short_sig, c, sync_same_side=sync_n)
+            if ml_enabled and model is not None:
+                p_long = float(model.predict_true(feat_long, symbol=sym))
+                p_short = float(model.predict_true(feat_short, symbol=sym))
+                p_true = max(p_long, p_short)
+                feat = feat_long if p_long >= p_short else feat_short
+            else:
+                p_true = 1.0
+                feat = feat_long
         else:
-            p_true = 1.0
+            feat = extract_features(sig, c, sync_same_side=sync_n)
+            if ml_enabled and model is not None:
+                p_true = float(model.predict_true(feat, symbol=sym))
+            else:
+                p_true = 1.0
         scored.append((p_true, sym, sig, sync_n, feat))
     scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -453,6 +506,8 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             session_day,
         )
     for p_true, sym, sig, sync_n, feat in scored:
+        bundle = sig.preplace_arm
+        gate_sig = bundle.long_sig if bundle is not None else sig
         if use_robots and not robot_bound:
             if len(busy_robot_ids(cur)) >= gate.max_opens_per_day:
                 break
@@ -460,10 +515,10 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             break
 
         breakout_score: Optional[float] = None
-        if need_breakout_score:
+        if need_breakout_score and bundle is None:
             breakout_score = _paper_breakout_score(
                 sym,
-                sig,
+                gate_sig,
                 c,
                 session_day=session_day,
                 now_ms=now_ms,
@@ -524,7 +579,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             logger.info(
                 "[orb_v2] gate skip %s %s p=%.3f bs=%s min_bs=%s sync=%d reason=%s",
                 sym,
-                sig.side,
+                gate_sig.side,
                 float(decision.get("p_true") or 0),
                 decision.get("breakout_score"),
                 f"{gate.min_breakout_score:.0f}" if need_breakout_score else "off",
@@ -561,7 +616,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             if hold is not None:
                 if gate_pass and not v2.shadow:
                     rollback_open_decision(gate_state, symbol=sym)
-                reason = "same_side_open" if str(hold["side"]) == sig.side else "open_hold_exists"
+                reason = "same_side_open" if str(hold["side"]) == gate_sig.side else "open_hold_exists"
                 mark_breakout_seen(
                     cur,
                     session_date=session_day,
@@ -635,23 +690,43 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                     conn, assigned_robot, initial_equity_usdt=robot_init, sync=False
                 )
                 _apply_robot_notional(
-                    sig,
-                    entry=float(sig.price),
-                    sl=float(sig.sl_price),
+                    gate_sig,
+                    entry=float(gate_sig.price),
+                    sl=float(gate_sig.sl_price),
                     cfg=c,
                     bot_equity=rw,
+                    for_preplace=bundle is not None,
                 )
+                if bundle is not None:
+                    _apply_robot_notional(
+                        bundle.short_sig,
+                        entry=float(bundle.short_sig.price),
+                        sl=float(bundle.short_sig.sl_price),
+                        cfg=c,
+                        bot_equity=rw,
+                        for_preplace=True,
+                    )
             elif gate_pass and not use_robots and not v2.shadow:
                 bot_wallet = symbol_bot_wallet_balance(
                     conn, sym, initial_equity_usdt=bot_equity, sync=False
                 )
                 _apply_robot_notional(
-                    sig,
-                    entry=float(sig.price),
-                    sl=float(sig.sl_price),
+                    gate_sig,
+                    entry=float(gate_sig.price),
+                    sl=float(gate_sig.sl_price),
                     cfg=c,
                     bot_equity=bot_wallet,
+                    for_preplace=bundle is not None,
                 )
+                if bundle is not None:
+                    _apply_robot_notional(
+                        bundle.short_sig,
+                        entry=float(bundle.short_sig.price),
+                        sl=float(bundle.short_sig.sl_price),
+                        cfg=c,
+                        bot_equity=bot_wallet,
+                        for_preplace=True,
+                    )
 
             if v2.shadow:
                 mark_breakout_seen(
@@ -687,10 +762,13 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 reason=reason or "open_ok",
             )
             open_marked = True
+            persist_sig = gate_sig if bundle is not None else sig
+            if bundle is not None:
+                persist_sig.play = "ORB_PREPLACE_ARM"
             _upsert_signal(
                 cur,
                 ts=now_utc,
-                sig=sig,
+                sig=persist_sig,
                 scan_params=scan_params,
                 cfg=c,
                 robot_id=assigned_robot,
@@ -699,30 +777,40 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             stats["written"] += 1
             open_row = {
                 "symbol": sym,
-                "side": sig.side,
-                "entry": sig.price,
-                "sl": sig.sl_price,
-                "tp": sig.tp_price,
+                "side": persist_sig.side,
+                "entry": persist_sig.price,
+                "sl": persist_sig.sl_price,
+                "tp": persist_sig.tp_price,
                 "p_true": decision.get("p_true"),
                 "breakout_score": decision.get("breakout_score"),
-                "notional_usdt": sig.paper_notional_usdt,
+                "notional_usdt": persist_sig.paper_notional_usdt,
+                "preplace_oco": bundle is not None,
             }
             if assigned_robot is not None:
                 open_row["robot_id"] = assigned_robot
             stats["opens"].append(open_row)
             logger.info(
-                "[orb_v2] gate open %s %s p=%.3f bs=%s sync=%d robot=%s",
+                "[orb_v2] gate open %s %s p=%.3f bs=%s sync=%d robot=%s preplace=%s",
                 sym,
-                sig.side,
+                persist_sig.side,
                 float(decision.get("p_true") or 0),
                 decision.get("breakout_score"),
                 sync_n,
                 assigned_robot,
+                bundle is not None,
             )
-            live_open = _live_open(sig, c)
+            if bundle is not None:
+                live_open = notify_preplace_arm(bundle, c) if c.live_enabled else None
+            else:
+                live_open = _live_open(persist_sig, c)
             if live_open is not None:
                 stats["live"].append({"action": "open", "symbol": sym, "result": live_open})
-            if c.live_enabled and not live_ingest_succeeded(live_open):
+            ingest_ok = (
+                live_preplace_oco_succeeded(live_open)
+                if bundle is not None
+                else live_ingest_succeeded(live_open)
+            )
+            if c.live_enabled and not ingest_ok:
                 _rollback_failed_live_open(
                     cur,
                     session_day=session_day,
@@ -732,15 +820,16 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                     live_open=live_open,
                 )
                 continue
-            if c.live_enabled and live_open_is_pending(live_open):
+            if c.live_enabled and live_open_any_pending(live_open):
+                pending_note = LIVE_PENDING_OCO_NOTE if bundle is not None else LIVE_PENDING_NOTE
                 cur.execute(
                     """
                     UPDATE orb_signals SET notes=?
-                    WHERE symbol=? AND outcome IS NULL AND side IN ('LONG', 'SHORT')
+                    WHERE symbol=? AND outcome IS NULL
                     """,
-                    (LIVE_PENDING_NOTE, sym),
+                    (pending_note, sym),
                 )
-                logger.info("[orb_v2] live pending entry %s — paper resolve deferred", sym)
+                logger.info("[orb_v2] live pending entry %s note=%s — paper resolve deferred", sym, pending_note)
         except Exception as exc:
             if gate_pass and not v2.shadow:
                 if open_persisted or open_marked:

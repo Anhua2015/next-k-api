@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SEC = 30.0
 SOURCE_ORB = "orb"
 LIVE_PENDING_NOTE = "live_pending_entry"
+LIVE_PENDING_OCO_NOTE = "live_pending_oco"
 
 
 def protocol_api_url() -> str:

@@ -80,6 +80,11 @@ def _market_defaults(market: str) -> dict:
             "position_safety_pct": 0.15,
             "entry_tick_offset": 2,
             "tick_size": 0.01,
+            "arm_at_or_close": True,
+            "preplace_oco": True,
+            "max_chase_ticks": 30,
+            "preplace_risk_pct": 0.0,
+            "preplace_risk_scale": 1.0,
             "early_exit_minutes": 0,
             "macro_filter": True,
             "resolve_max_hold_ms": 0,
@@ -155,6 +160,11 @@ class OrbConfig:
     position_safety_pct: float = 0.15
     entry_tick_offset: int = 2
     tick_size: float = 0.01
+    arm_at_or_close: bool = False
+    preplace_oco: bool = True
+    max_chase_ticks: int = 30
+    preplace_risk_pct: float = 0.0
+    preplace_risk_scale: float = 1.0
     early_exit_minutes: int = 0
     macro_filter: bool = True
     margin_usdt: float = 100.0
@@ -282,6 +292,24 @@ class OrbConfig:
             ),
             entry_tick_offset=max(0, _int_env("ORB_ENTRY_TICK_OFFSET", int(md.get("entry_tick_offset", 2)))),
             tick_size=max(0.0, _float_env("ORB_TICK_SIZE", float(md.get("tick_size", 0.01)))),
+            arm_at_or_close=(
+                _truthy(os.getenv("ORB_ARM_AT_OR_CLOSE"), default=False)
+                if os.getenv("ORB_ARM_AT_OR_CLOSE") is not None
+                else bool(md.get("arm_at_or_close", False))
+            ),
+            preplace_oco=(
+                _truthy(os.getenv("ORB_PREPLACE_OCO"), default=True)
+                if os.getenv("ORB_PREPLACE_OCO") is not None
+                else bool(md.get("preplace_oco", True))
+            ),
+            max_chase_ticks=max(0, _int_env("ORB_MAX_CHASE_TICKS", int(md.get("max_chase_ticks", 30)))),
+            preplace_risk_pct=max(
+                0.0, _float_env("ORB_PREPLACE_RISK_PCT", float(md.get("preplace_risk_pct", 0.0)))
+            ),
+            preplace_risk_scale=min(
+                1.0,
+                max(0.0, _float_env("ORB_PREPLACE_RISK_SCALE", float(md.get("preplace_risk_scale", 1.0)))),
+            ),
             early_exit_minutes=max(
                 0, _int_env("ORB_EARLY_EXIT_MINUTES", int(md.get("early_exit_minutes", 0)))
             ),

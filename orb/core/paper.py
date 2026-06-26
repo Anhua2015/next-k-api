@@ -26,7 +26,7 @@ from orb.core.db import (
     symbol_bot_wallet_balance,
     symbol_session_traded,
 )
-from orb.core.session import extended_fetch_anchor_ms
+from orb.core.session import extended_fetch_anchor_ms, session_anchor_ms
 from orb.core.resolve import pnl_r, pnl_usdt, resolve_forward
 from orb.core.session import (
     is_trading_session,
@@ -34,7 +34,7 @@ from orb.core.session import (
     session_day_str,
 )
 from orb.core.tz import session_tz_abbrev, session_utc_offset_hours
-from orb.core.signals import OrbSignal, classify_signal
+from orb.core.signals import OrbSignal, classify_signal, classify_or_preplace_arm, or_end_ms_for_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +190,22 @@ def analyze_at_ms(
             ddf_atr = daily_window_for_atr(ddf, now_ms, cfg)
             daily_atr = daily_atr_asof(ddf_atr, asof, period=cfg.atr_period, tz=cfg.session_tz)
 
+    if cfg.arm_at_or_close:
+        anchor = session_anchor_ms(
+            int(now_ms), tz=cfg.session_tz, session_open_time=cfg.session_open_time
+        )
+        probe_ms = or_end_ms_for_anchor(anchor_ms=int(anchor), cfg=cfg)
+        return classify_or_preplace_arm(
+            sym,
+            df,
+            asof_open_ms=int(probe_ms),
+            cfg=cfg,
+            session_traded=session_traded,
+            daily_atr=daily_atr,
+            bot_equity_usdt=bot_equity_usdt,
+            now_ms=int(now_ms),
+        )
+
     return classify_signal(
         sym,
         df,
@@ -246,6 +262,11 @@ def _scan_params(cfg: OrbConfig) -> Dict[str, Any]:
         "tp_r": cfg.tp_r_multiple,
         "confirm_bars": cfg.confirm_bars,
         "confirm_no_soften": cfg.confirm_no_soften,
+        "arm_at_or_close": cfg.arm_at_or_close,
+        "preplace_oco": cfg.preplace_oco,
+        "max_chase_ticks": cfg.max_chase_ticks,
+        "preplace_risk_pct": cfg.preplace_risk_pct,
+        "preplace_risk_scale": cfg.preplace_risk_scale,
         "vol_mult": cfg.vol_mult,
         "signal_interval": cfg.signal_interval,
         "or_minutes": cfg.or_minutes,
@@ -255,6 +276,12 @@ def _scan_params(cfg: OrbConfig) -> Dict[str, Any]:
 
 
 def is_actionable(sig: OrbSignal, cfg: OrbConfig) -> bool:
+    if sig.preplace_arm is not None:
+        bundle = sig.preplace_arm
+        return (
+            bundle.long_sig.sl_price is not None
+            and bundle.short_sig.sl_price is not None
+        )
     if sig.side not in ("LONG", "SHORT") or sig.sl_price is None:
         return False
     if (cfg.exit_mode or "").strip().lower() == "eod":
