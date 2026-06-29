@@ -1,0 +1,15 @@
+{
+  "leg1": "COINUSDT",
+  "leg2": "MSTRUSDT",
+  "interval": "1h",
+  "delta": 1e-05,
+  "r_noise": 0,
+  "entry_z": 1.5,
+  "exit_z": 0.0,
+  "cost_bps": 2.0,
+  "vol_lookback": 63,
+  "halt_p_trace_pct": null,
+  "initial_capital_usdt": 5000,
+  "deploy_pct": 0.5,
+  "leverage": 2
+}

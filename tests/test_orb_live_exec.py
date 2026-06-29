@@ -77,6 +77,8 @@ class TestOrbLiveExec(unittest.TestCase):
             reasons=[],
             sl_price=101.0,
             tp_price=None,
+            or_high=102.0,
+            or_low=98.0,
             session_date="2026-06-09",
             entry_bar_open_ms=1_700_000_000_000,
             paper_notional_usdt=850.0,
@@ -85,6 +87,8 @@ class TestOrbLiveExec(unittest.TestCase):
         self.assertEqual(p["entry_type"], "STOP_LIMIT")
         self.assertFalse(p["allow_gap_market"])
         self.assertAlmostEqual(p["limit_price"], 99.7)
+        self.assertAlmostEqual(p["or_high"], 102.0)
+        self.assertAlmostEqual(p["sl_risk_dist"], 1.0)
         self.assertEqual(p["oco_peer_api_id"], "orb:preplace:COINUSDT:2026-06-09:1700000000000:LONG")
         self.assertTrue(p["api_signal_id"].endswith(":SHORT"))
 

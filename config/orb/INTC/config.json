@@ -1,0 +1,92 @@
+{
+  "symbol": "INTCUSDT",
+  "label": "OR5 + 2.5% risk (data-driven)",
+  "personality": [
+    "中等偏高波动：日均振幅 ~6.0%，OR5 宽度 ~2.4%",
+    "低胜率 fat-tail 偏弱：~16% 胜率，仅 5 笔 >=5R，EOD 均 R ~4.7（CRCL/COIN 约 10R+）",
+    "EOD 赢家 1h 后仍 100% 为正，不宜 early_exit",
+    "突破集中在 OR 后 15m（75/88 笔），trade_window 无显著增益",
+    "OR5 > OR10 > OR15，但绝对 edge 弱于 CRCL/COIN"
+  ],
+  "target_4000_usdt": false,
+  "max_achievable_wallet_net_usdt": 660,
+  "backtest": {
+    "from": "2026-02-09",
+    "to": "2026-06-24",
+    "sessions_atr": 89,
+    "entry_fill": "preplace_stop",
+    "start_equity_usdt": 1000,
+    "wallet_net_usdt": 553,
+    "end_wallet_usdt": 1553,
+    "opens": 88,
+    "win_rate_pct": 15.9
+  },
+  "strategy": {
+    "or_minutes": 5,
+    "risk_pct": 0.025,
+    "trade_window_minutes": 0,
+    "one_trade_per_session": true,
+    "exit_mode": "eod",
+    "sl_mode": "atr_pct",
+    "macro_filter": false
+  },
+  "session_stats": {
+    "avg_range_pct": 5.97,
+    "avg_or_width_pct": 2.35,
+    "trend_up_days": 45,
+    "trend_down_days": 38,
+    "chop_days": 6
+  },
+  "trade_summary_baseline_1pct": {
+    "eod_pnl_usdt": 655,
+    "sl_pnl_usdt": -434,
+    "big_wins_5r": 5,
+    "avg_eod_r": 4.68
+  },
+  "alternatives": [
+    {
+      "label": "OR5 + 3.0%（区间最高）",
+      "or_minutes": 5,
+      "risk_pct": 0.03,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 660,
+      "opens": 88,
+      "win_rate_pct": 15.9,
+      "note": "honest preplace 上限；仍远低于 4000U"
+    },
+    {
+      "label": "OR5 + 2.0%",
+      "or_minutes": 5,
+      "risk_pct": 0.02,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 444,
+      "opens": 88,
+      "win_rate_pct": 15.9,
+      "note": "更保守"
+    },
+    {
+      "label": "OR5 + 1.0% baseline",
+      "or_minutes": 5,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 221,
+      "opens": 88,
+      "win_rate_pct": 15.9,
+      "note": "默认量级"
+    },
+    {
+      "label": "OR15 + 1.0%（勿用）",
+      "or_minutes": 15,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 81,
+      "opens": 87,
+      "win_rate_pct": 13.8,
+      "note": "长 OR 进一步削弱 edge"
+    }
+  ],
+  "analysis_artifacts": {
+    "profile_json": "output/orb/v2/eval/intc_profile.json",
+    "baseline_trades_csv": "output/orb/v2/eval/intc_baseline_trades.csv"
+  }
+}

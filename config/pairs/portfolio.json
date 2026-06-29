@@ -1,0 +1,18 @@
+{
+  "initial_capital_usdt": 20000,
+  "allocation": {
+    "btc_eth": 0.5,
+    "avax_fil": 0.5
+  },
+  "framework": {
+    "p_trace_sizing": true,
+    "p_trace_lookback": 252,
+    "p_trace_min_scale": 0.25,
+    "halt_p_trace_pct": null,
+    "slippage_bps": 1,
+    "funding_bps_per_8h": 1,
+    "walk_forward_train_days": 90,
+    "walk_forward_test_days": 30,
+    "walk_forward_step_days": 30
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "leg1": "AVAXUSDT",
+  "leg2": "FILUSDT",
+  "interval": "1h",
+  "delta": 0.0001,
+  "r_noise": 0,
+  "entry_z": 1.5,
+  "exit_z": 0.0,
+  "cost_bps": 2.0,
+  "vol_lookback": 63,
+  "halt_p_trace_pct": null,
+  "p_trace_sizing": true,
+  "p_trace_lookback": 252,
+  "p_trace_min_scale": 0.25,
+  "slippage_bps": 1.0,
+  "funding_bps_per_8h": 1.0,
+  "stop_z_extra": null,
+  "max_hold_bars": null,
+  "initial_capital_usdt": 10000,
+  "deploy_pct": 0.5,
+  "leverage": 2
+}

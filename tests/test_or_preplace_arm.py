@@ -10,6 +10,7 @@ from orb.core.signals import (
     effective_risk_pct,
     limit_price_for_side,
     should_arm_preplace,
+    sl_on_loss_side,
     worst_fill_for_preplace,
 )
 
@@ -73,6 +74,12 @@ def test_preplace_arm_right_after_or_end():
     bundle = sig.preplace_arm
     assert bundle.long_sig.side == "LONG"
     assert bundle.short_sig.side == "SHORT"
+    assert sl_on_loss_side(
+        side="LONG", entry=bundle.long_sig.price, sl=float(bundle.long_sig.sl_price)
+    )
+    assert sl_on_loss_side(
+        side="SHORT", entry=bundle.short_sig.price, sl=float(bundle.short_sig.sl_price)
+    )
 
 
 def test_preplace_waits_until_or_end():
@@ -113,16 +120,39 @@ def test_preplace_conservative_sizing_uses_limit_cap():
     stop = 100.0
     worst = worst_fill_for_preplace(stop_entry=stop, side="LONG", cfg=cfg)
     assert worst == 100.3
-    sl, _, _ = compute_sl_tp(
-        side="LONG", entry=worst, or_high=99.8, or_low=99.0, cfg=cfg
+    sl_stop, _, _ = compute_sl_tp(
+        side="LONG", entry=stop, or_high=99.8, or_low=99.0, cfg=cfg
     )
     notion_ideal = compute_position_notional(
-        entry=stop, sl=float(sl), cfg=cfg, bot_equity_usdt=1000.0, for_preplace=False
+        entry=stop, sl=float(sl_stop), cfg=cfg, bot_equity_usdt=1000.0, for_preplace=False
     )
     notion_worst = compute_position_notional(
-        entry=worst, sl=float(sl), cfg=cfg, bot_equity_usdt=1000.0, for_preplace=True
+        entry=worst, sl=float(sl_stop), cfg=cfg, bot_equity_usdt=1000.0, for_preplace=True
     )
     assert notion_worst < notion_ideal
+
+
+def test_preplace_sl_on_loss_side_at_stop():
+    cfg = OrbConfig(
+        tick_size=0.01,
+        max_chase_ticks=30,
+        sl_mode="atr_pct",
+        exit_mode="eod",
+        atr_sl_fraction=0.05,
+        symbol_bot_equity_usdt=1000.0,
+    )
+    stop = 19.73
+    daily_atr = 2.0
+    sl, _, _ = compute_sl_tp(
+        side="SHORT",
+        entry=stop,
+        or_high=20.5,
+        or_low=19.5,
+        cfg=cfg,
+        daily_atr=daily_atr,
+    )
+    assert sl is not None
+    assert sl_on_loss_side(side="SHORT", entry=stop, sl=float(sl))
 
 
 def test_effective_risk_pct_preplace_scale():
@@ -157,5 +187,31 @@ def test_preplace_can_arm_on_later_scan_same_session():
         asof_open_ms=or_end_ms,
         cfg=cfg,
         now_ms=or_end_ms + step,
+    )
+    assert sig.preplace_arm is not None
+
+
+def test_preplace_or5_allows_single_bar_session():
+    day0 = _utc_day0()
+    step = 300_000
+    df = _make_df(10, step_ms=step, start_ms=day0)
+    cfg = OrbConfig(
+        or_minutes=5,
+        session_tz="UTC",
+        session_open_time="",
+        session_close_time="",
+        regular_session_only=False,
+        sl_mode="or_range",
+        exit_mode="eod",
+        arm_at_or_close=True,
+        vol_mult=0.0,
+    )
+    or_end_ms = day0 + 5 * 60_000 - 1
+    sig = classify_or_preplace_arm(
+        "BTCUSDT",
+        df.iloc[:1],
+        asof_open_ms=or_end_ms,
+        cfg=cfg,
+        now_ms=or_end_ms + 5000,
     )
     assert sig.preplace_arm is not None

@@ -18,6 +18,7 @@ from env_loader import load_env_oi  # noqa: E402
 from orb.core.backtest import _daily_df_asof, _iter_scan_ms  # noqa: E402
 from orb.core.breakout_score import breakout_kline_range_ms  # noqa: E402
 from orb.core.config import OrbConfig  # noqa: E402
+from orb.core.symbol_strategy import config_for_symbol  # noqa: E402
 from orb.core.kline_cache import load_klines  # noqa: E402
 from orb.core.macro_calendar import is_macro_skip_day  # noqa: E402
 from orb.core.or_entry_fill import resolve_entry_fill  # noqa: E402
@@ -26,7 +27,13 @@ from orb.core.paper import (  # noqa: E402
     analyze_at_ms,
     in_regular_session,
     is_actionable,
+    needs_daily_atr,
+    resolve_daily_atr,
+    symbols_missing_session_atr,
 )
+from orb.core.rth_daily import aggregate_rth_daily_bars  # noqa: E402
+from orb.core.ema import aggregate_ohlcv, ema_trend_allows, ema_values_asof  # noqa: E402
+from orb.core.vol_breakout import is_vol_breakout_mode, vb_skip_sides  # noqa: E402
 from orb.core.session import session_anchor_ms, session_close_ms, session_day_str  # noqa: E402
 from orb.core.signals import compute_position_notional  # noqa: E402
 from orb.ml.features import extract_features  # noqa: E402
@@ -117,6 +124,9 @@ def simulate_live_session(
     fee_bps_per_side: float = DEFAULT_FEE_BPS_PER_SIDE,
     entry_fill: str = "signal",
     ml_enabled: bool = True,
+    atr_daily_source: str = "binance_1d",
+    ema_trend_filter: bool = False,
+    ema_bar_ms: int = 900_000,
 ) -> Dict[str, Any]:
     tz = cfg.session_tz
     ts = pd.Timestamp(f"{session_date} 12:00:00", tz=tz)
@@ -132,24 +142,63 @@ def simulate_live_session(
     ]
 
     macro_skip = bool(respect_env_filters and cfg.macro_filter and is_macro_skip_day(session_date))
+    cfg_by_sym = {sym: config_for_symbol(sym, base=cfg) for sym in symbols}
 
     fetch_start, end_ms = breakout_kline_range_ms(session_date, cfg)
     dfs5: Dict[str, pd.DataFrame] = {}
     dfs1: Dict[str, pd.DataFrame] = {}
     dfs_daily: Dict[str, pd.DataFrame] = {}
+    dfs_ema: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        dfs5[sym] = load_klines(sym, cfg.signal_interval, start_ms=fetch_start, end_ms=end_ms)
+        cfg_sym = cfg_by_sym[sym]
+        dfs5[sym] = load_klines(sym, cfg_sym.signal_interval, start_ms=fetch_start, end_ms=end_ms)
         dfs1[sym] = load_klines(sym, "1m", start_ms=fetch_start, end_ms=end_ms)
-        if (cfg.sl_mode or "").strip().lower() == "atr_pct":
-            dfs_daily[sym] = load_klines(
-                sym, "1d", start_ms=fetch_start - cfg.daily_atr_warmup_ms(), end_ms=end_ms
-            )
+        if (cfg_sym.sl_mode or "").strip().lower() == "atr_pct" or needs_daily_atr(cfg_sym):
+            warmup_start = fetch_start - cfg_sym.daily_atr_warmup_ms()
+            src = (atr_daily_source or "binance_1d").strip().lower()
+            if src == "rth_5m":
+                df5_warm = load_klines(sym, cfg_sym.signal_interval, start_ms=warmup_start, end_ms=end_ms)
+                dfs_daily[sym] = aggregate_rth_daily_bars(df5_warm, cfg_sym)
+            else:
+                dfs_daily[sym] = load_klines(sym, "1d", start_ms=warmup_start, end_ms=end_ms)
+        if ema_trend_filter:
+            w = max(int(ema_bar_ms) * 40, 5 * 86400_000)
+            df5_w = load_klines(sym, cfg_sym.signal_interval, start_ms=fetch_start - w, end_ms=end_ms)
+            dfs_ema[sym] = aggregate_ohlcv(df5_w, int(ema_bar_ms))
+
+    atr_skip_symbols = symbols_missing_session_atr(symbols, dfs_daily, anchor_ms=anchor, cfg=cfg)
+    robot_bound = robot_bound_mode(symbol_count=len(symbols), robot_count=len(robot_wallets))
+    if atr_skip_symbols and len(atr_skip_symbols) >= len(symbols):
+        return {
+            "session_date": session_date,
+            "macro_skip_day": macro_skip,
+            "atr_skip_day": True,
+            "atr_skip_symbols": sorted(atr_skip_symbols),
+            "entry_fill": entry_fill,
+            "fill_skips": 0,
+            "gate": gate.__dict__,
+            "robot_bound": robot_bound,
+            "robot_bindings": robot_symbol_bindings(symbols) if robot_bound else None,
+            "robot_equity_usdt": robot_equity_from_env(),
+            "robot_count": len(robot_wallets),
+            "fee_bps_per_side": float(fee_bps_per_side),
+            "opens": 0,
+            "gate_skips": 0,
+            "bs_skips": 0,
+            "gross_pnl_usdt": 0.0,
+            "net_pnl_usdt": 0.0,
+            "fees_usdt": 0.0,
+            "trades": [],
+            "gate_skip_detail": [],
+            "timeline_len": 0,
+            "robot_wallets_end": {f"R{i + 1}": round(w, 2) for i, w in enumerate(robot_wallets)},
+        }
 
     gate_state = LiveGateDayState()
-    session_opened: Dict[str, bool] = {}
+    session_traded: Dict[str, bool] = {}
+    session_sides_traded: Dict[str, set[str]] = {}
     robot_busy: Dict[int, Dict[str, Any]] = {}
     robot_reuse = bool(gate.robot_reuse_after_exit)
-    robot_bound = robot_bound_mode(symbol_count=len(symbols), robot_count=len(robot_wallets))
     need_breakout_score = ml_enabled and float(gate.min_breakout_score or 0) > 0
 
     timeline: List[Dict[str, Any]] = []
@@ -169,9 +218,25 @@ def simulate_live_session(
         # 每个 scan 独立 df5_cache（与 paper.py 单次 run_scan 一致）
         df5_cache: Dict[str, Any] = {}
 
+        def _sym_in_position(sym: str) -> bool:
+            for occ in robot_busy.values():
+                if str(occ.get("symbol") or "") == sym and int(occ.get("exit_ms") or 0) > int(scan_ms):
+                    return True
+            return False
+
         candidates: List[Tuple[str, Any]] = []
         for sym in symbols:
-            if session_opened.get(sym):
+            cfg_sym = cfg_by_sym[sym]
+            if sym in atr_skip_symbols:
+                continue
+            vb_dual = is_vol_breakout_mode(cfg_sym) and cfg_sym.vb_one_attempt_per_side
+            if vb_dual:
+                used = session_sides_traded.get(sym, set())
+                if len(used) >= 2:
+                    continue
+            elif cfg_sym.one_trade_per_session and session_traded.get(sym):
+                continue
+            if not cfg_sym.one_trade_per_session and not vb_dual and _sym_in_position(sym):
                 continue
             if robot_bound:
                 ridx = symbol_to_robot_index(sym, symbols)
@@ -185,18 +250,19 @@ def simulate_live_session(
             full5 = dfs5.get(sym)
             if full5 is None or full5.empty:
                 continue
-            df5_cache[sym] = _sim_load_signal_df(full5, cfg, now_ms=int(scan_ms))
+            df5_cache[sym] = _sim_load_signal_df(full5, cfg_sym, now_ms=int(scan_ms))
             ddf = _daily_df_asof(dfs_daily.get(sym, pd.DataFrame()), scan_ms)
             sig = analyze_at_ms(
                 sym,
-                cfg=cfg,
+                cfg=cfg_sym,
                 now_ms=int(scan_ms),
-                session_traded=False,
+                session_traded=bool(session_traded.get(sym)),
+                session_sides_traded=session_sides_traded.get(sym),
                 daily_df=ddf if not ddf.empty else None,
                 bot_equity_usdt=bot_equity,
                 df5=df5_cache[sym],
             )
-            if not is_actionable(sig, cfg):
+            if not is_actionable(sig, cfg_sym):
                 continue
             candidates.append((sym, sig))
 
@@ -205,23 +271,56 @@ def simulate_live_session(
 
         sync_by_sym: Dict[str, int] = {}
         for sym, sig in candidates:
-            side = str(sig.side)
-            sync_by_sym[sym] = sum(1 for s2, g2 in candidates if s2 != sym and str(g2.side) == side)
+            bundle = sig.preplace_arm
+            gate_sig = bundle.long_sig if bundle is not None else sig
+            side = str(gate_sig.side)
+            sync_by_sym[sym] = sum(
+                1
+                for s2, g2 in candidates
+                if s2 != sym
+                and str(
+                    (g2.preplace_arm.long_sig if g2.preplace_arm is not None else g2).side
+                )
+                == side
+            )
 
         scored: List[Tuple[float, str, Any, int, Dict[str, float]]] = []
         for sym, sig in candidates:
+            cfg_sym = cfg_by_sym[sym]
             sync_n = int(sync_by_sym.get(sym, 0))
-            feat = extract_features(sig, cfg, sync_same_side=sync_n)
-            if ml_enabled and ranker is not None:
-                p_true = float(ranker.predict_true(feat, symbol=sym))
+            bundle = sig.preplace_arm
+            if bundle is not None:
+                feat_long = extract_features(bundle.long_sig, cfg_sym, sync_same_side=sync_n)
+                feat_short = extract_features(bundle.short_sig, cfg_sym, sync_same_side=sync_n)
+                if ml_enabled and ranker is not None:
+                    p_long = float(ranker.predict_true(feat_long, symbol=sym))
+                    p_short = float(ranker.predict_true(feat_short, symbol=sym))
+                    p_true = max(p_long, p_short)
+                    feat = feat_long if p_long >= p_short else feat_short
+                else:
+                    p_true = 1.0
+                    feat = feat_long
             else:
-                p_true = 1.0
+                feat = extract_features(sig, cfg_sym, sync_same_side=sync_n)
+                if ml_enabled and ranker is not None:
+                    p_true = float(ranker.predict_true(feat, symbol=sym))
+                else:
+                    p_true = 1.0
             scored.append((p_true, sym, sig, sync_n, feat))
         scored.sort(key=lambda x: x[0], reverse=True)
 
         for p_true, sym, sig, sync_n, feat in scored:
-            if session_opened.get(sym):
+            cfg_sym = cfg_by_sym[sym]
+            vb_dual = is_vol_breakout_mode(cfg_sym) and cfg_sym.vb_one_attempt_per_side
+            if vb_dual:
+                if len(session_sides_traded.get(sym, set())) >= 2:
+                    continue
+            elif cfg_sym.one_trade_per_session and session_traded.get(sym):
                 continue
+            if not cfg_sym.one_trade_per_session and not vb_dual and _sym_in_position(sym):
+                continue
+            bundle = sig.preplace_arm
+            gate_sig = bundle.long_sig if bundle is not None else sig
             if robot_bound:
                 if robot_reuse:
                     _release_robots_through(robot_busy, robot_wallets, scan_ms)
@@ -233,11 +332,11 @@ def simulate_live_session(
                 break
 
             breakout_score: Optional[float] = None
-            if need_breakout_score:
+            if need_breakout_score and bundle is None:
                 breakout_score = _paper_breakout_score(
                     sym,
-                    sig,
-                    cfg,
+                    gate_sig,
+                    cfg_sym,
                     session_day=session_date,
                     now_ms=int(scan_ms),
                     df5_cache=df5_cache,
@@ -266,15 +365,15 @@ def simulate_live_session(
                 )
             decision["scan_et"] = scan_et
             decision["scan_open_ms"] = int(scan_ms)
-            decision["side"] = str(sig.side)
-            decision["entry"] = float(sig.price)
+            decision["side"] = str(gate_sig.side)
+            decision["entry"] = float(gate_sig.price)
 
             if not decision.get("opened"):
                 gate_skips.append(
                     {
                         "scan_et": scan_et,
                         "symbol": sym,
-                        "side": sig.side,
+                        "side": gate_sig.side,
                         "p_true": p_true,
                         "breakout_score": breakout_score,
                         "sync": sync_n,
@@ -296,16 +395,19 @@ def simulate_live_session(
                 timeline.append(decision)
                 continue
 
-            entry_bo = int(sig.entry_bar_open_ms or 0)
+            entry_bo = int(gate_sig.entry_bar_open_ms or 0)
             trade_row = None
             fill_reason = "ok"
-            if entry_bo > 0:
-                notion = compute_position_notional(
-                    entry=float(sig.price),
-                    sl=float(sig.sl_price),
-                    cfg=cfg,
-                    bot_equity_usdt=robot_wallets[ridx],
-                )
+            if entry_bo > 0 or bundle is not None:
+                if bundle is None:
+                    notion = compute_position_notional(
+                        entry=float(gate_sig.price),
+                        sl=float(gate_sig.sl_price),
+                        cfg=cfg_sym,
+                        bot_equity_usdt=robot_wallets[ridx],
+                    )
+                else:
+                    notion = 0.0
                 trade_row, fill_reason = resolve_entry_fill(
                     mode=entry_fill,
                     sym=sym,
@@ -316,19 +418,38 @@ def simulate_live_session(
                     df5=df5_cache.get(sym),
                     close_ms=close,
                     bar=bar,
-                    cfg=cfg,
+                    cfg=cfg_sym,
                     notional=notion,
                     wallet_before=robot_wallets[ridx],
                     robot_id=ridx + 1,
                     scans=scans,
+                    daily_atr=resolve_daily_atr(
+                        _daily_df_asof(dfs_daily.get(sym, pd.DataFrame()), scan_ms),
+                        asof_open_ms=int(scan_ms),
+                        now_ms=int(scan_ms),
+                        cfg=cfg_sym,
+                    ),
+                    skip_sides=vb_skip_sides(session_sides_traded.get(sym), cfg_sym),
                 )
             if not trade_row:
                 rollback_open_decision(gate_state, symbol=sym)
                 decision["opened"] = False
-                decision["reason"] = fill_reason if entry_bo > 0 else "no_entry_bar"
+                decision["reason"] = fill_reason if (entry_bo > 0 or bundle is not None) else "no_entry_bar"
                 gate_skips.append({**decision, "sync": sync_n})
                 timeline.append(decision)
                 continue
+
+            if ema_trend_filter:
+                fill_ms = int(trade_row.get("fill_bar_open_ms") or trade_row.get("scan_open_ms") or scan_ms)
+                side_u = str(trade_row.get("side") or "")
+                emas = ema_values_asof(dfs_ema.get(sym, pd.DataFrame()), fill_ms - int(ema_bar_ms))
+                if emas is None or not ema_trend_allows(side_u, emas[0], emas[1]):
+                    rollback_open_decision(gate_state, symbol=sym)
+                    decision["opened"] = False
+                    decision["reason"] = "ema_trend_block"
+                    gate_skips.append({**decision, "sync": sync_n})
+                    timeline.append(decision)
+                    continue
 
             gross = float(trade_row.get("pnl_usdt") or 0)
             fee = trade_fee_usdt(
@@ -354,7 +475,11 @@ def simulate_live_session(
             decision["robot_id"] = ridx + 1
             decision["pnl_usdt"] = net
             decision["outcome"] = trade_row.get("outcome")
-            session_opened[sym] = True
+            trade_side = str(trade_row.get("side") or gate_sig.side).upper()
+            if vb_dual:
+                session_sides_traded.setdefault(sym, set()).add(trade_side)
+            else:
+                session_traded[sym] = True
             timeline.append(decision)
 
     if robot_busy:
@@ -364,11 +489,17 @@ def simulate_live_session(
     net_pnl = round(sum(float(t.get("pnl_usdt") or 0) for t in trades), 2)
     fees_pnl = round(sum(float(t.get("fee_usdt") or 0) for t in trades), 2)
     bs_skips = sum(1 for g in gate_skips if str(g.get("reason") or "").startswith("breakout_score"))
-    fill_skips = sum(1 for g in gate_skips if str(g.get("reason") or "") == "or_limit_not_filled")
+    fill_skips = sum(
+        1
+        for g in gate_skips
+        if str(g.get("reason") or "") in ("or_limit_not_filled", "preplace_not_filled")
+    )
 
     return {
         "session_date": session_date,
         "macro_skip_day": macro_skip,
+        "atr_skip_day": False,
+        "atr_skip_symbols": sorted(atr_skip_symbols),
         "entry_fill": entry_fill,
         "fill_skips": fill_skips,
         "gate": gate.__dict__,
@@ -402,6 +533,9 @@ def simulate_live_sessions(
     fee_bps_per_side: float = DEFAULT_FEE_BPS_PER_SIDE,
     entry_fill: str = "signal",
     ml_enabled: bool = True,
+    atr_daily_source: str = "binance_1d",
+    ema_trend_filter: bool = False,
+    ema_bar_ms: int = 900_000,
 ) -> List[Dict[str, Any]]:
     days: List[Dict[str, Any]] = []
     for d in dates:
@@ -416,6 +550,9 @@ def simulate_live_sessions(
             fee_bps_per_side=fee_bps_per_side,
             entry_fill=entry_fill,
             ml_enabled=ml_enabled,
+            atr_daily_source=atr_daily_source,
+            ema_trend_filter=ema_trend_filter,
+            ema_bar_ms=ema_bar_ms,
         )
         days.append(day)
     return days
@@ -516,15 +653,10 @@ def main() -> int:
     )
     ap.add_argument("--robot-count", type=int, default=0, help="覆盖 robot 数量（0=env）")
     ap.add_argument("--or-minutes", type=int, default=0, help="覆盖 OR 窗口分钟（0=env，如 15/30）")
-    ap.add_argument("--no-robot-reset", action="store_true", help="关闭 robot cap/floor 提现重置")
     ap.add_argument("--no-gate-ml", action="store_true", help="绕过 ML p / BS / early-trap（等同 ORB_V2_GATE_ML=0）")
     ap.add_argument("--quiet-detail", action="store_true")
     args = ap.parse_args()
 
-    if args.no_robot_reset:
-        import os
-
-        os.environ["ORB_V2_ROBOT_RESET_CAP"] = "0"
     if args.no_gate_ml:
         import os
 
@@ -577,7 +709,7 @@ def main() -> int:
         f"{len(syms)} syms | ml={'on' if ml_enabled else 'off'} | "
         f"gate p>={gate.min_p_true} bs>={gate.min_breakout_score:.0f} | "
         f"fill={args.entry_fill} or={cfg.or_minutes}m risk={cfg.risk_pct} | "
-        f"robots={rc}x{re}U bound={bound} reset={not bool(args.no_robot_reset)} | fee={fee_bps}bps/side×2",
+        f"robots={rc}x{re}U bound={bound} | fee={fee_bps}bps/side×2",
         flush=True,
     )
 
@@ -617,7 +749,7 @@ def main() -> int:
             sym_tag += f"_x{len(syms)}"
     fill_tag = f"_{args.entry_fill}" if args.entry_fill != "signal" else ""
     filter_tag = "_filter" if ml_enabled else "_no_filter"
-    reset_tag = "_no_reset" if args.no_robot_reset else ""
+    reset_tag = ""
     out_dir = ROOT / "output" / "orb" / "v2" / "eval"
     json_path = (
         Path(args.json_out)
@@ -640,7 +772,6 @@ def main() -> int:
         "entry_fill": args.entry_fill,
         "gate_ml_enabled": ml_enabled,
         "or_minutes": cfg.or_minutes,
-        "robot_reset": not bool(args.no_robot_reset),
         "risk_pct": cfg.risk_pct,
         "symbols": syms,
         "date_range": {"from": dates[0], "to": dates[-1], "sessions": len(dates)},

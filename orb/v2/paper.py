@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from orb.ml.model import BreakoutModelBundle
 from orb.core.config import OrbConfig
+from orb.core.symbol_strategy import config_for_symbol
 from orb.core.db import (
     count_open_positions,
     ensure_symbol_bots,
@@ -17,7 +18,9 @@ from orb.core.db import (
     migrate_orb_tables,
     symbol_bot_enabled,
     symbol_bot_wallet_balance,
+    sync_symbol_bots_pool,
 )
+from orb.core.symbol_strategy import config_for_symbol
 from orb.core.signals import OrbSignal, compute_position_notional, worst_fill_for_preplace
 from orb.ml.features import extract_features
 from orb.ml.gate import (
@@ -323,6 +326,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     signal_equity = bot_equity
     if use_robots:
         ensure_orb_robots(cur, count=robot_count, initial_equity_usdt=robot_init)
+        sync_symbol_bots_pool(cur, syms, initial_equity_usdt=robot_init)
         robot_wallets = list_robot_wallet_balances(conn, count=robot_count, initial_equity_usdt=robot_init)
         signal_equity = robot_equity_for_signals(robot_wallets, c)
         stats["robot_wallets"] = {f"R{i + 1}": round(w, 2) for i, w in enumerate(robot_wallets)}
@@ -330,6 +334,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             stats["robot_bindings"] = robot_symbol_bindings(syms)
     else:
         ensure_symbol_bots(cur, syms, initial_equity_usdt=bot_equity)
+        sync_symbol_bots_pool(cur, syms, initial_equity_usdt=bot_equity)
     conn.commit()
 
     if c.macro_filter:
@@ -394,21 +399,28 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
         signal_equity = robot_equity_for_signals(robot_wallets, c)
 
     gate_state = load_gate_day_state(cur, session_day, v2)
+    cfg_by_sym = {sym: config_for_symbol(sym, base=c) for sym in syms}
+    stats["symbol_strategies"] = {
+        sym: {"or_minutes": cfg_by_sym[sym].or_minutes, "risk_pct": cfg_by_sym[sym].risk_pct}
+        for sym in syms
+    }
     daily_cache: Dict[str, Any] = {}
     df5_cache: Dict[str, Any] = {}
-    if (c.sl_mode or "").strip().lower() == "atr_pct":
-        for sym in syms:
-            if c.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2):
+    for sym in syms:
+        cfg_sym = cfg_by_sym[sym]
+        if (cfg_sym.sl_mode or "").strip().lower() == "atr_pct":
+            if cfg_sym.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2):
                 continue
-            daily_cache[sym] = _load_daily_df(sym, c, now_ms=now_ms)
+            daily_cache[sym] = _load_daily_df(sym, cfg_sym, now_ms=now_ms)
 
     candidates: List[Tuple[str, OrbSignal]] = []
     for sym in syms:
+        cfg_sym = cfg_by_sym[sym]
         try:
             if not symbol_bot_enabled(cur, sym):
                 stats["skipped"].append({"symbol": sym, "reason": "bot_disabled"})
                 continue
-            if c.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2):
+            if cfg_sym.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2):
                 stats["skipped"].append({"symbol": sym, "reason": "session_traded"})
                 continue
             if use_robots and robot_bound:
@@ -435,22 +447,30 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                     stats["skipped"].append({"symbol": sym, "reason": "bot_wallet_depleted"})
                     continue
             if sym not in df5_cache:
-                df5_cache[sym] = _load_signal_df(sym, c, now_ms=now_ms)
+                df5_cache[sym] = _load_signal_df(sym, cfg_sym, now_ms=now_ms)
             sig = analyze_at_ms(
                 sym,
-                cfg=c,
+                cfg=cfg_sym,
                 now_ms=now_ms,
-                session_traded=c.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2),
+                session_traded=cfg_sym.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2),
                 daily_df=daily_cache.get(sym),
                 bot_equity_usdt=bot_wallet,
                 df5=df5_cache[sym],
             )
-            if not is_actionable(sig, c):
-                if sig.reasons and sig.reasons[-1] not in (
+            if not is_actionable(sig, cfg_sym):
+                skip_reason = sig.reasons[-1] if sig.reasons else "not_actionable"
+                if skip_reason not in (
                     "or_window_in_progress",
                     "session_already_traded",
                 ):
-                    stats["skipped"].append({"symbol": sym, "reason": sig.reasons[-1]})
+                    if cfg_sym.arm_at_or_close and skip_reason not in ("empty_klines",):
+                        logger.info(
+                            "[orb_v2] preplace not actionable %s reason=%s or=%dm",
+                            sym,
+                            skip_reason,
+                            int(cfg_sym.or_minutes),
+                        )
+                    stats["skipped"].append({"symbol": sym, "reason": skip_reason})
                 continue
             candidates.append((sym, sig))
         except Exception as exc:
@@ -474,11 +494,12 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
 
     scored: List[Tuple[float, str, OrbSignal, int, Dict[str, float]]] = []
     for sym, sig in candidates:
+        cfg_sym = cfg_by_sym[sym]
         sync_n = int(sync_by_sym.get(sym, 0))
         bundle = sig.preplace_arm
         if bundle is not None:
-            feat_long = extract_features(bundle.long_sig, c, sync_same_side=sync_n)
-            feat_short = extract_features(bundle.short_sig, c, sync_same_side=sync_n)
+            feat_long = extract_features(bundle.long_sig, cfg_sym, sync_same_side=sync_n)
+            feat_short = extract_features(bundle.short_sig, cfg_sym, sync_same_side=sync_n)
             if ml_enabled and model is not None:
                 p_long = float(model.predict_true(feat_long, symbol=sym))
                 p_short = float(model.predict_true(feat_short, symbol=sym))
@@ -488,7 +509,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 p_true = 1.0
                 feat = feat_long
         else:
-            feat = extract_features(sig, c, sync_same_side=sync_n)
+            feat = extract_features(sig, cfg_sym, sync_same_side=sync_n)
             if ml_enabled and model is not None:
                 p_true = float(model.predict_true(feat, symbol=sym))
             else:
@@ -506,6 +527,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             session_day,
         )
     for p_true, sym, sig, sync_n, feat in scored:
+        cfg_sym = cfg_by_sym[sym]
         bundle = sig.preplace_arm
         gate_sig = bundle.long_sig if bundle is not None else sig
         if use_robots and not robot_bound:
@@ -519,7 +541,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             breakout_score = _paper_breakout_score(
                 sym,
                 gate_sig,
-                c,
+                cfg_sym,
                 session_day=session_day,
                 now_ms=now_ms,
                 df5_cache=df5_cache,
@@ -693,7 +715,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                     gate_sig,
                     entry=float(gate_sig.price),
                     sl=float(gate_sig.sl_price),
-                    cfg=c,
+                    cfg=cfg_sym,
                     bot_equity=rw,
                     for_preplace=bundle is not None,
                 )
@@ -702,7 +724,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                         bundle.short_sig,
                         entry=float(bundle.short_sig.price),
                         sl=float(bundle.short_sig.sl_price),
-                        cfg=c,
+                        cfg=cfg_sym,
                         bot_equity=rw,
                         for_preplace=True,
                     )
@@ -714,7 +736,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                     gate_sig,
                     entry=float(gate_sig.price),
                     sl=float(gate_sig.sl_price),
-                    cfg=c,
+                    cfg=cfg_sym,
                     bot_equity=bot_wallet,
                     for_preplace=bundle is not None,
                 )
@@ -723,7 +745,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                         bundle.short_sig,
                         entry=float(bundle.short_sig.price),
                         sl=float(bundle.short_sig.sl_price),
-                        cfg=c,
+                        cfg=cfg_sym,
                         bot_equity=bot_wallet,
                         for_preplace=True,
                     )
@@ -770,7 +792,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 ts=now_utc,
                 sig=persist_sig,
                 scan_params=scan_params,
-                cfg=c,
+                cfg=cfg_sym,
                 robot_id=assigned_robot,
             )
             open_persisted = True
@@ -811,6 +833,12 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 else live_ingest_succeeded(live_open)
             )
             if c.live_enabled and not ingest_ok:
+                logger.warning(
+                    "[orb_v2] preplace live ingest failed %s preplace=%s result=%s",
+                    sym,
+                    bundle is not None,
+                    live_open,
+                )
                 _rollback_failed_live_open(
                     cur,
                     session_day=session_day,
@@ -868,7 +896,6 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     conn.commit()
     resolve_post = resolve_open_positions(conn, cfg=c, now_ms=now_ms) if do_resolve else {}
     stats["live"].extend(resolve_post.get("live") or [])
-    stats["robot_resets"] = resolve_post.get("robot_resets") or []
     if use_robots and robot_wallets is not None:
         stats["robot_wallets"] = {
             f"R{i + 1}": round(

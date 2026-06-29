@@ -1,0 +1,91 @@
+{
+  "symbol": "CRCLUSDT",
+  "label": "OR5 + 3.0% risk (live)",
+  "personality": [
+    "高波动：日均振幅 ~7.9%，高于 COIN（~5.8%）",
+    "低胜率 fat-tail：~19% 胜率，12 笔 >=5R 大赢，EOD 均 R ~10.2",
+    "EOD 赢家入场后 1h 100% 仍为正，不宜 early_exit",
+    "突破集中在 OR 后 15m 内（77/85 笔），trade_window 限制收益",
+    "OR5 显著优于 OR10/15（1% 基线 +1000 vs +414/+405）"
+  ],
+  "target_4000_usdt": true,
+  "backtest": {
+    "from": "2026-02-09",
+    "to": "2026-06-24",
+    "sessions_atr": 85,
+    "entry_fill": "preplace_stop",
+    "start_equity_usdt": 1000,
+    "wallet_net_usdt": 3658,
+    "end_wallet_usdt": 4658,
+    "opens": 85,
+    "win_rate_pct": 18.8
+  },
+  "strategy": {
+    "or_minutes": 5,
+    "risk_pct": 0.03,
+    "trade_window_minutes": 0,
+    "one_trade_per_session": true,
+    "exit_mode": "eod",
+    "sl_mode": "atr_pct",
+    "macro_filter": false
+  },
+  "session_stats": {
+    "avg_range_pct": 7.86,
+    "avg_or_width_pct": 2.62,
+    "trend_up_days": 36,
+    "trend_down_days": 41,
+    "chop_days": 8
+  },
+  "trade_summary_baseline_1pct": {
+    "eod_pnl_usdt": 1637,
+    "sl_pnl_usdt": -637,
+    "big_wins_5r": 12,
+    "avg_eod_r": 10.23
+  },
+  "alternatives": [
+    {
+      "label": "OR5 + 3.0%（4000+ 目标）",
+      "or_minutes": 5,
+      "risk_pct": 0.03,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 4927,
+      "opens": 85,
+      "win_rate_pct": 18.8,
+      "note": "区间最高 honest preplace；连损风险更大"
+    },
+    {
+      "label": "OR5 + 2.0%",
+      "or_minutes": 5,
+      "risk_pct": 0.02,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 2592,
+      "opens": 85,
+      "win_rate_pct": 18.8,
+      "note": "更保守"
+    },
+    {
+      "label": "OR5 + 1.0% baseline",
+      "or_minutes": 5,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 1000,
+      "opens": 85,
+      "win_rate_pct": 18.8,
+      "note": "默认量级"
+    },
+    {
+      "label": "OR10 + 1.0%（勿用）",
+      "or_minutes": 10,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 414,
+      "opens": 83,
+      "win_rate_pct": 14.5,
+      "note": "长 OR 错过 CRCL 早突破 edge"
+    }
+  ],
+  "analysis_artifacts": {
+    "profile_json": "output/orb/v2/eval/crcl_profile.json",
+    "baseline_trades_csv": "output/orb/v2/eval/crcl_baseline_trades.csv"
+  }
+}

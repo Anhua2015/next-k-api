@@ -147,6 +147,7 @@ class OrbConfig:
     vol_mult: float = 0.0
     sl_mode: str = "atr_pct"
     atr_period: int = 14
+    atr_breakout_mult: float = 0.33
     atr_sl_fraction: float = 0.05
     exit_mode: str = "eod"
     tp_r_multiple: float = 0.0
@@ -207,6 +208,9 @@ class OrbConfig:
     def from_env(cls) -> "OrbConfig":
         md = _market_defaults(os.getenv("ORB_MARKET", DEFAULT_MARKET) or DEFAULT_MARKET)
         mode = (os.getenv("ORB_ENTRY_MODE") or md.get("entry_mode", "breakout") or "breakout").strip().lower()
+        atr_sl_default = float(md.get("atr_sl_fraction", 0.05))
+        atr_sl_frac = max(0.0, _float_env("ORB_ATR_SL_FRACTION", atr_sl_default))
+        atr_bo_mult = max(0.0, _float_env("ORB_ATR_BREAKOUT_MULT", atr_sl_frac))
         iv = (os.getenv("ORB_SIGNAL_INTERVAL") or md.get("signal_interval", "5m") or "5m").strip().lower()
         sbr = (os.getenv("ORB_SAME_BAR_RULE", "pessimistic") or "pessimistic").strip().lower()
         market = str(md["market"])
@@ -242,7 +246,7 @@ class OrbConfig:
             session_open_time=session_open,
             session_close_time=session_close,
             regular_session_only=regular_only,
-            entry_mode=mode if mode in ("breakout", "retest") else "breakout",
+            entry_mode=mode if mode in ("breakout", "retest", "vol_breakout") else "breakout",
             confirm_bars=max(1, _int_env("ORB_CONFIRM_BARS", int(md.get("confirm_bars", 1)))),
             confirm_no_soften=(
                 _truthy(os.getenv("ORB_CONFIRM_NO_SOFTEN"), default=False)
@@ -263,7 +267,8 @@ class OrbConfig:
             vol_mult=_float_env("ORB_VOL_MULT", float(md.get("vol_mult", 0.0))),
             sl_mode=sl_mode,
             atr_period=max(2, _int_env("ORB_ATR_PERIOD", int(md.get("atr_period", 14)))),
-            atr_sl_fraction=max(0.0, _float_env("ORB_ATR_SL_FRACTION", float(md.get("atr_sl_fraction", 0.05)))),
+            atr_breakout_mult=atr_bo_mult,
+            atr_sl_fraction=atr_sl_frac,
             exit_mode=exit_mode,
             tp_r_multiple=tp_r,
             risk_pct=max(0.0, _float_env("ORB_RISK_PCT", float(md.get("risk_pct", 0.01)))),

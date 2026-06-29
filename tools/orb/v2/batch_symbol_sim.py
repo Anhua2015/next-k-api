@@ -16,13 +16,14 @@ sys.path.insert(0, str(ROOT))
 
 from env_loader import load_env_oi  # noqa: E402
 from orb.core.config import OrbConfig  # noqa: E402
+from orb.core.symbol_strategy import config_for_symbol  # noqa: E402
 from orb.core.kline_cache import norm_symbol  # noqa: E402
 from orb.ml.gate import LiveGateConfig, gate_with_ml_bypass  # noqa: E402
 from orb.ml.samples import parse_symbol_list  # noqa: E402
 from orb.v2.paths import resolve_gate_config_path, resolve_symbols_path  # noqa: E402
 from orb.v2.robots import init_robot_wallets, robot_equity_from_env  # noqa: E402
 from tools.orb.ml.eval_live_gate import _ml_cfg  # noqa: E402
-from tools.orb.v2.backtest_universe import universe_session_dates  # noqa: E402
+from tools.orb.v2.backtest_universe import filter_backtest_sessions_with_atr, universe_session_dates  # noqa: E402
 from tools.orb.v2.sim_live_session import (  # noqa: E402
     DEFAULT_FEE_BPS_PER_SIDE,
     _resolve_dates,
@@ -103,16 +104,13 @@ def _run_one(
 
 def main() -> int:
     load_env_oi()
-    import os
-
-    os.environ["ORB_V2_ROBOT_RESET_CAP"] = "0"
     ap = argparse.ArgumentParser(description="Batch per-symbol live session sim")
     ap.add_argument("--symbols-file", default=str(resolve_symbols_path()))
     ap.add_argument("--from-date", default="2026-02-09")
     ap.add_argument("--to-date", default="2026-06-24")
     ap.add_argument("--robot-equity", type=float, default=1000.0)
-    ap.add_argument("--entry-fill", default="stoplimit_gap")
-    ap.add_argument("--or-minutes", type=int, default=15)
+    ap.add_argument("--entry-fill", default="preplace_stop")
+    ap.add_argument("--or-minutes", type=int, default=0, help="0=用 config/orb/{SYM}/strategy.env")
     ap.add_argument("--fee-bps", type=float, default=DEFAULT_FEE_BPS_PER_SIDE)
     ap.add_argument("--no-live-filters", action="store_true")
     ap.add_argument("--json-out", default="")
@@ -143,12 +141,14 @@ def main() -> int:
 
     tag = f"{dates[0]}_{dates[-1]}"
     out_dir = ROOT / "output" / "orb" / "v2" / "eval"
-    json_path = Path(args.json_out) if args.json_out else out_dir / f"batch_sym_{args.entry_fill}_or{cfg.or_minutes}_{tag}_eq{int(args.robot_equity)}_no_filter_no_reset.json"
-    csv_path = Path(args.csv_out) if args.csv_out else out_dir / f"batch_sym_{args.entry_fill}_or{cfg.or_minutes}_{tag}_eq{int(args.robot_equity)}_no_filter_no_reset.csv"
+    or_tag = f"or{int(args.or_minutes)}" if int(args.or_minutes) > 0 else "per_symbol_or"
+    json_path = Path(args.json_out) if args.json_out else out_dir / f"batch_sym_{args.entry_fill}_{or_tag}_{tag}_eq{int(args.robot_equity)}.json"
+    csv_path = Path(args.csv_out) if args.csv_out else out_dir / f"batch_sym_{args.entry_fill}_{or_tag}_{tag}_eq{int(args.robot_equity)}.csv"
 
     print(
         f"[batch] {len(syms)} syms | {dates[0]}..{dates[-1]} ({len(dates)} sessions) | "
-        f"fill={args.entry_fill} or={cfg.or_minutes}m | no ML/BS | eq={args.robot_equity} | "
+        f"fill={args.entry_fill} or={'per-symbol' if int(args.or_minutes) <= 0 else str(cfg.or_minutes) + 'm'} | "
+        f"no ML/BS | eq={args.robot_equity} | "
         f"macro={'off' if args.no_live_filters else 'on'}",
         flush=True,
     )
@@ -157,19 +157,23 @@ def main() -> int:
     t_all = time.time()
     for i, sym in enumerate(syms, 1):
         sym_n = sym.replace("USDT", "")
-        sym_dates = universe_session_dates([sym], cfg)
+        cfg_sym = config_for_symbol(sym, base=cfg)
+        if int(args.or_minutes) > 0:
+            cfg_sym.or_minutes = int(args.or_minutes)
+        sym_dates = universe_session_dates([sym], cfg_sym)
         sym_dates = [d for d in sym_dates if (not lo or d >= lo) and (not hi or d <= hi)]
+        sym_dates = filter_backtest_sessions_with_atr(sym_dates, [sym], cfg_sym)
         if not sym_dates:
             print(f"[{i}/{len(syms)}] {sym_n} skip (no kline)", flush=True)
             rows.append({"symbol": sym_n, "sessions": 0, "opens": 0, "net_pnl_usdt": 0, "note": "no_data"})
             continue
-        print(f"[{i}/{len(syms)}] {sym_n} ({len(sym_dates)} sessions) ...", flush=True)
+        print(f"[{i}/{len(syms)}] {sym_n} OR{cfg_sym.or_minutes} risk={cfg_sym.risk_pct} ({len(sym_dates)} sessions) ...", flush=True)
         row = _run_one(
             sym,
             sym_dates,
             gate=gate,
             ranker=None,
-            cfg=cfg,
+            cfg=cfg_sym,
             robot_equity=float(args.robot_equity),
             fee_bps=float(args.fee_bps),
             entry_fill=str(args.entry_fill),
@@ -189,9 +193,8 @@ def main() -> int:
     payload = {
         "rule": "batch_symbol_live_sim",
         "entry_fill": args.entry_fill,
-        "or_minutes": cfg.or_minutes,
+        "or_minutes": int(args.or_minutes) if int(args.or_minutes) > 0 else "per_symbol",
         "gate_ml": False,
-        "robot_reset": False,
         "robot_equity_usdt": float(args.robot_equity),
         "fee_bps_per_side": float(args.fee_bps),
         "macro_filter": cfg.macro_filter,

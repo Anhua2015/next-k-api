@@ -1,0 +1,85 @@
+{
+  "symbol": "TSLAUSDT",
+  "label": "risk3.0_tw0",
+  "personality": [
+    "存在 12 笔 >=5R 大赢，适合 EOD 持有",
+    "EOD 赢家入场后 1h 几乎不回吐，early_exit 可能伤 edge"
+  ],
+  "target_4000_usdt": false,
+  "backtest": {
+    "from": "2026-02-09",
+    "to": "2026-06-24",
+    "sessions_atr": 92,
+    "wallet_net_usdt": 2300.39,
+    "opens": 91,
+    "win_rate_pct": 16.5
+  },
+  "strategy": {
+    "or_minutes": 5,
+    "risk_pct": 0.03,
+    "trade_window_minutes": 0
+  },
+  "session_stats": {
+    "sessions": 92,
+    "avg_range_pct": 3.46,
+    "median_range_pct": 3.09,
+    "avg_or_width_pct": 1.19,
+    "median_or_width_pct": 1.13,
+    "avg_day_ret_pct": -0.01,
+    "trend_up_days": 41,
+    "trend_down_days": 36,
+    "chop_days": 15,
+    "avg_morning_ret_pct": -0.03
+  },
+  "trade_summary": {
+    "opens": 91,
+    "eod_wins": 15,
+    "sl_losses": 76,
+    "win_rate_pct": 16.5,
+    "eod_pnl_usdt": 1500.92,
+    "sl_pnl_usdt": -822.69,
+    "avg_eod_r": 10.01,
+    "big_wins_5r": 12,
+    "avg_eod_mfe_pct": 3.77,
+    "avg_eod_h1_ret_pct": 1.61,
+    "eod_h1_still_positive_pct": 100.0
+  },
+  "alternatives": [
+    {
+      "label": "risk2.5_tw0",
+      "or_minutes": 5,
+      "risk_pct": 0.025,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 1891.39,
+      "opens": 91,
+      "win_rate": 16.5
+    },
+    {
+      "label": "risk2.0_tw0",
+      "or_minutes": 5,
+      "risk_pct": 0.02,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 1475.87,
+      "opens": 91,
+      "win_rate": 16.5
+    },
+    {
+      "label": "risk1.5_tw0",
+      "or_minutes": 5,
+      "risk_pct": 0.015,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 1067.31,
+      "opens": 91,
+      "win_rate": 16.5
+    },
+    {
+      "label": "tw90",
+      "or_minutes": 5,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 90,
+      "wallet_net_usdt": 697.27,
+      "opens": 90,
+      "win_rate": 16.7
+    }
+  ]
+}

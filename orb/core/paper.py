@@ -7,12 +7,13 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set, Set
 
 import pandas as pd
 
 from binance_fapi import fetch_klines_forward, klines_to_df
 from orb.core.config import OrbConfig
+from orb.core.symbol_strategy import config_for_symbol
 from orb.core.indicators import daily_atr_asof
 from orb.core.macro_calendar import is_macro_skip_day, macro_calendar_status
 from orb.core.db import (
@@ -144,6 +145,63 @@ def _signal_df_from_bars(
     return _drop_forming_bar(df, cfg, now_ms=now_ms)
 
 
+def uses_atr_sl(cfg: OrbConfig) -> bool:
+    return (cfg.sl_mode or "").strip().lower() == "atr_pct"
+
+
+def needs_daily_atr(cfg: OrbConfig) -> bool:
+    from orb.core.vol_breakout import is_vol_breakout_mode
+
+    return uses_atr_sl(cfg) or is_vol_breakout_mode(cfg)
+
+
+def _daily_bars_asof(full: pd.DataFrame, now_ms: int) -> pd.DataFrame:
+    if full.empty:
+        return full
+    return full[full["open_time"] <= int(now_ms)].reset_index(drop=True)
+
+
+def resolve_daily_atr(
+    daily_df: Optional[pd.DataFrame],
+    *,
+    asof_open_ms: int,
+    now_ms: int,
+    cfg: OrbConfig,
+) -> Optional[float]:
+    """截至 asof 的 session ATR；样本不足时返回 None。"""
+    if not needs_daily_atr(cfg):
+        return None
+    if daily_df is None or daily_df.empty:
+        return None
+    ddf_atr = daily_window_for_atr(daily_df, now_ms, cfg)
+    return daily_atr_asof(ddf_atr, asof_open_ms, period=cfg.atr_period, tz=cfg.session_tz)
+
+
+def symbols_missing_session_atr(
+    symbols: List[str],
+    dfs_daily: Dict[str, pd.DataFrame],
+    *,
+    anchor_ms: int,
+    cfg: OrbConfig,
+) -> Set[str]:
+    """OR 结束时仍算不出 ATR 的标的（该 session 不应交易）。"""
+    if not needs_daily_atr(cfg):
+        return set()
+    from orb.core.signals import or_end_ms_for_anchor
+    from orb.core.vol_breakout import is_vol_breakout_mode, vol_breakout_arm_ms
+
+    if is_vol_breakout_mode(cfg):
+        check_ms = vol_breakout_arm_ms(anchor_ms=int(anchor_ms), cfg=cfg)
+    else:
+        check_ms = or_end_ms_for_anchor(anchor_ms=int(anchor_ms), cfg=cfg)
+    missing: Set[str] = set()
+    for sym in symbols:
+        ddf = _daily_bars_asof(dfs_daily.get(sym, pd.DataFrame()), check_ms)
+        if resolve_daily_atr(ddf, asof_open_ms=check_ms, now_ms=check_ms, cfg=cfg) is None:
+            missing.add(str(sym).strip().upper())
+    return missing
+
+
 def daily_window_for_atr(
     daily_df: pd.DataFrame,
     now_ms: int,
@@ -168,6 +226,7 @@ def analyze_at_ms(
     cfg: OrbConfig,
     now_ms: int,
     session_traded: bool = False,
+    session_sides_traded: Optional[Set[str]] = None,
     daily_df: Optional[pd.DataFrame] = None,
     bot_equity_usdt: Optional[float] = None,
     df5: Optional[pd.DataFrame] = None,
@@ -182,13 +241,48 @@ def analyze_at_ms(
         return OrbSignal(sym, 0.0, "FLAT", "ORB_NO_TRADE", "low", ["empty_klines"])
     asof = int(df["open_time"].iloc[-1])
     ddf = daily_df
-    if ddf is None and (cfg.sl_mode or "").strip().lower() == "atr_pct":
+    if ddf is None and needs_daily_atr(cfg):
         ddf = _load_daily_df(sym, cfg, now_ms=now_ms)
-    daily_atr = None
-    if (cfg.sl_mode or "").strip().lower() == "atr_pct":
-        if ddf is not None and not ddf.empty:
-            ddf_atr = daily_window_for_atr(ddf, now_ms, cfg)
-            daily_atr = daily_atr_asof(ddf_atr, asof, period=cfg.atr_period, tz=cfg.session_tz)
+    daily_atr = resolve_daily_atr(ddf, asof_open_ms=asof, now_ms=now_ms, cfg=cfg)
+    if needs_daily_atr(cfg) and daily_atr is None:
+        return OrbSignal(sym, 0.0, "FLAT", "ORB_NO_TRADE", "low", ["atr_unavailable"])
+
+    from orb.core.vol_breakout import (
+        classify_vol_breakout_signal,
+        classify_vol_preplace_arm,
+        is_vol_breakout_mode,
+        vol_breakout_arm_ms,
+    )
+
+    if is_vol_breakout_mode(cfg):
+        if cfg.arm_at_or_close or cfg.preplace_oco:
+            anchor = session_anchor_ms(
+                int(now_ms), tz=cfg.session_tz, session_open_time=cfg.session_open_time
+            )
+            probe_ms = vol_breakout_arm_ms(anchor_ms=int(anchor), cfg=cfg)
+            return classify_vol_preplace_arm(
+                sym,
+                df,
+                asof_open_ms=int(probe_ms),
+                cfg=cfg,
+                session_traded=session_traded,
+                session_sides_traded=session_sides_traded,
+                daily_atr=daily_atr,
+                daily_df=ddf,
+                bot_equity_usdt=bot_equity_usdt,
+                now_ms=int(now_ms),
+            )
+        return classify_vol_breakout_signal(
+            sym,
+            df,
+            asof_open_ms=asof,
+            cfg=cfg,
+            session_traded=session_traded,
+            session_sides_traded=session_sides_traded,
+            daily_atr=daily_atr,
+            daily_df=ddf,
+            bot_equity_usdt=bot_equity_usdt,
+        )
 
     if cfg.arm_at_or_close:
         anchor = session_anchor_ms(
@@ -377,23 +471,13 @@ def _wallet_sync_after_settle(
     cfg: OrbConfig,
     signal_id: Optional[int] = None,
     session_date: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+) -> None:
     if robot_id is not None:
-        from orb.v2.robots import (
-            maybe_reset_robot_wallet_after_settle,
-            robot_equity_from_env,
-            sync_robot_wallet,
-        )
+        from orb.v2.robots import robot_equity_from_env, sync_robot_wallet
 
         sync_robot_wallet(conn, int(robot_id), initial_equity_usdt=robot_equity_from_env())
-        return maybe_reset_robot_wallet_after_settle(
-            conn,
-            int(robot_id),
-            trigger_signal_id=signal_id,
-            session_date=session_date,
-        )
-    _sync_symbol_bot_wallet(conn, symbol, cfg)
-    return None
+    else:
+        _sync_symbol_bot_wallet(conn, symbol, cfg)
 
 
 def resolve_open_positions(
@@ -404,7 +488,7 @@ def resolve_open_positions(
 ) -> Dict[str, Any]:
     c = cfg or OrbConfig.from_env()
     now_utc = _utc_now()
-    stats = {"checked": 0, "resolved": 0, "skipped": 0, "live": [], "robot_resets": []}
+    stats = {"checked": 0, "resolved": 0, "skipped": 0, "live": []}
     conn.row_factory = __import__("sqlite3").Row
     migrate_orb_tables(conn.cursor())
     cur = conn.cursor()
@@ -416,7 +500,8 @@ def resolve_open_positions(
         if bar_open is None:
             stats["skipped"] += 1
             continue
-        signal_step = c.bar_step_ms()
+        cfg_sym = config_for_symbol(str(sym), base=c)
+        signal_step = cfg_sym.bar_step_ms()
         resolve_start = int(bar_open) + signal_step
         kl = fetch_klines_forward(sym, "1m", resolve_start, end_ms)
         if not kl:
@@ -432,7 +517,7 @@ def resolve_open_positions(
             tp=float(tp) if tp is not None else None,
             hist_end_ms=end_ms,
             bar_step_ms=signal_step,
-            cfg=c,
+            cfg=cfg_sym,
         )
         if out is None:
             stats["skipped"] += 1
@@ -469,19 +554,17 @@ def resolve_open_positions(
                 session_date=sess_date,
                 robot_id=sig_robot_id,
             )
-            reset_evt = _wallet_sync_after_settle(
+            _wallet_sync_after_settle(
                 conn,
                 symbol=str(sym),
                 robot_id=sig_robot_id,
-                cfg=c,
+                cfg=cfg_sym,
                 signal_id=int(sid),
                 session_date=sess_date,
             )
-            if reset_evt:
-                stats["robot_resets"].append(reset_evt)
             stats["resolved"] += 1
             live_close = _live_close(
-                c,
+                cfg_sym,
                 str(sym),
                 str(side),
                 close_price=ex_px,

@@ -1,0 +1,6 @@
+# CrackingMarkets 文章 ETF 组合（Binance 可用子集）
+# 原文：SPY IWM QQQ GLD USO DIA — GLD/USO 无 token
+SPY
+QQQ
+IWM
+DIA

@@ -1,0 +1,86 @@
+{
+  "symbol": "QCOMUSDT",
+  "label": "risk2.5_tw0",
+  "personality": [
+    "高波动：日均振幅偏大，ORB 止损距离宽",
+    "EOD 赢家入场后 1h 几乎不回吐，early_exit 可能伤 edge"
+  ],
+  "target_4000_usdt": false,
+  "backtest": {
+    "from": "2026-02-09",
+    "to": "2026-06-24",
+    "sessions_atr": 24,
+    "wallet_net_usdt": 156.05,
+    "opens": 22,
+    "win_rate_pct": 18.2
+  },
+  "strategy": {
+    "or_minutes": 5,
+    "risk_pct": 0.025,
+    "trade_window_minutes": 0
+  },
+  "session_stats": {
+    "sessions": 24,
+    "avg_range_pct": 7.28,
+    "median_range_pct": 7.34,
+    "avg_or_width_pct": 2.65,
+    "median_or_width_pct": 2.28,
+    "avg_day_ret_pct": 0.48,
+    "trend_up_days": 12,
+    "trend_down_days": 11,
+    "chop_days": 1,
+    "avg_morning_ret_pct": 0.39
+  },
+  "trade_summary": {
+    "opens": 22,
+    "eod_wins": 4,
+    "sl_losses": 18,
+    "win_rate_pct": 18.2,
+    "eod_pnl_usdt": 223.24,
+    "sl_pnl_usdt": -150.41,
+    "avg_eod_r": 5.58,
+    "big_wins_5r": 2,
+    "avg_eod_mfe_pct": 5.5,
+    "avg_eod_h1_ret_pct": 2.32,
+    "eod_h1_still_positive_pct": 100.0
+  },
+  "alternatives": [
+    {
+      "label": "risk3.0_tw0",
+      "or_minutes": 5,
+      "risk_pct": 0.03,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 176.86,
+      "opens": 22,
+      "win_rate": 18.2
+    },
+    {
+      "label": "risk2.0_tw0",
+      "or_minutes": 5,
+      "risk_pct": 0.02,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 131.81,
+      "opens": 22,
+      "win_rate": 18.2
+    },
+    {
+      "label": "risk1.5_tw0",
+      "or_minutes": 5,
+      "risk_pct": 0.015,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 104.08,
+      "opens": 22,
+      "win_rate": 18.2
+    },
+    {
+      "label": "min_or2.5",
+      "or_minutes": 5,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 0,
+      "min_or_width_pct": 2.5,
+      "wallet_net_usdt": 86.32,
+      "opens": 10,
+      "win_rate": 20.0
+    }
+  ]
+}

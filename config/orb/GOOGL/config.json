@@ -1,0 +1,87 @@
+{
+  "symbol": "GOOGLUSDT",
+  "label": "baseline",
+  "personality": [
+    "中低波动：振幅小于 COIN 典型水平",
+    "低胜率 fat-tail：靠少数 EOD 大赢家贡献主要利润",
+    "EOD 赢家入场后 1h 几乎不回吐，early_exit 可能伤 edge"
+  ],
+  "target_4000_usdt": false,
+  "backtest": {
+    "from": "2026-02-09",
+    "to": "2026-06-24",
+    "sessions_atr": 53,
+    "wallet_net_usdt": 3.73,
+    "opens": 53,
+    "win_rate_pct": 11.3
+  },
+  "strategy": {
+    "or_minutes": 15,
+    "risk_pct": 0.01,
+    "trade_window_minutes": 0
+  },
+  "session_stats": {
+    "sessions": 53,
+    "avg_range_pct": 2.46,
+    "median_range_pct": 2.24,
+    "avg_or_width_pct": 1.26,
+    "median_or_width_pct": 1.11,
+    "avg_day_ret_pct": 0.24,
+    "trend_up_days": 24,
+    "trend_down_days": 20,
+    "chop_days": 9,
+    "avg_morning_ret_pct": 0.16
+  },
+  "trade_summary": {
+    "opens": 53,
+    "eod_wins": 6,
+    "sl_losses": 47,
+    "win_rate_pct": 11.3,
+    "eod_pnl_usdt": 425.06,
+    "sl_pnl_usdt": -421.33,
+    "avg_eod_r": 7.08,
+    "big_wins_5r": 3,
+    "avg_eod_mfe_pct": 1.97,
+    "avg_eod_h1_ret_pct": 0.88,
+    "eod_h1_still_positive_pct": 100.0
+  },
+  "alternatives": [
+    {
+      "label": "tw60",
+      "or_minutes": 15,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 60,
+      "wallet_net_usdt": -3.4,
+      "opens": 49,
+      "win_rate": 10.2
+    },
+    {
+      "label": "risk1.5_tw0",
+      "or_minutes": 15,
+      "risk_pct": 0.015,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": -8.94,
+      "opens": 53,
+      "win_rate": 11.3
+    },
+    {
+      "label": "min_or2.5",
+      "or_minutes": 15,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 0,
+      "min_or_width_pct": 2.5,
+      "wallet_net_usdt": -16.62,
+      "opens": 2,
+      "win_rate": 0.0
+    },
+    {
+      "label": "tw90",
+      "or_minutes": 15,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 90,
+      "wallet_net_usdt": -27.89,
+      "opens": 52,
+      "win_rate": 9.6
+    }
+  ]
+}

@@ -1,5 +1,18 @@
 # ORB 配置（V2）
 
-- `v2/symbols.txt` — 默认标的池（33 标）
-- 实盘 Gate + 模型：**`orb_live/`**（唯一参数目录）
-- 标的：**`config/orb/v2/symbols.txt`**（33 标，随 git 部署；勿放 `data/` Volume）
+单标配置由 **`tools/orb/v2/explore_symbol_profile.py <SYMBOL>`** 从历史数据推导。
+
+## 实盘（2026-06）
+
+| 标的 | OR | risk | 目录 |
+|------|-----|------|------|
+| **COIN** | 10 | 3% | `COIN/` |
+| **CRCL** | 5 | 3% | `CRCL/` |
+
+- 标的池：**`v2/symbols.txt`**（仅 COIN、CRCL）
+- 上线说明：`live/README.md`
+- Gate + 模型：`orb_live/`
+
+其余目录（HOOD、PLTR、INTC 等）仅作历史回测参考，**不在实盘池**。
+
+复现分析：`python tools/orb/v2/explore_symbol_profile.py COIN`

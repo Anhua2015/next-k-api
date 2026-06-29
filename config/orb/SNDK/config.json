@@ -1,0 +1,87 @@
+{
+  "symbol": "SNDKUSDT",
+  "label": "risk3.0_tw0",
+  "personality": [
+    "高波动：日均振幅偏大，ORB 止损距离宽",
+    "存在 7 笔 >=5R 大赢，适合 EOD 持有",
+    "EOD 赢家入场后 1h 几乎不回吐，early_exit 可能伤 edge"
+  ],
+  "target_4000_usdt": false,
+  "backtest": {
+    "from": "2026-02-09",
+    "to": "2026-06-24",
+    "sessions_atr": 45,
+    "wallet_net_usdt": 2234.59,
+    "opens": 44,
+    "win_rate_pct": 15.9
+  },
+  "strategy": {
+    "or_minutes": 10,
+    "risk_pct": 0.03,
+    "trade_window_minutes": 0
+  },
+  "session_stats": {
+    "sessions": 45,
+    "avg_range_pct": 7.53,
+    "median_range_pct": 7.06,
+    "avg_or_width_pct": 3.01,
+    "median_or_width_pct": 2.98,
+    "avg_day_ret_pct": 1.0,
+    "trend_up_days": 20,
+    "trend_down_days": 22,
+    "chop_days": 3,
+    "avg_morning_ret_pct": 0.42
+  },
+  "trade_summary": {
+    "opens": 44,
+    "eod_wins": 7,
+    "sl_losses": 37,
+    "win_rate_pct": 15.9,
+    "eod_pnl_usdt": 1229.61,
+    "sl_pnl_usdt": -580.42,
+    "avg_eod_r": 17.57,
+    "big_wins_5r": 7,
+    "avg_eod_mfe_pct": 7.3,
+    "avg_eod_h1_ret_pct": 2.64,
+    "eod_h1_still_positive_pct": 100.0
+  },
+  "alternatives": [
+    {
+      "label": "risk2.5_tw0",
+      "or_minutes": 10,
+      "risk_pct": 0.025,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 1823.07,
+      "opens": 44,
+      "win_rate": 15.9
+    },
+    {
+      "label": "risk2.0_tw0",
+      "or_minutes": 10,
+      "risk_pct": 0.02,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 1415.77,
+      "opens": 44,
+      "win_rate": 15.9
+    },
+    {
+      "label": "risk1.5_tw0",
+      "or_minutes": 10,
+      "risk_pct": 0.015,
+      "trade_window_minutes": 0,
+      "wallet_net_usdt": 1021.54,
+      "opens": 44,
+      "win_rate": 15.9
+    },
+    {
+      "label": "min_or2.0",
+      "or_minutes": 10,
+      "risk_pct": 0.01,
+      "trade_window_minutes": 0,
+      "min_or_width_pct": 2.0,
+      "wallet_net_usdt": 657.54,
+      "opens": 37,
+      "win_rate": 16.2
+    }
+  ]
+}

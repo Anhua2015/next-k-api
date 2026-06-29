@@ -1,6 +1,6 @@
-# ORB（仅 V2）
+# ORB（V2）
 
-ML Live Gate + 8-robot 纸面扫描。
+ML Live Gate + robot 纸面扫描。**实盘：COIN + CRCL（2 robot）**。
 
 ## 入口
 

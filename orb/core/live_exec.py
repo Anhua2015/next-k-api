@@ -18,7 +18,13 @@ from orb.core.protocol_client import (
     protocol_configured,
     reconcile_pending_entries,
 )
-from orb.core.signals import OrbSignal, PreplaceArmBundle, limit_price_for_side
+from orb.core.signals import (
+    OrbSignal,
+    PreplaceArmBundle,
+    limit_price_for_side,
+    preplace_sl_risk_dist,
+    refresh_preplace_leg_after_fill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +192,13 @@ def build_open_payload(sig: OrbSignal, cfg: OrbConfig, *, oco_peer_api_id: Optio
         "allow_gap_market": not bool(getattr(cfg, "arm_at_or_close", False)),
         "client_ref": api_id,
     }
+    if float(sig.or_high or 0) > 0 and float(sig.or_low or 0) > 0:
+        payload["or_high"] = round(float(sig.or_high), 8)
+        payload["or_low"] = round(float(sig.or_low), 8)
+    if entry and sig.sl_price is not None:
+        payload["sl_risk_dist"] = round(
+            preplace_sl_risk_dist(stop_entry=float(entry), sl=float(sig.sl_price)), 8
+        )
     if oco_peer_api_id:
         payload["oco_peer_api_id"] = oco_peer_api_id
     return payload
@@ -268,7 +281,32 @@ def notify_preplace_arm(bundle: PreplaceArmBundle, cfg: OrbConfig) -> Dict[str, 
         payloads.append(build_open_payload(short_sig, cfg, oco_peer_api_id=long_id))
     else:
         payloads.append(build_open_payload(long_sig, cfg))
-    return ingest_signals(payloads)
+    logger.info(
+        "[orb] preplace ingest %s oco=%s legs=%d long_id=%s short_id=%s "
+        "L_stop=%.6f S_stop=%.6f notion_L=%.2f notion_S=%.2f",
+        long_sig.symbol,
+        bool(cfg.preplace_oco),
+        len(payloads),
+        long_id,
+        short_id if cfg.preplace_oco else "-",
+        float(long_sig.price),
+        float(short_sig.price),
+        float(long_sig.paper_notional_usdt or 0),
+        float(short_sig.paper_notional_usdt or 0),
+    )
+    result = ingest_signals(payloads)
+    ingest_ok = (
+        live_preplace_oco_succeeded(result)
+        if cfg.preplace_oco and len(payloads) >= 2
+        else live_ingest_succeeded(result)
+    )
+    if not ingest_ok:
+        logger.warning(
+            "[orb] preplace ingest failed %s result=%s",
+            long_sig.symbol,
+            {k: result.get(k) for k in ("traded", "submitted", "errors", "skipped")} if isinstance(result, dict) else result,
+        )
+    return result
 
 
 def notify_close(
@@ -301,6 +339,7 @@ def _promote_oco_fill(
     sym: str,
     leg_side: str,
     proto: Dict[str, Any],
+    cfg: OrbConfig,
 ) -> None:
     """成交后：用成交腿的 protocol 回报刷新 side/entry/SL/仓位。"""
     result = _parse_proto_result(proto)
@@ -318,6 +357,34 @@ def _promote_oco_fill(
     sl_f = float(sl_px) if sl_px is not None else None
     tp_f = float(tp_px) if tp_px is not None else None
     notion_f = float(notion) if notion is not None else None
+
+    cur.execute(
+        "SELECT entry_price, or_high, or_low FROM orb_signals WHERE id=?",
+        (int(sid),),
+    )
+    row = cur.fetchone()
+    if row and fill_px > 0:
+        stop_px = float(row[0] or fill_px)
+        or_h = float(row[1] or 0)
+        or_l = float(row[2] or 0)
+        if or_h > 0 and or_l > or_h:
+            leg = OrbSignal(
+                symbol=str(sym),
+                price=stop_px,
+                side=side,
+                play=f"ORB_PREPLACE_{side}",
+                confidence="high",
+                or_high=or_h,
+                or_low=or_l,
+                sl_price=sl_f,
+                tp_price=tp_f,
+            )
+            refreshed = refresh_preplace_leg_after_fill(leg, fill_px=fill_px, cfg=cfg)
+            sl_f = refreshed.sl_price
+            tp_f = refreshed.tp_price
+            if notion_f is None and refreshed.paper_notional_usdt:
+                notion_f = float(refreshed.paper_notional_usdt)
+
     cur.execute(
         """
         UPDATE orb_signals SET
@@ -353,6 +420,7 @@ def _sync_oco_pending_row(
     sym: str,
     session_date: str,
     or_end_ms: int,
+    cfg: OrbConfig,
 ) -> bool:
     """对账单条 pending OCO：成交 promote；双腿均终态且无成交则回滚。"""
     legs = _lookup_oco_legs(sym=sym, session_date=session_date, or_end_ms=or_end_ms)
@@ -364,10 +432,11 @@ def _sync_oco_pending_row(
         if not proto:
             continue
         if str(proto.get("status") or "").lower() == "traded":
-            _promote_oco_fill(cur, sid=int(sid), sym=str(sym), leg_side=leg_side, proto=proto)
+            _promote_oco_fill(cur, sid=int(sid), sym=str(sym), leg_side=leg_side, proto=proto, cfg=cfg)
             return True
 
     if len(legs) < 2:
+        logger.debug("[orb] preplace OCO pending %s id=%s legs_found=%d", sym, sid, len(legs))
         return False
 
     statuses = {str(legs[s].get("status") or "").lower() for s in legs}
@@ -417,6 +486,7 @@ def sync_live_pending_entries(conn: sqlite3.Connection, cfg: OrbConfig) -> int:
                 sym=str(sym),
                 session_date=str(session_date or ""),
                 or_end_ms=int(entry_bar or 0),
+                cfg=cfg,
             ):
                 changed += 1
             continue

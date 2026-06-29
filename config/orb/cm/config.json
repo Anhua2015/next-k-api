@@ -1,0 +1,18 @@
+{
+  "strategy": "crackingmarkets_vol_breakout",
+  "source": "https://www.crackingmarkets.com/day-trading-volatility-breakouts-systematically-all-rules-included/",
+  "blueprint": "https://www.crackingmarkets.com/intraday-volatility-breakout-blueprint/",
+  "symbols_article": ["SPY", "IWM", "QQQ", "GLD", "USO", "DIA"],
+  "symbols_binance": ["SPYUSDT", "QQQUSDT", "IWMUSDT", "DIAUSDT"],
+  "symbols_unavailable": ["GLDUSDT", "USOUSDT"],
+  "entry_mode": "vol_breakout",
+  "signal_interval": "1m",
+  "risk_pct": 0.0033,
+  "atr_period": 14,
+  "atr_breakout_mult": 0.33,
+  "atr_sl_fraction": 0.33,
+  "exit_mode": "eod",
+  "one_trade_per_session": true,
+  "entry_fill": "preplace_stop",
+  "notes": "文章完整 filter 在付费墙后；此为 Blueprint 公开基线（无 narrow-day/trend filter）"
+}

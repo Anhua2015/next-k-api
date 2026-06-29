@@ -11,13 +11,21 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from env_loader import load_env_oi  # noqa: E402
+from orb.core.breakout_score import breakout_kline_range_ms  # noqa: E402
 from orb.core.config import OrbConfig  # noqa: E402
-from orb.core.kline_cache import has_kline_cache, kline_path, symbol_cache_dir  # noqa: E402
+from orb.core.kline_cache import has_kline_cache, kline_path, load_klines, symbol_cache_dir  # noqa: E402
 from orb.core.macro_calendar import is_macro_skip_day, macro_events_for_day  # noqa: E402
+from orb.core.paper import needs_daily_atr, resolve_daily_atr, uses_atr_sl, _daily_bars_asof  # noqa: E402
+from orb.core.rth_daily import aggregate_rth_daily_bars  # noqa: E402
+from orb.core.session import session_anchor_ms  # noqa: E402
+from orb.core.signals import or_end_ms_for_anchor  # noqa: E402
+from orb.core.vol_breakout import is_vol_breakout_mode, vol_breakout_arm_ms  # noqa: E402
 from orb.ml.gate import LiveGateConfig  # noqa: E402
 from orb.ml.model import BreakoutModelBundle  # noqa: E402
 from orb.ml.ranker import BreakoutRanker  # noqa: E402
@@ -38,6 +46,60 @@ def universe_session_dates(symbols: List[str], cfg: OrbConfig) -> List[str]:
     for sym in symbols:
         dates.update(session_dates_from_cache(sym, cfg))
     return sorted(dates)
+
+
+def session_date_has_atr(
+    symbol: str,
+    session_date: str,
+    cfg: OrbConfig,
+    *,
+    atr_daily_source: str = "binance_1d",
+) -> bool:
+    """回测：该 session 在 OR/开盘 结束时能否算出 ATR。"""
+    if not needs_daily_atr(cfg):
+        return True
+    sym = str(symbol).strip().upper()
+    tz = cfg.session_tz
+    ts = pd.Timestamp(f"{session_date} 12:00:00", tz=tz)
+    anchor = session_anchor_ms(
+        int(ts.value // 1_000_000),
+        tz=tz,
+        session_open_time=cfg.session_open_time,
+    )
+    if is_vol_breakout_mode(cfg):
+        check_ms = vol_breakout_arm_ms(anchor_ms=int(anchor), cfg=cfg)
+    else:
+        check_ms = or_end_ms_for_anchor(anchor_ms=int(anchor), cfg=cfg)
+    fetch_start, end_ms = breakout_kline_range_ms(session_date, cfg)
+    warmup_start = fetch_start - cfg.daily_atr_warmup_ms()
+    src = (atr_daily_source or "binance_1d").strip().lower()
+    if src == "rth_5m":
+        df5 = load_klines(sym, cfg.signal_interval, start_ms=warmup_start, end_ms=end_ms)
+        daily = aggregate_rth_daily_bars(df5, cfg)
+    else:
+        daily = load_klines(sym, "1d", start_ms=warmup_start, end_ms=end_ms)
+    ddf = _daily_bars_asof(daily, check_ms)
+    return resolve_daily_atr(ddf, asof_open_ms=check_ms, now_ms=check_ms, cfg=cfg) is not None
+
+
+def filter_backtest_sessions_with_atr(
+    dates: List[str],
+    symbols: List[str],
+    cfg: OrbConfig,
+    *,
+    atr_daily_source: str = "binance_1d",
+) -> List[str]:
+    """回测专用：剔除 ATR 样本不足的 session（所有 symbols 均需可用）。"""
+    if not needs_daily_atr(cfg):
+        return list(dates)
+    syms = [str(s).strip().upper() for s in symbols if str(s).strip()]
+    if not syms:
+        return list(dates)
+    out: List[str] = []
+    for d in dates:
+        if all(session_date_has_atr(sym, d, cfg, atr_daily_source=atr_daily_source) for sym in syms):
+            out.append(d)
+    return out
 
 
 def cached_symbols(symbols: List[str]) -> tuple[List[str], List[str]]:

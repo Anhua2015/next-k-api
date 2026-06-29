@@ -7,22 +7,21 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
+from orb.core.config import OrbConfig
 from orb.core.db import migrate_orb_tables
 from orb.ml.gate import LiveGateDayState, rollback_open_decision
 from orb.v2.robots import (
     apply_robot_wallet_after_pnl,
     bound_robot_index_available,
+    ensure_orb_robots,
     init_robot_wallets,
-    maybe_reset_robot_wallet_after_settle,
     next_free_robot_id,
     next_robot_index,
     robot_bound_mode,
     robot_equity_for_signals,
-    robot_reset_policy,
     robot_symbol_bindings,
     symbol_to_robot_id,
 )
-from orb.core.config import OrbConfig
 
 
 class TestOrbV2Robots(unittest.TestCase):
@@ -59,13 +58,19 @@ class TestOrbV2Robots(unittest.TestCase):
         cfg = OrbConfig.from_env()
         self.assertEqual(robot_equity_for_signals([1000, 2000, 0], cfg), 2000)
 
+    def test_apply_robot_wallet_after_pnl_compounds(self):
+        self.assertAlmostEqual(apply_robot_wallet_after_pnl(2000.0, 100.0), 2100.0)
+        self.assertAlmostEqual(apply_robot_wallet_after_pnl(2400.0, 200.0), 2600.0)
+
     def test_next_free_robot_id_from_db(self):
         conn = sqlite3.connect(":memory:")
         cur = conn.cursor()
         migrate_orb_tables(cur)
-        from orb.v2.robots import ensure_orb_robots
-
         ensure_orb_robots(cur, count=2, initial_equity_usdt=10_000)
+        cur.execute("INSERT INTO orb_robots(robot_id, initial_equity_usdt, enabled, created_at_utc, updated_at_utc) VALUES (3, 1000, 1, 't', 't')")
+        ensure_orb_robots(cur, count=2, initial_equity_usdt=10_000)
+        cur.execute("SELECT enabled FROM orb_robots WHERE robot_id = 3")
+        self.assertEqual(int(cur.fetchone()[0]), 0)
         cur.execute(
             """
             INSERT INTO orb_signals (
@@ -82,59 +87,6 @@ class TestOrbV2Robots(unittest.TestCase):
         rollback_open_decision(st, symbol="COINUSDT")
         self.assertEqual(st.opens, 0)
         self.assertEqual(st.opened, [])
-
-    def test_robot_reset_policy_defaults(self):
-        policy = robot_reset_policy()
-        self.assertEqual(policy["cap_usdt"], 2500.0)
-        self.assertEqual(policy["floor_usdt"], 1500.0)
-        self.assertTrue(policy["enabled"])
-
-    def test_apply_robot_wallet_after_pnl_no_reset(self):
-        balance, evt = apply_robot_wallet_after_pnl(2000.0, 100.0)
-        self.assertAlmostEqual(balance, 2100.0)
-        self.assertIsNone(evt)
-
-    def test_apply_robot_wallet_after_pnl_triggers_reset(self):
-        balance, evt = apply_robot_wallet_after_pnl(2400.0, 200.0)
-        self.assertAlmostEqual(balance, 1500.0)
-        self.assertIsNotNone(evt)
-        self.assertAlmostEqual(evt["balance_before"], 2600.0)
-        self.assertAlmostEqual(evt["withdrawn_usdt"], 1100.0)
-        self.assertAlmostEqual(evt["balance_after"], 1500.0)
-
-    def test_apply_robot_wallet_after_pnl_at_cap(self):
-        balance, evt = apply_robot_wallet_after_pnl(2500.0, 0.0)
-        self.assertAlmostEqual(balance, 1500.0)
-        self.assertIsNotNone(evt)
-        self.assertAlmostEqual(evt["withdrawn_usdt"], 1000.0)
-
-    @patch("orb.v2.robots.robot_equity_from_env", return_value=1000.0)
-    def test_maybe_reset_robot_wallet_after_settle_db(self, _mock_equity):
-        conn = sqlite3.connect(":memory:")
-        cur = conn.cursor()
-        migrate_orb_tables(cur)
-        from orb.v2.robots import ensure_orb_robots
-
-        ensure_orb_robots(cur, count=1, initial_equity_usdt=1000.0)
-        cur.execute(
-            """
-            INSERT INTO orb_settlements (
-                settled_at_utc, signal_id, symbol, side, play, outcome,
-                entry_price, exit_price, pnl_r, pnl_usdt, virtual_notional_usdt,
-                exit_rule, session_date, robot_id
-            ) VALUES ('t', 1, 'AAAUSDT', 'LONG', 'p', 'win', 1, 2, 1, 1600, 1000, 'tp', '2026-06-01', 1)
-            """
-        )
-        conn.commit()
-        evt = maybe_reset_robot_wallet_after_settle(conn, 1, trigger_signal_id=1, session_date="2026-06-01")
-        self.assertIsNotNone(evt)
-        self.assertAlmostEqual(evt["balance_before"], 2600.0)
-        self.assertAlmostEqual(evt["withdrawn_usdt"], 1100.0)
-        cur.execute("SELECT COALESCE(SUM(pnl_usdt), 0) FROM orb_settlements WHERE robot_id = 1")
-        self.assertAlmostEqual(float(cur.fetchone()[0]), 500.0)
-        from orb.v2.robots import robot_wallet_balance
-
-        self.assertAlmostEqual(robot_wallet_balance(conn, 1, initial_equity_usdt=1000.0, sync=False), 1500.0)
 
 
 if __name__ == "__main__":

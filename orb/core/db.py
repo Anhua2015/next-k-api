@@ -144,9 +144,30 @@ def ensure_symbol_bots(
             """
             INSERT INTO orb_symbol_bots(symbol, virtual_equity_usdt, enabled, created_at_utc, updated_at_utc)
             VALUES (?, ?, 1, ?, ?)
-            ON CONFLICT(symbol) DO NOTHING
+            ON CONFLICT(symbol) DO UPDATE SET
+                enabled = 1,
+                updated_at_utc = excluded.updated_at_utc
             """,
             (s, init, now, now),
+        )
+
+
+def sync_symbol_bots_pool(
+    cur: sqlite3.Cursor,
+    symbols: List[str],
+    *,
+    initial_equity_usdt: float,
+) -> None:
+    """启用池内标的 bot，池外标的 enabled=0（不再扫描）。"""
+    ensure_symbol_bots(cur, symbols, initial_equity_usdt=initial_equity_usdt)
+    active = {str(sym).strip().upper() for sym in symbols if str(sym).strip()}
+    now = _utc_now()
+    cur.execute("SELECT symbol FROM orb_symbol_bots")
+    for (sym,) in cur.fetchall():
+        enabled = 1 if str(sym).upper() in active else 0
+        cur.execute(
+            "UPDATE orb_symbol_bots SET enabled = ?, updated_at_utc = ? WHERE symbol = ?",
+            (enabled, now, sym),
         )
 
 

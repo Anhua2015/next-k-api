@@ -1,0 +1,14 @@
+{
+  "leg1": "SOLUSDT",
+  "leg2": "ETHUSDT",
+  "interval": "1h",
+  "delta": 0.00001,
+  "r_noise": 0,
+  "entry_z": 2.5,
+  "exit_z": 0.0,
+  "cost_bps": 2,
+  "vol_lookback": 63,
+  "halt_p_trace_pct": null,
+  "initial_capital_usdt": 10000,
+  "deploy_pct": 0.5
+}
