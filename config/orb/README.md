@@ -8,8 +8,9 @@
 |------|-----|------|------|
 | **COIN** | 10 | 3% | `COIN/` |
 | **CRCL** | 5 | 3% | `CRCL/` |
+| **TSLA** | 5 | 3% | `TSLA/` |
 
-- 标的池：**`v2/symbols.txt`**（仅 COIN、CRCL）
+- 标的池：**`v2/symbols.txt`**（COIN、CRCL、TSLA）
 - 上线说明：`live/README.md`
 - Gate + 模型：`orb_live/`
 

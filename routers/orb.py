@@ -17,8 +17,11 @@ from orb.v2.config import OrbV2Config
 from orb.v2.db import migrate_orb_v2_tables
 from orb.v2.paper import run_scan_v2
 from orb.v2.robots import (
+    bound_pool_warnings,
+    effective_max_opens_per_day,
     ensure_orb_robots,
     list_robot_summaries,
+    resolve_bound_robot_count,
     robot_bound_mode,
     robot_count_from_env,
     robot_equity_from_env,
@@ -56,12 +59,9 @@ def _status(row: Dict[str, Any]) -> str:
 def load_summary() -> Dict[str, Any]:
     v2 = OrbV2Config.from_env()
     cfg = v2.base
-    robot_count = robot_count_from_env()
     robot_equity = robot_equity_from_env()
     symbols = v2.symbol_list()
-    robot_bound = robot_bound_mode(symbol_count=len(symbols), robot_count=robot_count)
-    if robot_bound:
-        robot_count = len(symbols)
+    robot_count, robot_bound = resolve_bound_robot_count(symbols)
     conn = init_db()
     conn.row_factory = sqlite3.Row
     try:
@@ -94,6 +94,17 @@ def load_summary() -> Dict[str, Any]:
         )
         conn.commit()
         gate = v2.load_gate()
+        pool_warnings = bound_pool_warnings(
+            symbols,
+            robot_count=robot_count,
+            robot_bound=robot_bound,
+            gate_max_opens=gate.max_opens_per_day,
+        )
+        eff_max_opens = effective_max_opens_per_day(
+            robot_bound=robot_bound,
+            symbol_count=len(symbols),
+            gate_max_opens=gate.max_opens_per_day,
+        )
         return _with_live_status(
             {
                 "ok": True,
@@ -114,11 +125,13 @@ def load_summary() -> Dict[str, Any]:
                 "symbols_file": str(v2.symbols_file),
                 "symbols": symbols,
                 "robots": robots,
+                "pool_warnings": pool_warnings or None,
                 "gate": {
                     "ml_enabled": v2.gate_ml_enabled(),
                     "min_p_true": gate.min_p_true,
                     "min_breakout_score": gate.min_breakout_score,
-                    "max_opens_per_day": gate.max_opens_per_day,
+                    "max_opens_per_day": eff_max_opens,
+                    "max_opens_configured": gate.max_opens_per_day,
                     "robot_reuse_after_exit": gate.robot_reuse_after_exit,
                     "day_abort_enabled": gate.day_abort_enabled,
                 },

@@ -1,4 +1,4 @@
-"""ORB V2 robot 资金池（Live 与回测共用，COIN+CRCL 默认 2 robot）。"""
+"""ORB V2 robot 资金池（Live 与回测共用，COIN+CRCL+TSLA 默认 3 robot）。"""
 
 from __future__ import annotations
 
@@ -19,19 +19,19 @@ def _utc_now() -> str:
 
 
 def robot_count_from_env() -> int:
-    raw = os.getenv("ORB_V2_ROBOT_COUNT", "2")
+    raw = os.getenv("ORB_V2_ROBOT_COUNT", "3")
     try:
         return max(1, int(float(str(raw).strip())))
     except ValueError:
-        return 2
+        return 3
 
 
 def robot_equity_from_env() -> float:
-    raw = os.getenv("ORB_V2_ROBOT_EQUITY", "20")
+    raw = os.getenv("ORB_V2_ROBOT_EQUITY", "1000")
     try:
         return max(0.0, float(str(raw).strip()))
     except ValueError:
-        return 20.0
+        return 1000.0
 
 
 def _env_truthy(name: str, *, default: bool = False) -> bool:
@@ -56,6 +56,53 @@ def robot_bound_mode(*, symbol_count: int, robot_count: Optional[int] = None) ->
             )
         return enabled
     return symbol_count > 0 and rc == symbol_count
+
+
+def resolve_bound_robot_count(symbols: List[str]) -> tuple[int, bool]:
+    """Return (robot_count, robot_bound) for live scan / API summary."""
+    env_rc = robot_count_from_env()
+    bound = robot_bound_mode(symbol_count=len(symbols), robot_count=env_rc)
+    count = len(symbols) if bound else env_rc
+    return count, bound
+
+
+def bound_pool_warnings(
+    symbols: List[str],
+    *,
+    robot_count: int,
+    robot_bound: bool,
+    gate_max_opens: Optional[int] = None,
+) -> List[str]:
+    """Misconfig hints when symbol pool and robot/gate settings diverge."""
+    n_sym = len(symbols)
+    warnings: List[str] = []
+    env_rc = robot_count_from_env()
+    if robot_bound and env_rc != n_sym:
+        warnings.append(
+            f"ORB_V2_ROBOT_COUNT={env_rc} != symbol_count={n_sym}; using {robot_count} robots"
+        )
+    if not os.getenv("ORB_V2_ROBOT_BOUND", "").strip() and n_sym > 1 and env_rc != n_sym:
+        warnings.append(
+            f"ORB_V2_ROBOT_BOUND unset and ORB_V2_ROBOT_COUNT={env_rc} != {n_sym}; "
+            "shared robot pool (not per-symbol binding)"
+        )
+    if robot_bound and gate_max_opens is not None and int(gate_max_opens) < n_sym:
+        warnings.append(
+            f"live_gate max_opens_per_day={gate_max_opens} < symbol_count={n_sym}"
+        )
+    return warnings
+
+
+def effective_max_opens_per_day(
+    *,
+    robot_bound: bool,
+    symbol_count: int,
+    gate_max_opens: int,
+) -> int:
+    """Bound mode: concurrent slots = one per symbol."""
+    if robot_bound and symbol_count > 0:
+        return max(int(gate_max_opens or 0), symbol_count)
+    return int(gate_max_opens or 0)
 
 
 def robot_symbol_bindings(symbols: List[str]) -> Dict[int, str]:

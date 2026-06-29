@@ -1,4 +1,4 @@
-"""ORB 2.0 纸面扫描：ML Live Gate + 8-robot 资金池。"""
+"""ORB 2.0 纸面扫描：ML Live Gate + robot 资金池。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from orb.ml.model import BreakoutModelBundle
 from orb.core.config import OrbConfig
 from orb.core.symbol_strategy import config_for_symbol
+from orb.core.signals import OrbSignal, compute_position_notional, worst_fill_for_preplace
 from orb.core.db import (
     count_open_positions,
     ensure_symbol_bots,
@@ -20,8 +21,6 @@ from orb.core.db import (
     symbol_bot_wallet_balance,
     sync_symbol_bots_pool,
 )
-from orb.core.symbol_strategy import config_for_symbol
-from orb.core.signals import OrbSignal, compute_position_notional, worst_fill_for_preplace
 from orb.ml.features import extract_features
 from orb.ml.gate import (
     LiveGateConfig,
@@ -57,13 +56,14 @@ from orb.core.protocol_client import LIVE_PENDING_NOTE, LIVE_PENDING_OCO_NOTE
 from orb.v2.db import mark_breakout_seen, migrate_orb_v2_tables, rollback_breakout_opened
 from orb.v2.gate_state import load_gate_day_state, persist_gate_day_state, v2_session_traded
 from orb.v2.robots import (
+    bound_pool_warnings,
     bound_robot_id_for_open,
     busy_robot_ids,
+    effective_max_opens_per_day,
     ensure_orb_robots,
     list_robot_wallet_balances,
     next_free_robot_id,
-    robot_bound_mode,
-    robot_count_from_env,
+    resolve_bound_robot_count,
     robot_equity_for_signals,
     robot_equity_from_env,
     robot_symbol_bindings,
@@ -267,14 +267,22 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     gate = v2.load_gate()
     ml_enabled = v2.gate_ml_enabled()
     model = _load_model(v2) if ml_enabled else None
-    robot_count = robot_count_from_env()
-    robot_bound = robot_bound_mode(symbol_count=len(syms), robot_count=robot_count)
-    if robot_bound:
-        robot_count = len(syms)
-        use_robots = True
-    else:
-        use_robots = bool(gate.robot_reuse_after_exit)
+    robot_count, robot_bound = resolve_bound_robot_count(syms)
+    use_robots = robot_bound or bool(gate.robot_reuse_after_exit)
     robot_init = robot_equity_from_env()
+    pool_warnings = bound_pool_warnings(
+        syms,
+        robot_count=robot_count,
+        robot_bound=robot_bound,
+        gate_max_opens=gate.max_opens_per_day,
+    )
+    eff_max_opens = effective_max_opens_per_day(
+        robot_bound=robot_bound,
+        symbol_count=len(syms),
+        gate_max_opens=gate.max_opens_per_day,
+    )
+    for msg in pool_warnings:
+        logger.warning("[orb_v2] %s", msg)
 
     stats: Dict[str, Any] = {
         "ok": True,
@@ -291,12 +299,14 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
         "shadow": v2.shadow,
         "ml_ranker": model.kind if model else ("disabled" if not ml_enabled else None),
         "robot_bound": robot_bound,
-        "sizing": "robot_bound" if robot_bound else ("eight_robots" if use_robots else "per_symbol"),
+        "sizing": "robot_bound" if robot_bound else ("robot_pool" if use_robots else "per_symbol"),
+        "pool_warnings": pool_warnings or None,
         "gate": {
             "ml_enabled": ml_enabled,
             "min_p_true": gate.min_p_true,
             "min_breakout_score": gate.min_breakout_score,
-            "max_opens_per_day": gate.max_opens_per_day,
+            "max_opens_per_day": eff_max_opens,
+            "max_opens_configured": gate.max_opens_per_day,
             "robot_reuse_after_exit": gate.robot_reuse_after_exit,
             "day_abort_enabled": gate.day_abort_enabled,
         },
@@ -531,9 +541,9 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
         bundle = sig.preplace_arm
         gate_sig = bundle.long_sig if bundle is not None else sig
         if use_robots and not robot_bound:
-            if len(busy_robot_ids(cur)) >= gate.max_opens_per_day:
+            if len(busy_robot_ids(cur)) >= eff_max_opens:
                 break
-        elif not use_robots and gate_state.opens >= gate.max_opens_per_day:
+        elif not use_robots and gate_state.opens >= eff_max_opens:
             break
 
         breakout_score: Optional[float] = None

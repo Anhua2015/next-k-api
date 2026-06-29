@@ -12,13 +12,17 @@ from orb.core.db import migrate_orb_tables
 from orb.ml.gate import LiveGateDayState, rollback_open_decision
 from orb.v2.robots import (
     apply_robot_wallet_after_pnl,
+    bound_pool_warnings,
     bound_robot_index_available,
+    effective_max_opens_per_day,
     ensure_orb_robots,
     init_robot_wallets,
     next_free_robot_id,
     next_robot_index,
+    resolve_bound_robot_count,
     robot_bound_mode,
     robot_equity_for_signals,
+    robot_equity_from_env,
     robot_symbol_bindings,
     symbol_to_robot_id,
 )
@@ -35,6 +39,42 @@ class TestOrbV2Robots(unittest.TestCase):
         self.assertEqual(robot_symbol_bindings(syms), {1: "COINUSDT", 2: "HOODUSDT", 3: "PLTRUSDT"})
         self.assertEqual(symbol_to_robot_id("HOOD", syms), 2)
         self.assertIsNone(symbol_to_robot_id("TSLAUSDT", syms))
+
+    @patch.dict(os.environ, {"ORB_V2_ROBOT_BOUND": "1", "ORB_V2_ROBOT_COUNT": "3"}, clear=False)
+    def test_live_pool_bindings(self):
+        syms = ["COINUSDT", "CRCLUSDT", "TSLAUSDT"]
+        self.assertEqual(
+            robot_symbol_bindings(syms),
+            {1: "COINUSDT", 2: "CRCLUSDT", 3: "TSLAUSDT"},
+        )
+        self.assertEqual(symbol_to_robot_id("TSLAUSDT", syms), 3)
+        count, bound = resolve_bound_robot_count(syms)
+        self.assertTrue(bound)
+        self.assertEqual(count, 3)
+
+    @patch.dict(os.environ, {"ORB_V2_ROBOT_BOUND": "1", "ORB_V2_ROBOT_COUNT": "2"}, clear=False)
+    def test_bound_pool_warnings_mismatched_count(self):
+        syms = ["COINUSDT", "CRCLUSDT", "TSLAUSDT"]
+        count, bound = resolve_bound_robot_count(syms)
+        self.assertEqual(count, 3)
+        warns = bound_pool_warnings(syms, robot_count=count, robot_bound=bound, gate_max_opens=2)
+        self.assertTrue(any("ROBOT_COUNT=2" in w for w in warns))
+        self.assertTrue(any("max_opens_per_day=2" in w for w in warns))
+
+    def test_effective_max_opens_bound(self):
+        self.assertEqual(
+            effective_max_opens_per_day(robot_bound=True, symbol_count=3, gate_max_opens=2),
+            3,
+        )
+        self.assertEqual(
+            effective_max_opens_per_day(robot_bound=False, symbol_count=3, gate_max_opens=2),
+            2,
+        )
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_robot_equity_default_1000(self):
+        os.environ.pop("ORB_V2_ROBOT_EQUITY", None)
+        self.assertEqual(robot_equity_from_env(), 1000.0)
 
     def test_bound_robot_index_available(self):
         wallets = [1000.0, 1000.0]

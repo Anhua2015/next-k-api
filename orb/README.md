@@ -1,6 +1,6 @@
 # ORB（V2）
 
-ML Live Gate + robot 纸面扫描。**实盘：COIN + CRCL（2 robot）**。
+ML Live Gate + robot 纸面扫描。**实盘：COIN + CRCL + TSLA（3 robot）**。
 
 ## 入口
 

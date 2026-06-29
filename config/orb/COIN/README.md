@@ -81,9 +81,9 @@ ORB_TRADE_WINDOW_MINUTES=90
 
 Pairs + Kalman（BTC/ETH 等）见 `config/pairs/`，与 ORB **独立**，见 `tools/pairs/run_backtest.py`。
 
-## 实盘（COIN + CRCL 双标）
+## 实盘（COIN + CRCL + TSLA）
 
-与 CRCL 同池上线见 **`config/orb/live/README.md`**。本目录 `strategy.env` 在 scan 时由 `orb/core/symbol_strategy.py` 自动合并（COIN = OR10 3%）。
+与 CRCL、TSLA 同池上线见 **`config/orb/live/README.md`**。本目录 `strategy.env` 在 scan 时由 `orb/core/symbol_strategy.py` 自动合并（COIN = OR10 3%）。
 
 ## 回测命令
 

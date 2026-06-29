@@ -1,3 +1,3 @@
-# ORB 实盘标的池（COIN + CRCL，R1/R2 一标一绑）
-# 每标策略见 config/orb/COIN、config/orb/CRCL/strategy.env
-COIN,CRCL
+# ORB 实盘标的池（COIN + CRCL + TSLA，R1/R2/R3 一标一绑）
+# 每标策略见 config/orb/COIN、CRCL、TSLA/strategy.env
+COIN,CRCL,TSLA
