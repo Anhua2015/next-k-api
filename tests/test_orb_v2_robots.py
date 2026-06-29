@@ -72,9 +72,9 @@ class TestOrbV2Robots(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {}, clear=False)
-    def test_robot_equity_default_1000(self):
+    def test_robot_equity_default_30(self):
         os.environ.pop("ORB_V2_ROBOT_EQUITY", None)
-        self.assertEqual(robot_equity_from_env(), 1000.0)
+        self.assertEqual(robot_equity_from_env(), 30.0)
 
     def test_bound_robot_index_available(self):
         wallets = [1000.0, 1000.0]

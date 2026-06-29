@@ -17,10 +17,11 @@
 - 公共参数：本目录 `strategy.env` + `.env.oi`
 - 每标 OR / risk：`config/orb/{COIN,CRCL,TSLA}/strategy.env`（`orb/core/symbol_strategy.py` 自动合并）
 - `ORB_V2_ROBOT_BOUND=1`，3 robot ↔ 3 标
+- 默认 **`ORB_V2_ROBOT_EQUITY=30`**（每 robot 30U，三标合计 90U 定仓基准；128U 账户 + 5x 杠杆）
 
 ## 上线
 
-1. 合并 `strategy.env` → `.env.oi`（`ORB_V2_ROBOT_COUNT=3`）
+1. 合并 `strategy.env` → `.env.oi`（`ORB_V2_ROBOT_COUNT=3`、`ORB_V2_ROBOT_EQUITY=30`）
 2. 部署；R4–R8 与池外 symbol bot 自动停用
 3. 前端展示 COIN / CRCL / TSLA
 
