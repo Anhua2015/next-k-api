@@ -22,14 +22,22 @@ def norm_symbol(raw: str) -> str:
 def parse_symbol_list(text: str) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
-    for part in text.replace("\n", ",").split(","):
-        raw = part.strip()
-        if not raw or raw.startswith("#"):
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
             continue
-        sym = norm_symbol(raw)
-        if sym and sym not in seen:
-            seen.add(sym)
-            out.append(sym)
+        if "#" in line:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+        for part in line.split(","):
+            raw = part.strip()
+            if not raw:
+                continue
+            sym = norm_symbol(raw)
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
     return out
 
 

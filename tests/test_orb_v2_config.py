@@ -51,15 +51,26 @@ class TestOrbV2Config(unittest.TestCase):
         v2 = OrbV2Config.from_env()
         self.assertTrue(str(v2.symbols_file).replace("\\", "/").endswith("config/orb/v2/symbols.txt"))
         syms = v2.symbol_list()
-        self.assertEqual(len(syms), 25, syms)
+        self.assertEqual(len(syms), 17, syms)
         self.assertIn("COINUSDT", syms)
         self.assertIn("TSLAUSDT", syms)
         for removed in (
+            "USARUSDT", "MSTRUSDT", "PAYPUSDT", "CBRSUSDT", "MSFTUSDT",
+            "QCOMUSDT", "CRWVUSDT", "VUSDT",
             "BRKBUSDT", "UBERUSDT", "DISUSDT", "SPYUSDT", "MUUSDT",
             "AVGOUSDT", "WMTUSDT", "EWJUSDT", "TSMUSDT", "EWYUSDT",
             "METAUSDT", "GOOGLUSDT", "HOODUSDT",
         ):
             self.assertNotIn(removed, syms)
+
+    def test_parse_symbol_list_ignores_comment_commas(self):
+        from orb.ml.samples import parse_symbol_list
+
+        text = (
+            "# removed: USAR,MSTR,PAYP\n"
+            "TSLA,COIN\n"
+        )
+        self.assertEqual(parse_symbol_list(text), ["TSLAUSDT", "COINUSDT"])
 
     def test_from_env_uses_v2_symbols_file_not_orb_symbols(self):
         saved = {
