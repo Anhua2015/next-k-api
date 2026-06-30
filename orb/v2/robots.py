@@ -45,11 +45,11 @@ def resolve_robot_pool_size(*, gate: "LiveGateConfig", symbol_count: int) -> int
 
 
 def robot_equity_from_env() -> float:
-    raw = os.getenv("ORB_V2_ROBOT_EQUITY", "20")
+    raw = os.getenv("ORB_V2_ROBOT_EQUITY", "14")
     try:
         return max(0.0, float(str(raw).strip()))
     except ValueError:
-        return 20.0
+        return 14.0
 
 
 def _env_truthy(name: str, *, default: bool = False) -> bool:

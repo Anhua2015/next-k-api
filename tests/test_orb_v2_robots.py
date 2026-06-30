@@ -21,6 +21,7 @@ from orb.v2.robots import (
     resolve_robot_pool_size,
     robot_bound_mode,
     robot_equity_for_signals,
+    robot_equity_from_env,
     robot_symbol_bindings,
     symbol_to_robot_id,
 )
@@ -65,6 +66,11 @@ class TestOrbV2Robots(unittest.TestCase):
     def test_robot_equity_for_signals(self):
         cfg = OrbConfig.from_env()
         self.assertEqual(robot_equity_for_signals([1000, 2000, 0], cfg), 2000)
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_robot_equity_default_14(self):
+        os.environ.pop("ORB_V2_ROBOT_EQUITY", None)
+        self.assertEqual(robot_equity_from_env(), 14.0)
 
     def test_apply_robot_wallet_after_pnl_compounds(self):
         self.assertAlmostEqual(apply_robot_wallet_after_pnl(2000.0, 100.0), 2100.0)
