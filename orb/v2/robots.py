@@ -42,20 +42,25 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
 
 
 def robot_bound_mode(*, symbol_count: int, robot_count: Optional[int] = None) -> bool:
-    """每 robot 固定绑定 symbols 列表中同序标的一标（独立资金池）。"""
+    """每 robot 固定绑定 symbols 列表中同序标的一标（须 robot_count == symbol_count）。"""
     rc = robot_count if robot_count is not None else robot_count_from_env()
-    raw = os.getenv("ORB_V2_ROBOT_BOUND", "")
-    if raw.strip():
-        enabled = _env_truthy("ORB_V2_ROBOT_BOUND")
-        if enabled and symbol_count > 0 and rc != symbol_count:
+    if symbol_count <= 0 or rc <= 0:
+        return False
+    if rc != symbol_count:
+        raw = os.getenv("ORB_V2_ROBOT_BOUND", "")
+        if raw.strip() and _env_truthy("ORB_V2_ROBOT_BOUND"):
             logger.warning(
-                "[orb_v2] ORB_V2_ROBOT_BOUND=1 but robot_count=%s != symbol_count=%s; using %s robots",
+                "[orb_v2] ORB_V2_ROBOT_BOUND=1 ignored: robot_count=%s != symbol_count=%s "
+                "(use shared %s-robot pool)",
                 rc,
                 symbol_count,
-                symbol_count,
+                rc,
             )
-        return enabled
-    return symbol_count > 0 and rc == symbol_count
+        return False
+    raw = os.getenv("ORB_V2_ROBOT_BOUND", "")
+    if raw.strip():
+        return _env_truthy("ORB_V2_ROBOT_BOUND")
+    return True
 
 
 def robot_symbol_bindings(symbols: List[str]) -> Dict[int, str]:
@@ -210,6 +215,10 @@ def ensure_orb_robots(
             """,
             (rid, init, now, now),
         )
+    cur.execute(
+        "UPDATE orb_robots SET enabled=0, updated_at_utc=? WHERE robot_id > ?",
+        (now, n),
+    )
 
 
 def robot_settled_pnl(cur: sqlite3.Cursor, robot_id: int) -> float:

@@ -291,6 +291,18 @@ def _pending_note_for_open(sig: OrbSignal, cfg: OrbConfig) -> str:
     return LIVE_PENDING_NOTE
 
 
+def _cancel_fvg_watch_limit(
+    sig: OrbSignal,
+    watch: Dict[str, Any],
+    cfg: OrbConfig,
+    *,
+    reason: str,
+) -> None:
+    if str(watch.get("reason") or "") != "fvg_limit_pending":
+        return
+    cancel_fvg_live_limit(sig, cfg, reason=reason)
+
+
 def _preview_fvg_live_notional(
     sig: OrbSignal,
     conn,
@@ -300,6 +312,7 @@ def _preview_fvg_live_notional(
     robot_count: int,
     robot_init: float,
     bot_equity: float,
+    signal_equity: float,
 ) -> None:
     if use_robots:
         rid = next_free_robot_id(conn.cursor(), count=robot_count, initial_equity_usdt=robot_init)
@@ -311,6 +324,16 @@ def _preview_fvg_live_notional(
                 sl=float(sig.sl_price or sig.price),
                 cfg=cfg,
                 bot_equity=rw,
+            )
+            return
+        pool_eq = float(signal_equity or 0)
+        if pool_eq > 0:
+            _apply_robot_notional(
+                sig,
+                entry=float(sig.price),
+                sl=float(sig.sl_price or sig.price),
+                cfg=cfg,
+                bot_equity=pool_eq,
             )
             return
     bot_wallet = symbol_bot_wallet_balance(conn, sig.symbol, initial_equity_usdt=bot_equity, sync=False)
@@ -453,7 +476,6 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     robot_count = robot_count_from_env()
     robot_bound = robot_bound_mode(symbol_count=len(syms), robot_count=robot_count)
     if robot_bound:
-        robot_count = len(syms)
         use_robots = True
     else:
         use_robots = bool(gate.robot_reuse_after_exit)
@@ -591,17 +613,19 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
         stats["fvg_watches"] = len(fvg_watched)
         for watch in list_fvg_watches(cur, session_day):
             wsym = str(watch["symbol"]).strip().upper()
+            wsig = _orb_signal_from_json(str(watch.get("sig_json") or "{}"))
+            wsig.symbol = wsym
+            _ensure_sig_session(wsig, session_day)
             if v2_session_traded(cur, wsym, session_day, v2):
+                _cancel_fvg_watch_limit(wsig, watch, c, reason="session_traded")
                 delete_fvg_watch(cur, session_day, wsym)
                 fvg_watched.discard(wsym)
                 continue
             if fetch_open_hold(cur, wsym, default_notional=c.default_paper_notional()) is not None:
+                _cancel_fvg_watch_limit(wsig, watch, c, reason="open_hold_exists")
                 delete_fvg_watch(cur, session_day, wsym)
                 fvg_watched.discard(wsym)
                 continue
-            wsig = _orb_signal_from_json(str(watch.get("sig_json") or "{}"))
-            wsig.symbol = wsym
-            _ensure_sig_session(wsig, session_day)
             fill_sig, fvg_reason, zone = _resolve_fvg_entry(
                 wsig,
                 sym=wsym,
@@ -653,6 +677,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                         robot_count=robot_count,
                         robot_init=robot_init,
                         bot_equity=bot_equity,
+                        signal_equity=signal_equity,
                     )
                     _submit_fvg_live_limit(quote, c, sym=wsym, stats=stats)
                 upsert_fvg_watch(
@@ -671,6 +696,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             delete_fvg_watch(cur, session_day, wsym)
             fvg_watched.discard(wsym)
             if fill_sig is None:
+                _cancel_fvg_watch_limit(wsig, watch, c, reason=str(fvg_reason or "fvg_watch_end"))
                 mark_breakout_seen(
                     cur,
                     session_date=session_day,
@@ -869,6 +895,8 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             )
             if not is_actionable(sig, c):
                 continue
+            _ensure_sig_session(sig, session_day)
+            sig.symbol = sym
             candidates.append((sym, sig))
         except Exception as exc:
             logger.warning("[orb_v2] candidate %s failed: %s", sym, exc)
@@ -1069,6 +1097,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                         robot_count=robot_count,
                         robot_init=robot_init,
                         bot_equity=bot_equity,
+                        signal_equity=signal_equity,
                     )
                     _submit_fvg_live_limit(quote, c, sym=sym, stats=stats)
                     upsert_fvg_watch(

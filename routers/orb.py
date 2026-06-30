@@ -60,8 +60,6 @@ def load_summary() -> Dict[str, Any]:
     robot_equity = robot_equity_from_env()
     symbols = v2.symbol_list()
     robot_bound = robot_bound_mode(symbol_count=len(symbols), robot_count=robot_count)
-    if robot_bound:
-        robot_count = len(symbols)
     conn = init_db()
     conn.row_factory = sqlite3.Row
     try:

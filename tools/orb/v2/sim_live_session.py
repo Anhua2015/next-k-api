@@ -648,8 +648,6 @@ def main() -> int:
         return 1
 
     rc = int(args.robot_count) if int(args.robot_count) > 0 else robot_count_from_env()
-    if robot_bound_mode(symbol_count=len(syms), robot_count=rc):
-        rc = len(syms)
     re = float(args.robot_equity) if float(args.robot_equity) > 0 else robot_equity_from_env()
     if args.fee_bps is not None:
         fee_uniform: Optional[float] = max(0.0, float(args.fee_bps))

@@ -29,6 +29,12 @@ class TestOrbV2Robots(unittest.TestCase):
     def test_robot_bound_mode_default(self):
         self.assertTrue(robot_bound_mode(symbol_count=8, robot_count=8))
         self.assertFalse(robot_bound_mode(symbol_count=8, robot_count=4))
+        self.assertFalse(robot_bound_mode(symbol_count=25, robot_count=8))
+
+    @patch.dict(os.environ, {"ORB_V2_ROBOT_BOUND": "1"}, clear=False)
+    def test_robot_bound_explicit_requires_matching_counts(self):
+        self.assertTrue(robot_bound_mode(symbol_count=8, robot_count=8))
+        self.assertFalse(robot_bound_mode(symbol_count=25, robot_count=8))
 
     def test_robot_symbol_bindings(self):
         syms = ["COINUSDT", "HOODUSDT", "PLTRUSDT"]
@@ -67,6 +73,15 @@ class TestOrbV2Robots(unittest.TestCase):
         cur = conn.cursor()
         migrate_orb_tables(cur)
         ensure_orb_robots(cur, count=2, initial_equity_usdt=10_000)
+        cur.execute(
+            """
+            INSERT INTO orb_robots(robot_id, initial_equity_usdt, enabled, created_at_utc, updated_at_utc)
+            VALUES (9, 10_000, 1, 't', 't')
+            """
+        )
+        ensure_orb_robots(cur, count=2, initial_equity_usdt=10_000)
+        cur.execute("SELECT enabled FROM orb_robots WHERE robot_id=9")
+        self.assertEqual(int(cur.fetchone()[0]), 0)
         cur.execute(
             """
             INSERT INTO orb_signals (
