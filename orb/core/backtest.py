@@ -12,11 +12,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from binance_fapi import fetch_klines_forward, klines_to_df
+from binance_fapi import fetch_klines_range, klines_to_df
 from orb.core.config import OrbConfig
 from orb.core.paper import analyze_at_ms, in_regular_session, is_actionable
 from orb.core.session import extended_fetch_anchor_ms
-from orb.core.resolve import pnl_r, pnl_usdt, resolve_forward
+from orb.core.resolve import entry_resolve_step_ms, pnl_r, pnl_usdt, resolve_forward
 from orb.core.session import session_day_str
 
 _DEFAULT_JSON = str(Path(__file__).resolve().parent.parent / "orb_backtest_last.json")
@@ -45,10 +45,10 @@ def _load_range(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.Da
         cur = start_ms
         while cur <= end_ms:
             chunk_end = min(cur + _LOAD_1M_CHUNK_MS, end_ms)
-            rows.extend(fetch_klines_forward(symbol, iv, cur, chunk_end))
+            rows.extend(fetch_klines_range(symbol, iv, cur, chunk_end))
             cur = chunk_end + 1
     else:
-        rows = fetch_klines_forward(symbol, iv, start_ms, end_ms)
+        rows = fetch_klines_range(symbol, iv, start_ms, end_ms)
     df = klines_to_df(rows)
     if df.empty:
         return df
@@ -114,7 +114,7 @@ def _resolve_open(
         sl=float(pos.sl),
         tp=float(pos.tp) if pos.tp is not None else None,
         hist_end_ms=int(scan_ms),
-        bar_step_ms=cfg.bar_step_ms(),
+        bar_step_ms=entry_resolve_step_ms(cfg, int(pos.entry_bar_open_ms)),
         cfg=cfg,
     )
     return out, ex_px, note, exit_bo

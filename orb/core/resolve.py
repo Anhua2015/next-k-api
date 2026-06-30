@@ -9,6 +9,16 @@ import pandas as pd
 from orb.core.config import OrbConfig
 from orb.core.session import effective_session_close_time, session_anchor_ms, session_close_ms
 
+ENTRY_1M_STEP_MS = 60_000
+
+
+def entry_resolve_step_ms(cfg: OrbConfig, entry_bar_open_ms: int) -> int:
+    """FVG/1m 成交的 entry_bar 不对齐 5m 栅格时，用 1m 步进做 SL 检查。"""
+    bar = max(1, int(cfg.bar_step_ms()))
+    if int(entry_bar_open_ms) % bar != 0:
+        return ENTRY_1M_STEP_MS
+    return bar
+
 
 def bar_hit_long(
     h: float, l: float, sl: float, tp: Optional[float], *, same_bar_rule: str

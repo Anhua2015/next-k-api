@@ -15,7 +15,7 @@ from utils.rate_limit import MinIntervalGuard
 
 logger = logging.getLogger(__name__)
 
-FAPI = "https://fapi.binance.com"
+FAPI = (os.getenv("BINANCE_FAPI_BASE") or "https://fapi.binance.com").strip().rstrip("/")
 
 # /fapi/v1/klines 单次 limit 上限
 BINANCE_KLINE_MAX_PER_REQUEST = 1500
@@ -100,6 +100,42 @@ def _wait_kline_slot(estimated_weight: int) -> None:
         break
 
 
+def _api_timeout_sec() -> float:
+    try:
+        return max(3.0, float(os.getenv("BINANCE_FAPI_TIMEOUT_SEC", "12") or 12))
+    except ValueError:
+        return 12.0
+
+
+def _requests_proxies() -> Optional[Dict[str, str]]:
+    http = (os.getenv("HTTP_PROXY") or os.getenv("http_proxy") or "").strip()
+    https = (os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or http).strip()
+    if not http and not https:
+        return None
+    out: Dict[str, str] = {}
+    if http:
+        out["http"] = http
+    if https:
+        out["https"] = https
+    return out
+
+
+def check_fapi_connectivity(*, timeout_sec: Optional[float] = None) -> tuple[bool, str]:
+    """拉 K 线前探测 fapi 是否可达。"""
+    t = float(timeout_sec if timeout_sec is not None else _api_timeout_sec())
+    try:
+        r = requests.get(
+            f"{FAPI}/fapi/v1/ping",
+            timeout=t,
+            proxies=_requests_proxies(),
+        )
+        if r.status_code == 200:
+            return True, f"ok ({FAPI})"
+        return False, f"ping status={r.status_code} ({FAPI})"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc} ({FAPI})"
+
+
 def api_get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
     data, _status = api_get_raw(endpoint, params)
     return data
@@ -109,10 +145,12 @@ def api_get_raw(
     endpoint: str, params: Optional[Dict[str, Any]] = None
 ) -> Tuple[Optional[Any], int]:
     url = f"{FAPI}{endpoint}"
-    backoff = (0.8, 1.5, 3.0, 6.0, 12.0)
+    backoff = (0.8, 2.0, 4.0)
+    proxies = _requests_proxies()
+    timeout = _api_timeout_sec()
     for delay in backoff:
         try:
-            r = requests.get(url, params=params or {}, timeout=20)
+            r = requests.get(url, params=params or {}, timeout=timeout, proxies=proxies)
             _note_weight_headers(r.headers)
             if r.status_code == 200:
                 return r.json(), 200
@@ -128,7 +166,7 @@ def api_get_raw(
                 continue
             return None, r.status_code
         except Exception as e:
-            logger.debug("[binance] %s request error: %s", endpoint, e)
+            logger.warning("[binance] %s request error: %s", endpoint, e)
             time.sleep(delay)
     return None, 0
 
@@ -237,7 +275,7 @@ def fetch_klines_forward(
         est_w = kline_request_weight(1500)
         _wait_kline_slot(est_w)
         try:
-            data, _status = api_get_raw(
+            data, status = api_get_raw(
                 "/fapi/v1/klines",
                 {
                     "symbol": symbol,
@@ -249,6 +287,14 @@ def fetch_klines_forward(
             )
         finally:
             _kline_slot_guard.mark_used()
+        if status not in (200,):
+            logger.warning(
+                "[binance] klines forward %s %s status=%s start=%s",
+                symbol,
+                interval,
+                status,
+                cur,
+            )
         batch = data if isinstance(data, list) else []
         if not batch:
             break
@@ -269,6 +315,52 @@ def fetch_klines_forward(
         if len(batch) < 1500:
             break
     return out
+
+
+def _interval_step_ms(interval: str) -> int:
+    return {
+        "1m": 60_000,
+        "2m": 120_000,
+        "3m": 180_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "1h": 3_600_000,
+        "1d": 86_400_000,
+    }.get(interval.strip().lower(), 300_000)
+
+
+def _estimate_bars(interval: str, start_ms: int, end_ms: int) -> int:
+    span = max(0, int(end_ms) - int(start_ms))
+    step = _interval_step_ms(interval)
+    return min(150_000, max(50, span // step + 20))
+
+
+def fetch_klines_range(
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: Optional[int] = None,
+) -> List[List[Any]]:
+    """
+    拉取 [start_ms, end_ms] K 线。
+    若 forward 空（常见于 start 早于合约上市），从 end 向历史回溯再裁剪。
+    """
+    if end_ms is None:
+        end_ms = int(time.time() * 1000)
+    start_ms = int(start_ms)
+    end_ms = int(end_ms)
+    if end_ms <= start_ms:
+        return []
+
+    rows = fetch_klines_forward(symbol, interval, start_ms, end_ms)
+    if rows:
+        return rows
+
+    need = _estimate_bars(interval, start_ms, end_ms)
+    hist = fetch_klines_history(symbol, interval, need, end_time_ms=end_ms)
+    if not hist:
+        return []
+    return [r for r in hist if start_ms <= int(r[0]) <= end_ms]
 
 
 def klines_to_df(rows: List[List[Any]]) -> pd.DataFrame:

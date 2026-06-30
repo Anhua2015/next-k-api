@@ -47,6 +47,100 @@ def migrate_orb_v2_tables(c: sqlite3.Cursor) -> None:
         )
         """
     )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orb_v2_fvg_watch (
+            session_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            confirm_scan_ms INTEGER NOT NULL,
+            sig_json TEXT NOT NULL,
+            p_true REAL,
+            sync_n INTEGER,
+            breakout_score REAL,
+            reason TEXT,
+            PRIMARY KEY (session_date, symbol)
+        )
+        """
+    )
+
+
+def upsert_fvg_watch(
+    cur: sqlite3.Cursor,
+    *,
+    session_date: str,
+    symbol: str,
+    now_utc: str,
+    confirm_scan_ms: int,
+    sig_json: str,
+    p_true: float,
+    sync_n: int,
+    breakout_score: Optional[float],
+    reason: str = "fvg_pending",
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO orb_v2_fvg_watch
+            (session_date, symbol, created_at_utc, confirm_scan_ms, sig_json,
+             p_true, sync_n, breakout_score, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_date, symbol) DO UPDATE SET
+            created_at_utc = excluded.created_at_utc,
+            confirm_scan_ms = excluded.confirm_scan_ms,
+            sig_json = excluded.sig_json,
+            p_true = excluded.p_true,
+            sync_n = excluded.sync_n,
+            breakout_score = excluded.breakout_score,
+            reason = excluded.reason
+        """,
+        (
+            str(session_date),
+            str(symbol).strip().upper(),
+            now_utc,
+            int(confirm_scan_ms),
+            sig_json,
+            float(p_true),
+            int(sync_n),
+            float(breakout_score) if breakout_score is not None else None,
+            str(reason),
+        ),
+    )
+
+
+def delete_fvg_watch(cur: sqlite3.Cursor, session_date: str, symbol: str) -> None:
+    cur.execute(
+        "DELETE FROM orb_v2_fvg_watch WHERE session_date = ? AND symbol = ?",
+        (str(session_date), str(symbol).strip().upper()),
+    )
+
+
+def list_fvg_watches(cur: sqlite3.Cursor, session_date: str) -> list[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT symbol, confirm_scan_ms, sig_json, p_true, sync_n, breakout_score, reason
+        FROM orb_v2_fvg_watch
+        WHERE session_date = ?
+        """,
+        (str(session_date),),
+    )
+    rows = cur.fetchall()
+    out: list[Dict[str, Any]] = []
+    for row in rows:
+        if hasattr(row, "keys"):
+            out.append(dict(row))
+        else:
+            out.append(
+                {
+                    "symbol": row[0],
+                    "confirm_scan_ms": row[1],
+                    "sig_json": row[2],
+                    "p_true": row[3],
+                    "sync_n": row[4],
+                    "breakout_score": row[5],
+                    "reason": row[6],
+                }
+            )
+    return out
 
 
 def mark_breakout_seen(

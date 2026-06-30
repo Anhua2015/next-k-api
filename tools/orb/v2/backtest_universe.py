@@ -30,7 +30,11 @@ from tools.orb.ml.eval_live_gate import (  # noqa: E402
     init_symbol_wallets,
     simulate_live_gate_day,
 )
+from orb.core.indicators import daily_atr_asof  # noqa: E402
+from orb.core.session import session_anchor_ms  # noqa: E402
 from tools.orb.v2.backtest_symbol import session_dates_from_cache  # noqa: E402
+
+import pandas as pd  # noqa: E402
 
 
 def universe_session_dates(symbols: List[str], cfg: OrbConfig) -> List[str]:
@@ -38,6 +42,54 @@ def universe_session_dates(symbols: List[str], cfg: OrbConfig) -> List[str]:
     for sym in symbols:
         dates.update(session_dates_from_cache(sym, cfg))
     return sorted(dates)
+
+
+def symbol_atr_ready_on_date(sym: str, session_date: str, cfg: OrbConfig) -> bool:
+    """该 session 日开盘前是否已有足够日线可算 ATR(period)。"""
+    from orb.core.kline_cache import load_klines
+
+    anchor = session_anchor_ms(
+        int(pd.Timestamp(f"{session_date} 12:00:00", tz=cfg.session_tz).value // 1_000_000),
+        tz=cfg.session_tz,
+        session_open_time=cfg.session_open_time,
+    )
+    ddf = load_klines(sym, "1d")
+    atr = daily_atr_asof(ddf, anchor, period=cfg.atr_period, tz=cfg.session_tz)
+    return atr is not None and atr > 0
+
+
+def first_atr_ready_session_date(
+    symbols: List[str],
+    cfg: OrbConfig,
+    *,
+    floor_date: str = "",
+    require_all: bool = True,
+) -> str:
+    """首个 ATR 可算的 NYSE session（默认要求池内全部标的）。"""
+    dates = universe_session_dates(symbols, cfg)
+    if floor_date.strip():
+        dates = [d for d in dates if d >= floor_date.strip()]
+    for d in dates:
+        flags = [symbol_atr_ready_on_date(sym, d, cfg) for sym in symbols]
+        if require_all and all(flags):
+            return d
+        if not require_all and any(flags):
+            return d
+    return ""
+
+
+def per_symbol_atr_ready_dates(symbols: List[str], cfg: OrbConfig, *, floor_date: str = "") -> dict[str, str]:
+    """各标的自 floor_date 起首个 ATR 可算日。"""
+    dates = universe_session_dates(symbols, cfg)
+    if floor_date.strip():
+        dates = [d for d in dates if d >= floor_date.strip()]
+    out: dict[str, str] = {}
+    for sym in symbols:
+        for d in dates:
+            if symbol_atr_ready_on_date(sym, d, cfg):
+                out[sym] = d
+                break
+    return out
 
 
 def cached_symbols(symbols: List[str]) -> tuple[List[str], List[str]]:

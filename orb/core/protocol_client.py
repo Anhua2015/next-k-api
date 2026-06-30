@@ -15,6 +15,19 @@ SOURCE_ORB = "orb"
 LIVE_PENDING_NOTE = "live_pending_entry"
 
 
+def live_pending_note(api_signal_id: Optional[str] = None) -> str:
+    if api_signal_id:
+        return f"{LIVE_PENDING_NOTE}|{api_signal_id}"
+    return LIVE_PENDING_NOTE
+
+
+def parse_pending_api_id(notes: str) -> str:
+    raw = str(notes or "").strip()
+    if raw.startswith(f"{LIVE_PENDING_NOTE}|"):
+        return raw.split("|", 1)[1].strip()
+    return ""
+
+
 def protocol_api_url() -> str:
     return (os.getenv("PROTOCOL_API_URL") or "http://localhost:8001").strip().rstrip("/")
 
@@ -61,6 +74,27 @@ def reconcile_pending_entries(*, timeout_sec: float = DEFAULT_TIMEOUT_SEC) -> Di
     if resp.status_code >= 400:
         body = resp.text[:500]
         raise RuntimeError(f"protocol reconcile HTTP {resp.status_code}: {body}")
+    return resp.json()
+
+
+def cancel_pending_entries(
+    api_signal_ids: List[str],
+    *,
+    source: str = SOURCE_ORB,
+    reason: str = "orb_cancel",
+    timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+) -> Dict[str, Any]:
+    if not api_signal_ids:
+        return {"ok": True, "cancelled": 0}
+    url = f"{protocol_api_url()}/api/binance/maintenance/cancel-pending-entries"
+    resp = requests.post(
+        url,
+        json={"source": source, "api_signal_ids": api_signal_ids, "reason": reason},
+        timeout=timeout_sec,
+    )
+    if resp.status_code >= 400:
+        body = resp.text[:500]
+        raise RuntimeError(f"protocol cancel HTTP {resp.status_code}: {body}")
     return resp.json()
 
 

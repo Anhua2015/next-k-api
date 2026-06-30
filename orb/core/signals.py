@@ -32,6 +32,7 @@ class OrbSignal:
     or_width_pct: float = 0.0
     session_date: str = ""
     entry_bar_open_ms: Optional[int] = None
+    fvg_confirm_bar_ms: Optional[int] = None
     sl_price: Optional[float] = None
     tp_price: Optional[float] = None
     r_unit: Optional[float] = None

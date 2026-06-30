@@ -55,11 +55,14 @@ def _run_one(
     ranker,
     cfg: OrbConfig,
     robot_equity: float,
-    fee_bps: float,
+    fee_bps: Optional[float],
     entry_fill: str,
 ) -> Dict[str, Any]:
     t0 = time.time()
     wallets = init_robot_wallets(count=1, equity_usdt=robot_equity)
+    fee_kw: Dict[str, Any] = {}
+    if fee_bps is not None:
+        fee_kw["fee_bps_per_side"] = fee_bps
     days = simulate_live_sessions(
         dates,
         [sym],
@@ -68,9 +71,9 @@ def _run_one(
         cfg=cfg,
         robot_wallets=wallets,
         respect_env_filters=cfg.macro_filter,
-        fee_bps_per_side=fee_bps,
         entry_fill=entry_fill,
         ml_enabled=ranker is not None,
+        **fee_kw,
     )
     trades = [t for d in days for t in (d.get("trades") or [])]
     wins = sum(1 for t in trades if float(t.get("pnl_usdt") or 0) > 0)
@@ -113,7 +116,7 @@ def main() -> int:
     ap.add_argument("--robot-equity", type=float, default=1000.0)
     ap.add_argument("--entry-fill", default="stoplimit_gap")
     ap.add_argument("--or-minutes", type=int, default=15)
-    ap.add_argument("--fee-bps", type=float, default=DEFAULT_FEE_BPS_PER_SIDE)
+    ap.add_argument("--fee-bps", type=float, default=None, help="统一单边 bps（默认 env maker/taker）")
     ap.add_argument("--no-live-filters", action="store_true")
     ap.add_argument("--json-out", default="")
     ap.add_argument("--csv-out", default="")
@@ -171,7 +174,7 @@ def main() -> int:
             ranker=None,
             cfg=cfg,
             robot_equity=float(args.robot_equity),
-            fee_bps=float(args.fee_bps),
+            fee_bps=float(args.fee_bps) if args.fee_bps is not None else None,
             entry_fill=str(args.entry_fill),
         )
         print(
@@ -193,7 +196,11 @@ def main() -> int:
         "gate_ml": False,
         "robot_reset": False,
         "robot_equity_usdt": float(args.robot_equity),
-        "fee_bps_per_side": float(args.fee_bps),
+        "fee_model": {
+            "uniform_bps_per_side": float(args.fee_bps) if args.fee_bps is not None else None,
+            "maker_bps": cfg.fee_maker_bps,
+            "taker_bps": cfg.fee_taker_bps,
+        },
         "macro_filter": cfg.macro_filter,
         "date_range": {"from": dates[0], "to": dates[-1], "sessions": len(dates)},
         "summary": {

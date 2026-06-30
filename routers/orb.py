@@ -18,14 +18,11 @@ from orb.v2.db import migrate_orb_v2_tables
 from orb.v2.paper import run_scan_v2
 from orb.v2.robots import (
     ensure_orb_robots,
-    list_recent_robot_resets,
     list_robot_summaries,
     robot_bound_mode,
     robot_count_from_env,
     robot_equity_from_env,
-    robot_reset_policy,
     robot_symbol_bindings,
-    total_robot_withdrawn,
 )
 from orb.core.session_today import build_session_today
 from utils.maintenance_auth import require_maintenance_token
@@ -50,7 +47,6 @@ def _status(row: Dict[str, Any]) -> str:
             "session_close": "收盘平仓",
             "early_exit": "提前离场",
             "supersede": "信号结束",
-            "robot_reset": "提现重置",
         }.get(str(oc), str(oc))
     if row.get("side") in ("LONG", "SHORT") and row.get("sl_price") is not None:
         return "持仓中"
@@ -86,7 +82,6 @@ def load_summary() -> Dict[str, Any]:
         trading_pnl = float(cur.fetchone()[0] or 0)
         cur.execute("SELECT COALESCE(SUM(pnl_usdt),0) FROM orb_settlements")
         wallet_pnl = float(cur.fetchone()[0] or 0)
-        withdrawn_total = total_robot_withdrawn(cur)
         cur.execute(
             "SELECT outcome, COUNT(*) FROM orb_settlements WHERE COALESCE(outcome, '') != 'robot_reset' GROUP BY outcome"
         )
@@ -96,7 +91,6 @@ def load_summary() -> Dict[str, Any]:
         robots = list_robot_summaries(
             conn, count=robot_count, initial_equity_usdt=robot_equity, symbols=symbols
         )
-        recent_resets = list_recent_robot_resets(cur, limit=8)
         conn.commit()
         gate = v2.load_gate()
         return _with_live_status(
@@ -109,9 +103,6 @@ def load_summary() -> Dict[str, Any]:
                 "settled_trades": settled,
                 "sum_pnl_usdt": round(trading_pnl, 4),
                 "sum_wallet_pnl_usdt": round(wallet_pnl, 4),
-                "total_withdrawn_usdt": withdrawn_total,
-                "recent_robot_resets": recent_resets,
-                "robot_reset_policy": robot_reset_policy(),
                 "touch_win_rate": round(w / touch, 4) if touch else None,
                 "outcome_breakdown": by_oc,
                 "robot_count": robot_count,

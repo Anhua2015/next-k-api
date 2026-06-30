@@ -18,7 +18,9 @@ from orb.ml.ranker import BreakoutRanker
 from orb.core.config import OrbConfig
 from orb.ml.features import extract_features, label_is_true_breakout
 from orb.core.kline_cache import has_kline_cache, load_klines
-from orb.core.signals import compute_position_notional
+from orb.core.or_entry_fill import resolve_entry_fill
+from orb.core.fvg import uses_fvg_entry
+from orb.core.indicators import daily_atr_asof
 from orb.v2.robots import (
     apply_robot_wallet_after_pnl,
     next_free_robot as _next_free_robot,
@@ -214,17 +216,10 @@ def _merge_trade_into_opened(state: LiveGateDayState, trade_row: Dict[str, Any])
         if key in trade_row and trade_row[key] is not None:
             row[key] = trade_row[key]
     if trade_row.get("pnl_usdt") is not None and trade_row.get("wallet_before") is not None:
-        after, reset_evt = apply_robot_wallet_after_pnl(
+        row["wallet_after"] = apply_robot_wallet_after_pnl(
             float(trade_row["wallet_before"]),
             float(trade_row["pnl_usdt"]),
         )
-        row["wallet_after"] = after
-        if reset_evt:
-            rid = trade_row.get("robot_id")
-            row["robot_reset"] = {
-                **reset_evt,
-                **({"robot_id": int(rid), "robot_label": f"R{int(rid)}"} if rid is not None else {}),
-            }
 
 
 def simulate_live_gate_day(
@@ -368,8 +363,17 @@ def simulate_live_gate_day(
 
             entry_bo = int(sig.entry_bar_open_ms or 0)
             trade_row: Optional[Dict[str, Any]] = None
+            fill_reason = "ok"
             if entry_bo > 0:
                 df1 = dfs1.get(sym)
+                df5 = dfs5.get(sym)
+                fvg_daily_atr = None
+                if uses_fvg_entry(cfg) and (cfg.sl_mode or "").strip().lower() == "atr_pct":
+                    ddf_full = dfs_daily.get(sym)
+                    if ddf_full is not None and not ddf_full.empty:
+                        fvg_daily_atr = daily_atr_asof(
+                            ddf_full, int(scan_ms), period=cfg.atr_period, tz=cfg.session_tz
+                        )
                 if robot_wallets is not None and ridx is not None:
                     notion = compute_position_notional(
                         entry=float(sig.price),
@@ -377,13 +381,14 @@ def simulate_live_gate_day(
                         cfg=cfg,
                         bot_equity_usdt=robot_wallets[ridx],
                     )
-                    trade_row = _resolve_trade_row(
+                    trade_row, fill_reason = resolve_entry_fill(
+                        mode=cfg.entry_fill,
                         sym=sym,
                         sig=sig,
                         session_date=session_date,
                         scan_ms=scan_ms,
-                        entry_bo=entry_bo,
                         df1=df1,
+                        df5=df5,
                         close_ms=close,
                         bar=bar,
                         cfg=cfg,
@@ -391,27 +396,31 @@ def simulate_live_gate_day(
                         wallet_before=robot_wallets[ridx],
                         robot_id=ridx + 1,
                         scans=scans,
+                        daily_atr=fvg_daily_atr,
                     )
                 elif df1 is not None and not df1.empty:
                     notion = float(sig.paper_notional_usdt or cfg.default_paper_notional())
                     wb = float(wallets.get(sym, 0) or 0) if wallets is not None else None
-                    trade_row = _resolve_trade_row(
+                    trade_row, fill_reason = resolve_entry_fill(
+                        mode=cfg.entry_fill,
                         sym=sym,
                         sig=sig,
                         session_date=session_date,
                         scan_ms=scan_ms,
-                        entry_bo=entry_bo,
                         df1=df1,
+                        df5=df5,
                         close_ms=close,
                         bar=bar,
                         cfg=cfg,
                         notional=notion,
                         wallet_before=wb,
+                        robot_id=None,
                         scans=scans,
+                        daily_atr=fvg_daily_atr,
                     )
 
             if not trade_row:
-                _finalize_blocked_open(decision, state, "no_trade_row")
+                _finalize_blocked_open(decision, state, fill_reason if entry_bo > 0 else "no_entry_bar")
                 timeline.append(decision)
                 continue
 
@@ -424,7 +433,7 @@ def simulate_live_gate_day(
                         "pnl_usdt": float(trade_row["pnl_usdt"]),
                     }
                 else:
-                    robot_wallets[ridx], _ = apply_robot_wallet_after_pnl(
+                    robot_wallets[ridx] = apply_robot_wallet_after_pnl(
                         robot_wallets[ridx],
                         float(trade_row["pnl_usdt"]),
                     )

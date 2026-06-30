@@ -75,7 +75,12 @@ def load_klines(
     path = resolve_kline_read_path(symbol, interval)
     if path is None:
         return pd.DataFrame(columns=list(COLUMNS))
-    df = pd.read_csv(path)
+    if path.stat().st_size < 8:
+        return pd.DataFrame(columns=list(COLUMNS))
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=list(COLUMNS))
     if df.empty:
         return df
     for c in COLUMNS:

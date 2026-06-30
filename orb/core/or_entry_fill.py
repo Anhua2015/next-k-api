@@ -82,6 +82,7 @@ def resolve_entry_fill(
     wallet_before: float,
     robot_id: int,
     scans: Optional[list],
+    daily_atr: Optional[float] = None,
 ) -> tuple[Optional[Dict[str, Any]], str]:
     """返回 (trade_row, reason)。"""
     from dataclasses import replace
@@ -157,10 +158,25 @@ def resolve_entry_fill(
         if hit is None:
             return None, "or_limit_not_filled"
         fill_ms, fill_px = hit
-        if honest or gap:
-            fill_sig = replace(sig, price=round(fill_px, 8))
-            return _row_with_fill(fill_sig, fill_ms, fill_px, mode_l)
-        row, reason = _row_with_fill(sig, fill_ms, signal_entry, mode_l)
+        from orb.core.fvg import stop_loss_for_fvg_fill
+
+        new_sl = stop_loss_for_fvg_fill(
+            side=str(sig.side),
+            fill_px=float(fill_px),
+            sig=sig,
+            cfg=cfg,
+            daily_atr=daily_atr,
+        )
+        if new_sl is None:
+            return None, "sl_invalid"
+        risk = round(abs(float(fill_px) - float(new_sl)), 8)
+        fill_sig = replace(
+            sig,
+            price=round(fill_px, 8),
+            sl_price=new_sl,
+            r_unit=risk,
+        )
+        row, reason = _row_with_fill(fill_sig, fill_ms, float(fill_px), mode_l)
         return (row, reason) if row else (None, reason)
 
     if mode_l == "market":
@@ -173,5 +189,25 @@ def resolve_entry_fill(
         chase_sig = replace(sig, price=chase_px)
         row, reason = _row_with_fill(chase_sig, entry_bo, chase_px, "market_chase")
         return (row, reason) if row else (None, reason)
+
+    if mode_l in ("fvg_prox", "fvg"):
+        from orb.core.fvg import resolve_fvg_prox_fill
+
+        return resolve_fvg_prox_fill(
+            sym=sym,
+            sig=sig,
+            session_date=session_date,
+            scan_ms=scan_ms,
+            df1=df1,
+            df5=df5,
+            close_ms=close_ms,
+            bar=bar,
+            cfg=cfg,
+            notional=notional,
+            wallet_before=wallet_before,
+            robot_id=robot_id,
+            scans=scans,
+            daily_atr=daily_atr,
+        )
 
     return None, f"unknown_mode:{mode_l}"

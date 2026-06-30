@@ -162,12 +162,15 @@ class OrbConfig:
     max_open_positions: int = 6
     resolve_max_bars: int = 0
     resolve_max_hold_ms: int = 0
-    resolve_at_session_close: bool = True
+    resolve_at_session_close: bool = False
     same_bar_rule: str = "pessimistic"
     db_skip_flat: bool = True
     live_enabled: bool = False
     live_leverage: float = 0.0
     live_entry_type: str = "stoplimit_gap"
+    entry_fill: str = "fvg_prox"
+    fee_maker_bps: float = 2.0
+    fee_taker_bps: float = 4.0
     symbols: str = DEFAULT_US_EQUITY_SYMBOLS
 
     @property
@@ -224,6 +227,15 @@ class OrbConfig:
         tp_r = tp_raw if exit_mode == "fixed_r" else 0.0
         if exit_mode == "fixed_r" and tp_r <= 0:
             tp_r = max(0.5, tp_default if tp_default > 0 else 1.5)
+        legacy_fee = (os.getenv("ORB_FEE_BPS_PER_SIDE") or "").strip()
+        legacy_bps = float(legacy_fee) if legacy_fee else None
+        maker_default = 2.0
+        taker_default = 4.0
+        if legacy_bps is not None:
+            if not (os.getenv("ORB_FEE_MAKER_BPS") or "").strip():
+                maker_default = legacy_bps
+            if not (os.getenv("ORB_FEE_TAKER_BPS") or "").strip():
+                taker_default = legacy_bps
         return cls(
             market=market,
             signal_interval=iv if iv in ("1m", "2m", "3m", "5m", "15m") else "5m",
@@ -323,6 +335,9 @@ class OrbConfig:
             live_entry_type=(
                 os.getenv("ORB_LIVE_ENTRY_TYPE") or "stoplimit_gap"
             ).strip().lower(),
+            entry_fill=(os.getenv("ORB_ENTRY_FILL") or "fvg_prox").strip().lower(),
+            fee_maker_bps=max(0.0, _float_env("ORB_FEE_MAKER_BPS", maker_default)),
+            fee_taker_bps=max(0.0, _float_env("ORB_FEE_TAKER_BPS", taker_default)),
             symbols=(os.getenv("ORB_SYMBOLS") or symbols_default).strip(),
         )
 

@@ -8,11 +8,15 @@ from typing import Any, Dict, Optional
 
 from orb.core.config import OrbConfig
 from orb.core.kline_cache import norm_symbol
+from orb.core.fvg import uses_fvg_entry
 from orb.core.protocol_client import (
     LIVE_PENDING_NOTE,
     SOURCE_ORB,
+    cancel_pending_entries,
     ingest_signals,
+    live_pending_note,
     lookup_signal,
+    parse_pending_api_id,
     protocol_configured,
     reconcile_pending_entries,
 )
@@ -51,10 +55,34 @@ def _close_signal_id(symbol: str, *, signal_id: int, tag: str) -> str:
     return f"orb:close:{sym}:{int(signal_id)}:{str(tag or 'resolve').strip().lower()}"
 
 
+def _fvg_confirm_bar_ms(sig: OrbSignal) -> int:
+    confirm = getattr(sig, "fvg_confirm_bar_ms", None)
+    if confirm:
+        return int(confirm)
+    return int(sig.entry_bar_open_ms or 0)
+
+
+def fvg_api_signal_id(sig: OrbSignal) -> str:
+    sym = norm_symbol(str(sig.symbol).strip().upper())
+    sess = (sig.session_date or "").strip()
+    bar = _fvg_confirm_bar_ms(sig)
+    return f"orb:fvg:{sym}:{sess}:{bar}"
+
+
+def _open_api_signal_id(sig: OrbSignal, cfg: OrbConfig) -> str:
+    if uses_fvg_entry(cfg):
+        return fvg_api_signal_id(sig)
+    return _open_signal_id(sig)
+
+
 def _live_entry_type(cfg: OrbConfig) -> str:
+    if uses_fvg_entry(cfg):
+        return "LIMIT"
     raw = str(getattr(cfg, "live_entry_type", "") or "stoplimit_gap").strip().lower()
     if raw in ("stoplimit_gap", "stoplimit", "stop_limit", "stop-limit"):
         return "STOP_LIMIT"
+    if raw in ("limit", "fvg", "fvg_prox"):
+        return "LIMIT"
     if raw in ("market", ""):
         return "MARKET"
     return raw.upper()
@@ -88,9 +116,10 @@ def build_open_payload(sig: OrbSignal, cfg: OrbConfig) -> Dict[str, Any]:
                 implied,
                 lev,
             )
+    api_id = _open_api_signal_id(sig, cfg)
     payload: Dict[str, Any] = {
         "source": SOURCE_ORB,
-        "api_signal_id": _open_signal_id(sig),
+        "api_signal_id": api_id,
         "symbol": str(sig.symbol).strip().upper(),
         "side": str(sig.side).upper(),
         "margin_usdt": round(margin, 4),
@@ -102,8 +131,14 @@ def build_open_payload(sig: OrbSignal, cfg: OrbConfig) -> Dict[str, Any]:
         "confidence": sig.confidence or "high",
         "action": "open",
         "entry_type": _live_entry_type(cfg),
-        "client_ref": _open_signal_id(sig),
+        "client_ref": api_id,
     }
+    if uses_fvg_entry(cfg):
+        if float(sig.or_high or 0) > 0 and float(sig.or_low or 0) > 0:
+            payload["or_high"] = float(sig.or_high)
+            payload["or_low"] = float(sig.or_low)
+        if sig.r_unit is not None and float(sig.r_unit) > 0:
+            payload["sl_risk_dist"] = float(sig.r_unit)
     return payload
 
 
@@ -140,7 +175,7 @@ def live_ingest_succeeded(result: Optional[Dict[str, Any]]) -> bool:
         return True
     action = ingest_detail_action(result)
     if action == "duplicate":
-        return False
+        return True
     if result.get("skipped") is True:
         return True
     if result.get("error"):
@@ -158,6 +193,55 @@ def live_ingest_succeeded(result: Optional[Dict[str, Any]]) -> bool:
         if act == "error":
             return False
     return False
+
+
+def protocol_fvg_open_status(sig: OrbSignal, cfg: OrbConfig) -> str:
+    if not uses_fvg_entry(cfg):
+        return ""
+    try:
+        proto = lookup_signal(source=SOURCE_ORB, api_signal_id=fvg_api_signal_id(sig))
+    except Exception as exc:
+        logger.warning("[orb] protocol lookup fvg %s failed: %s", sig.symbol, exc)
+        return ""
+    if not proto:
+        return ""
+    return str(proto.get("status") or "").lower()
+
+
+def protocol_fvg_open_done(sig: OrbSignal, cfg: OrbConfig) -> bool:
+    return protocol_fvg_open_status(sig, cfg) in ("traded", "submitted")
+
+
+def cancel_fvg_live_limit(sig: OrbSignal, cfg: OrbConfig, *, reason: str = "fvg_watch_cancel") -> bool:
+    if not live_enabled(cfg) or not uses_fvg_entry(cfg):
+        return False
+    api_id = fvg_api_signal_id(sig)
+    try:
+        result = cancel_pending_entries([api_id], reason=reason)
+        return int(result.get("cancelled") or 0) >= 1
+    except Exception as exc:
+        logger.warning("[orb] cancel fvg limit %s failed: %s", api_id, exc)
+        return False
+
+
+def protocol_fvg_entry_price(sig: OrbSignal, cfg: OrbConfig) -> Optional[float]:
+    if protocol_fvg_open_status(sig, cfg) != "traded":
+        return None
+    try:
+        proto = lookup_signal(source=SOURCE_ORB, api_signal_id=fvg_api_signal_id(sig))
+    except Exception as exc:
+        logger.warning("[orb] protocol entry lookup fvg %s failed: %s", sig.symbol, exc)
+        return None
+    if not proto:
+        return None
+    raw = proto.get("entry_price")
+    if raw is None:
+        return None
+    try:
+        px = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return px if px > 0 else None
 
 
 def notify_open(sig: OrbSignal, cfg: OrbConfig) -> Dict[str, Any]:
@@ -193,7 +277,7 @@ def notify_close(
 
 
 def sync_live_pending_entries(conn: sqlite3.Connection, cfg: OrbConfig) -> int:
-    """对账 pending STOP 入场：成交清标记，取消则回滚纸面持仓。"""
+    """对账 pending 入场：成交清标记，取消则回滚纸面持仓。"""
     if not live_enabled(cfg):
         return 0
     try:
@@ -204,17 +288,20 @@ def sync_live_pending_entries(conn: sqlite3.Connection, cfg: OrbConfig) -> int:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, symbol, session_date, entry_bar_open_ms
+        SELECT id, symbol, session_date, entry_bar_open_ms, notes
         FROM orb_signals
-        WHERE outcome IS NULL AND COALESCE(notes, '') = ?
+        WHERE outcome IS NULL AND COALESCE(notes, '') LIKE ?
           AND side IN ('LONG', 'SHORT') AND sl_price IS NOT NULL
         """,
-        (LIVE_PENDING_NOTE,),
+        (f"{LIVE_PENDING_NOTE}%",),
     )
     rows = cur.fetchall()
     changed = 0
-    for sid, sym, session_date, entry_bar in rows:
-        api_id = f"orb:open:{str(sym).strip().upper()}:{session_date or ''}:{int(entry_bar or 0)}"
+    for sid, sym, session_date, entry_bar, notes in rows:
+        api_id = parse_pending_api_id(str(notes or ""))
+        if not api_id:
+            api_id = f"orb:open:{str(sym).strip().upper()}:{session_date or ''}:{int(entry_bar or 0)}"
+        note_val = str(notes or "")
         try:
             proto = lookup_signal(source=SOURCE_ORB, api_signal_id=api_id)
         except Exception as exc:
@@ -232,7 +319,7 @@ def sync_live_pending_entries(conn: sqlite3.Connection, cfg: OrbConfig) -> int:
                 DELETE FROM orb_signals
                 WHERE id=? AND outcome IS NULL AND COALESCE(notes, '') = ?
                 """,
-                (int(sid), LIVE_PENDING_NOTE),
+                (int(sid), note_val),
             )
             changed += 1
             logger.info("[orb] rolled back pending paper open id=%s symbol=%s status=%s", sid, sym, status)

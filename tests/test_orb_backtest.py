@@ -217,7 +217,7 @@ class TestOrbBacktestResolve(unittest.TestCase):
             return []
 
         span = _LOAD_1M_CHUNK_MS * 3 + 1
-        with patch("orb.core.backtest.fetch_klines_forward", side_effect=_fake_fetch):
+        with patch("orb.core.backtest.fetch_klines_range", side_effect=_fake_fetch):
             _load_range("INTCUSDT", "1m", 1_000_000, 1_000_000 + span)
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0][0], 1_000_000)

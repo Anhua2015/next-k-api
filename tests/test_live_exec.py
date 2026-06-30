@@ -25,8 +25,8 @@ class TestLiveIngestSucceeded(unittest.TestCase):
         self.assertTrue(live_ingest_succeeded(payload))
         self.assertTrue(live_open_is_pending(payload))
 
-    def test_duplicate_is_failure(self) -> None:
-        self.assertFalse(
+    def test_duplicate_is_idempotent_success(self) -> None:
+        self.assertTrue(
             live_ingest_succeeded(
                 {"traded": 0, "errors": 0, "details": [{"action": "duplicate"}]}
             )

@@ -36,6 +36,7 @@ from orb.ml.samples import parse_symbol_list  # noqa: E402
 from orb.v2.paper import _paper_breakout_score  # noqa: E402
 from orb.v2.paths import resolve_gate_config_path, resolve_symbols_path  # noqa: E402
 from orb.v2.robots import (  # noqa: E402
+    apply_robot_wallet_after_pnl,
     bound_robot_index_available,
     init_robot_wallets,
     next_free_robot as _next_free_robot,
@@ -48,18 +49,22 @@ from orb.v2.robots import (  # noqa: E402
     symbol_to_robot_index,
 )
 from tools.orb.ml.eval_live_gate import _ml_cfg  # noqa: E402
-from tools.orb.v2.backtest_universe import universe_session_dates  # noqa: E402
+from tools.orb.v2.backtest_universe import (  # noqa: E402
+    first_atr_ready_session_date,
+    per_symbol_atr_ready_dates,
+    universe_session_dates,
+)
 
 import pandas as pd  # noqa: E402
 
-DEFAULT_FEE_BPS_PER_SIDE = 4.0  # 单边费率 bps；往返开平 ×2
+from orb.core.fees import (  # noqa: E402
+    DEFAULT_FEE_MAKER_BPS,
+    DEFAULT_FEE_TAKER_BPS,
+    trade_fee_usdt,
+)
 
-
-def trade_fee_usdt(notional_usdt: float, *, fee_bps_per_side: float) -> float:
-    """按名义本金计费：fee = notional × (bps/10000) × 2（开+平）。"""
-    n = max(0.0, float(notional_usdt or 0.0))
-    bps = max(0.0, float(fee_bps_per_side))
-    return round(n * (bps / 10000.0) * 2.0, 4)
+# 兼容旧脚本：统一单边 4bps
+DEFAULT_FEE_BPS_PER_SIDE = DEFAULT_FEE_TAKER_BPS
 
 
 TRADE_CSV_FIELDS = [
@@ -114,8 +119,10 @@ def simulate_live_session(
     cfg: OrbConfig,
     robot_wallets: List[float],
     respect_env_filters: bool = True,
-    fee_bps_per_side: float = DEFAULT_FEE_BPS_PER_SIDE,
-    entry_fill: str = "signal",
+    fee_maker_bps: Optional[float] = None,
+    fee_taker_bps: Optional[float] = None,
+    fee_bps_per_side: Optional[float] = None,
+    entry_fill: str = "fvg_prox",
     ml_enabled: bool = True,
 ) -> Dict[str, Any]:
     tz = cfg.session_tz
@@ -125,6 +132,9 @@ def simulate_live_session(
     if close is None:
         close = anchor + 6 * 60 * 60 * 1000
     bar = cfg.bar_step_ms()
+    mk_fee = float(fee_maker_bps if fee_maker_bps is not None else cfg.fee_maker_bps)
+    tk_fee = float(fee_taker_bps if fee_taker_bps is not None else cfg.fee_taker_bps)
+    uniform_fee = float(fee_bps_per_side) if fee_bps_per_side is not None else None
     scans = [
         s
         for s in _iter_scan_ms(anchor, close, bar_step_ms=bar)
@@ -300,6 +310,15 @@ def simulate_live_session(
             trade_row = None
             fill_reason = "ok"
             if entry_bo > 0:
+                fvg_daily_atr = None
+                if entry_fill in ("fvg_prox", "fvg") and (cfg.sl_mode or "").strip().lower() == "atr_pct":
+                    ddf_full = dfs_daily.get(sym)
+                    if ddf_full is not None and not ddf_full.empty:
+                        from orb.core.indicators import daily_atr_asof
+
+                        fvg_daily_atr = daily_atr_asof(
+                            ddf_full, int(scan_ms), period=cfg.atr_period, tz=cfg.session_tz
+                        )
                 notion = compute_position_notional(
                     entry=float(sig.price),
                     sl=float(sig.sl_price),
@@ -313,7 +332,7 @@ def simulate_live_session(
                     session_date=session_date,
                     scan_ms=scan_ms,
                     df1=dfs1.get(sym),
-                    df5=df5_cache.get(sym),
+                    df5=dfs5.get(sym),
                     close_ms=close,
                     bar=bar,
                     cfg=cfg,
@@ -321,6 +340,7 @@ def simulate_live_session(
                     wallet_before=robot_wallets[ridx],
                     robot_id=ridx + 1,
                     scans=scans,
+                    daily_atr=fvg_daily_atr,
                 )
             if not trade_row:
                 rollback_open_decision(gate_state, symbol=sym)
@@ -331,10 +351,18 @@ def simulate_live_session(
                 continue
 
             gross = float(trade_row.get("pnl_usdt") or 0)
-            fee = trade_fee_usdt(
-                float(trade_row.get("notional_usdt") or 0),
-                fee_bps_per_side=fee_bps_per_side,
-            )
+            if uniform_fee is not None:
+                fee = trade_fee_usdt(
+                    float(trade_row.get("notional_usdt") or 0),
+                    fee_bps_per_side=uniform_fee,
+                )
+            else:
+                fee = trade_fee_usdt(
+                    float(trade_row.get("notional_usdt") or 0),
+                    entry_mode=str(trade_row.get("entry_mode") or entry_fill),
+                    maker_bps=mk_fee,
+                    taker_bps=tk_fee,
+                )
             net = round(gross - fee, 2)
             trade_row["pnl_usdt_gross"] = round(gross, 2)
             trade_row["pnl_usdt"] = net
@@ -350,7 +378,8 @@ def simulate_live_session(
                 "exit_ms": int(trade_row.get("exit_ms") or scan_ms),
                 "pnl_usdt": net,
             }
-            robot_wallets[ridx] = round(float(trade_row.get("wallet_after") or robot_wallets[ridx]), 2)
+            robot_wallets[ridx] = apply_robot_wallet_after_pnl(robot_wallets[ridx], net)
+            trade_row["wallet_after"] = robot_wallets[ridx]
             decision["robot_id"] = ridx + 1
             decision["pnl_usdt"] = net
             decision["outcome"] = trade_row.get("outcome")
@@ -364,7 +393,12 @@ def simulate_live_session(
     net_pnl = round(sum(float(t.get("pnl_usdt") or 0) for t in trades), 2)
     fees_pnl = round(sum(float(t.get("fee_usdt") or 0) for t in trades), 2)
     bs_skips = sum(1 for g in gate_skips if str(g.get("reason") or "").startswith("breakout_score"))
-    fill_skips = sum(1 for g in gate_skips if str(g.get("reason") or "") == "or_limit_not_filled")
+    fill_skips = sum(
+        1
+        for g in gate_skips
+        if str(g.get("reason") or "")
+        in ("or_limit_not_filled", "fvg_not_found", "fvg_limit_not_filled", "fvg_or_reclaim", "fvg_sl_invalid")
+    )
 
     return {
         "session_date": session_date,
@@ -376,7 +410,9 @@ def simulate_live_session(
         "robot_bindings": robot_symbol_bindings(symbols) if robot_bound else None,
         "robot_equity_usdt": robot_equity_from_env(),
         "robot_count": len(robot_wallets),
-        "fee_bps_per_side": float(fee_bps_per_side),
+        "fee_maker_bps": mk_fee,
+        "fee_taker_bps": tk_fee,
+        "fee_uniform_bps_per_side": uniform_fee,
         "opens": len(trades),
         "gate_skips": len(gate_skips),
         "bs_skips": bs_skips,
@@ -399,8 +435,10 @@ def simulate_live_sessions(
     cfg: OrbConfig,
     robot_wallets: List[float],
     respect_env_filters: bool = True,
-    fee_bps_per_side: float = DEFAULT_FEE_BPS_PER_SIDE,
-    entry_fill: str = "signal",
+    fee_maker_bps: Optional[float] = None,
+    fee_taker_bps: Optional[float] = None,
+    fee_bps_per_side: Optional[float] = None,
+    entry_fill: str = "fvg_prox",
     ml_enabled: bool = True,
 ) -> List[Dict[str, Any]]:
     days: List[Dict[str, Any]] = []
@@ -413,6 +451,8 @@ def simulate_live_sessions(
             cfg=cfg,
             robot_wallets=robot_wallets,
             respect_env_filters=respect_env_filters,
+            fee_maker_bps=fee_maker_bps,
+            fee_taker_bps=fee_taker_bps,
             fee_bps_per_side=fee_bps_per_side,
             entry_fill=entry_fill,
             ml_enabled=ml_enabled,
@@ -460,6 +500,27 @@ def _resolve_dates(args, syms: List[str], cfg: OrbConfig) -> List[str]:
         return []
     d0 = (args.from_date or "").strip()
     d1 = (args.to_date or "").strip()
+    if getattr(args, "from_atr_ready", False):
+        floor = d0 or all_dates[0]
+        atr_start = first_atr_ready_session_date(
+            syms, cfg, floor_date=floor, require_all=not bool(getattr(args, "atr_ready_any", False))
+        )
+        if not atr_start:
+            print(f"No ATR-ready session on/after {floor}", flush=True)
+            return []
+        per_sym = per_symbol_atr_ready_dates(syms, cfg, floor_date=floor)
+        late = sorted(per_sym.items(), key=lambda x: x[1])[-5:]
+        print(
+            f"[atr-ready] floor={floor} start={atr_start} "
+            f"(require_all={not bool(getattr(args, 'atr_ready_any', False))})",
+            flush=True,
+        )
+        print(
+            f"[atr-ready] latest symbols: "
+            + ", ".join(f"{s.replace('USDT', '')}@{d}" for s, d in late),
+            flush=True,
+        )
+        d0 = atr_start
     if d0 or d1:
         lo = d0 or all_dates[0]
         hi = d1 or all_dates[-1]
@@ -491,6 +552,16 @@ def main() -> int:
     ap.add_argument("--date", default="", help="单日 YYYY-MM-DD")
     ap.add_argument("--from-date", default="")
     ap.add_argument("--to-date", default="")
+    ap.add_argument(
+        "--from-atr-ready",
+        action="store_true",
+        help="从 --from-date 起首个全池 ATR 可算交易日开始（需足够日线缓存）",
+    )
+    ap.add_argument(
+        "--atr-ready-any",
+        action="store_true",
+        help="配合 --from-atr-ready：任一只标的有 ATR 即计入（默认要求全部标的）",
+    )
     ap.add_argument("--symbols-file", default=str(resolve_symbols_path()))
     ap.add_argument("--symbols", default="", help="逗号分隔标的，如 COIN（覆盖 symbols-file）")
     ap.add_argument("--gate-config", default=str(resolve_gate_config_path()))
@@ -504,15 +575,27 @@ def main() -> int:
     ap.add_argument(
         "--fee-bps",
         type=float,
-        default=DEFAULT_FEE_BPS_PER_SIDE,
-        help="单边手续费 bps，往返开平按 notional×2 计费（默认 4=0.04%%）",
+        default=None,
+        help="统一单边 bps（覆盖 maker/taker 分拆，兼容旧 4+4 口径）",
+    )
+    ap.add_argument(
+        "--fee-maker-bps",
+        type=float,
+        default=0.0,
+        help="开仓 maker bps（FVG/Stop-Limit 限价；0=env，默认 2）",
+    )
+    ap.add_argument(
+        "--fee-taker-bps",
+        type=float,
+        default=0.0,
+        help="平仓 taker bps（SL/EOD；0=env，默认 4）",
     )
     ap.add_argument("--no-live-filters", action="store_true")
     ap.add_argument(
         "--entry-fill",
-        default="signal",
-        choices=("signal", "stoplimit", "stoplimit_gap", "stoplimit_honest", "stoplimit_gap_honest", "market"),
-        help="成交模型：signal=理想信号价 | stoplimit_gap=OR Stop-Limit+gap | market=5m收盘价追单",
+        default="fvg_prox",
+        choices=("signal", "fvg_prox", "fvg", "stoplimit", "stoplimit_gap", "stoplimit_honest", "stoplimit_gap_honest", "market"),
+        help="成交模型：fvg_prox=5m确认后1m FVG近沿限价 | signal=理想信号价 | stoplimit_gap=OR Stop-Limit",
     )
     ap.add_argument("--robot-count", type=int, default=0, help="覆盖 robot 数量（0=env）")
     ap.add_argument("--or-minutes", type=int, default=0, help="覆盖 OR 窗口分钟（0=env，如 15/30）")
@@ -568,16 +651,27 @@ def main() -> int:
     if robot_bound_mode(symbol_count=len(syms), robot_count=rc):
         rc = len(syms)
     re = float(args.robot_equity) if float(args.robot_equity) > 0 else robot_equity_from_env()
-    fee_bps = max(0.0, float(args.fee_bps))
+    if args.fee_bps is not None:
+        fee_uniform: Optional[float] = max(0.0, float(args.fee_bps))
+        fee_maker = fee_taker = None
+    else:
+        fee_uniform = None
+        fee_maker = float(args.fee_maker_bps) if float(args.fee_maker_bps) > 0 else cfg.fee_maker_bps
+        fee_taker = float(args.fee_taker_bps) if float(args.fee_taker_bps) > 0 else cfg.fee_taker_bps
     wallets = init_robot_wallets(count=rc, equity_usdt=re)
     bound = robot_bound_mode(symbol_count=len(syms), robot_count=rc)
+    fee_log = (
+        f"fee={fee_uniform}bps/side×2"
+        if fee_uniform is not None
+        else f"fee=maker{fee_maker}+taker{fee_taker}bps"
+    )
 
     print(
         f"[live sim] {dates[0]} .. {dates[-1]} | {len(dates)} sessions | "
         f"{len(syms)} syms | ml={'on' if ml_enabled else 'off'} | "
         f"gate p>={gate.min_p_true} bs>={gate.min_breakout_score:.0f} | "
         f"fill={args.entry_fill} or={cfg.or_minutes}m risk={cfg.risk_pct} | "
-        f"robots={rc}x{re}U bound={bound} reset={not bool(args.no_robot_reset)} | fee={fee_bps}bps/side×2",
+        f"robots={rc}x{re}U bound={bound} reset={not bool(args.no_robot_reset)} | {fee_log}",
         flush=True,
     )
 
@@ -593,7 +687,9 @@ def main() -> int:
             cfg=cfg,
             robot_wallets=wallets,
             respect_env_filters=not bool(args.no_live_filters),
-            fee_bps_per_side=fee_bps,
+            fee_maker_bps=fee_maker,
+            fee_taker_bps=fee_taker,
+            fee_bps_per_side=fee_uniform,
             entry_fill=str(args.entry_fill),
             ml_enabled=ml_enabled,
         )
@@ -650,9 +746,12 @@ def main() -> int:
         "robot_bound": bound,
         "robot_bindings": robot_symbol_bindings(syms) if bound else None,
         "fee_model": {
-            "bps_per_side": fee_bps,
-            "round_trip": True,
-            "formula": "notional * (bps/10000) * 2",
+            "maker_bps": fee_maker if fee_uniform is None else fee_uniform,
+            "taker_bps": fee_taker if fee_uniform is None else fee_uniform,
+            "uniform_bps_per_side": fee_uniform,
+            "formula": "notional * (open_bps + close_bps) / 10000",
+            "open_bps": "maker for fvg/stoplimit limit fills; taker for signal/market",
+            "close_bps": "taker (SL/EOD)",
         },
         "summary": {
             "total_opens": total_opens,

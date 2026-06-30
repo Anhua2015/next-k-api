@@ -1,10 +1,10 @@
 import unittest
 
-from tools.orb.v2.sim_live_session import trade_fee_usdt
+from orb.core.fees import trade_fee_usdt
 
 
 class TestSimLiveFee(unittest.TestCase):
-    def test_trade_fee_round_trip_on_notional(self):
+    def test_trade_fee_round_trip_uniform_legacy(self):
         self.assertEqual(trade_fee_usdt(500.0, fee_bps_per_side=4.0), 0.4)
         self.assertEqual(trade_fee_usdt(0.0, fee_bps_per_side=4.0), 0.0)
 

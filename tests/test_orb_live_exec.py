@@ -6,7 +6,8 @@ import unittest
 from dataclasses import replace
 
 from orb.core.config import OrbConfig
-from orb.core.live_exec import build_close_payload, build_open_payload
+from orb.core.fvg import uses_fvg_entry
+from orb.core.live_exec import build_close_payload, build_open_payload, fvg_api_signal_id
 from orb.core.signals import OrbSignal
 
 
@@ -65,6 +66,49 @@ class TestOrbLiveExec(unittest.TestCase):
         p = build_close_payload("COINUSDT", "SHORT", close_price=155.0, tag="loss", signal_id=99)
         self.assertAlmostEqual(p["close_price"], 155.0)
         self.assertEqual(p["api_signal_id"], "orb:close:COINUSDT:99:loss")
+
+    def test_fvg_open_payload_uses_limit_and_stable_api_id(self):
+        cfg = replace(OrbConfig(), live_enabled=True, entry_fill="fvg_prox")
+        sig = OrbSignal(
+            symbol="TSLAUSDT",
+            price=200.0,
+            side="LONG",
+            play="ORB_BREAKOUT_LONG",
+            confidence="high",
+            reasons=[],
+            or_high=201.0,
+            or_low=195.0,
+            sl_price=199.0,
+            tp_price=None,
+            session_date="2026-06-09",
+            entry_bar_open_ms=1_700_000_000_000,
+            r_unit=0.5,
+            paper_notional_usdt=140.0,
+        )
+        p = build_open_payload(sig, cfg)
+        self.assertEqual(p["entry_type"], "LIMIT")
+        self.assertEqual(p["api_signal_id"], fvg_api_signal_id(sig))
+        self.assertEqual(p["or_high"], 201.0)
+        self.assertEqual(p["sl_risk_dist"], 0.5)
+
+    def test_fvg_api_id_uses_confirm_bar_after_fill_merge(self):
+        cfg = replace(OrbConfig(), entry_fill="fvg_prox")
+        sig = OrbSignal(
+            symbol="TSLAUSDT",
+            price=198.0,
+            side="LONG",
+            play="ORB_BREAKOUT_LONG",
+            confidence="high",
+            reasons=[],
+            session_date="2026-06-09",
+            entry_bar_open_ms=1_700_000_060_000,
+            fvg_confirm_bar_ms=1_700_000_000_000,
+        )
+        self.assertEqual(
+            fvg_api_signal_id(sig),
+            "orb:fvg:TSLAUSDT:2026-06-09:1700000000000",
+        )
+        self.assertTrue(uses_fvg_entry(cfg))
 
 
 if __name__ == "__main__":

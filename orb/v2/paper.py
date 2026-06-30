@@ -30,6 +30,7 @@ from orb.core.macro_calendar import is_macro_skip_day, macro_calendar_status
 from orb.core.paper import (
     _idle_scan_skip_reason,
     _live_open,
+    _load_1m_df,
     _load_daily_df,
     _load_signal_df,
     _scan_params,
@@ -40,10 +41,30 @@ from orb.core.paper import (
     is_actionable,
     resolve_open_positions,
 )
+from orb.core.fvg import find_fvg_limit_entry, synthesize_fvg_fill_from_protocol, uses_fvg_entry
+from orb.core.session import session_anchor_ms, session_close_ms
 from orb.v2.config import OrbV2Config
-from orb.core.live_exec import live_enabled, live_ingest_succeeded, live_open_is_pending, sync_live_pending_entries
-from orb.core.protocol_client import LIVE_PENDING_NOTE
-from orb.v2.db import mark_breakout_seen, migrate_orb_v2_tables, rollback_breakout_opened
+from orb.core.live_exec import (
+    cancel_fvg_live_limit,
+    fvg_api_signal_id,
+    live_enabled,
+    live_ingest_succeeded,
+    live_open_is_pending,
+    notify_open,
+    protocol_fvg_entry_price,
+    protocol_fvg_open_done,
+    protocol_fvg_open_status,
+    sync_live_pending_entries,
+)
+from orb.core.protocol_client import LIVE_PENDING_NOTE, live_pending_note
+from orb.v2.db import (
+    delete_fvg_watch,
+    list_fvg_watches,
+    mark_breakout_seen,
+    migrate_orb_v2_tables,
+    rollback_breakout_opened,
+    upsert_fvg_watch,
+)
 from orb.v2.gate_state import load_gate_day_state, persist_gate_day_state, v2_session_traded
 from orb.v2.robots import (
     bound_robot_id_for_open,
@@ -136,6 +157,7 @@ def _scan_params_v2(
             "robot_bound": robot_bound,
             "robot_count": robot_count if use_robots else None,
             "robot_equity_usdt": robot_equity if use_robots else None,
+            "entry_fill": cfg.entry_fill,
         }
     )
     return base
@@ -217,6 +239,195 @@ def _apply_robot_notional(sig: OrbSignal, *, entry: float, sl: float, cfg: OrbCo
         compute_position_notional(entry=entry, sl=sl, cfg=cfg, bot_equity_usdt=bot_equity),
         4,
     )
+
+
+def _orb_signal_to_json(sig: OrbSignal) -> str:
+    from dataclasses import asdict
+
+    return json.dumps(asdict(sig), default=str)
+
+
+def _orb_signal_from_json(raw: str) -> OrbSignal:
+    d = json.loads(raw or "{}")
+    return OrbSignal(
+        symbol=str(d.get("symbol") or ""),
+        price=float(d.get("price") or 0),
+        side=str(d.get("side") or "FLAT"),
+        play=str(d.get("play") or ""),
+        confidence=str(d.get("confidence") or "low"),
+        reasons=list(d.get("reasons") or []),
+        or_high=float(d.get("or_high") or 0),
+        or_low=float(d.get("or_low") or 0),
+        or_mid=float(d.get("or_mid") or 0),
+        or_width_pct=float(d.get("or_width_pct") or 0),
+        session_date=str(d.get("session_date") or ""),
+        entry_bar_open_ms=int(d["entry_bar_open_ms"]) if d.get("entry_bar_open_ms") else None,
+        fvg_confirm_bar_ms=int(d["fvg_confirm_bar_ms"]) if d.get("fvg_confirm_bar_ms") else None,
+        sl_price=float(d["sl_price"]) if d.get("sl_price") is not None else None,
+        tp_price=float(d["tp_price"]) if d.get("tp_price") is not None else None,
+        r_unit=float(d["r_unit"]) if d.get("r_unit") is not None else None,
+        paper_notional_usdt=float(d["paper_notional_usdt"])
+        if d.get("paper_notional_usdt") is not None
+        else None,
+        volume=float(d.get("volume") or 0),
+        vol_ma=float(d.get("vol_ma") or 0),
+    )
+
+
+def _merge_fvg_fill(sig: OrbSignal, fill_sig: OrbSignal) -> None:
+    confirm = sig.entry_bar_open_ms
+    sig.fvg_confirm_bar_ms = getattr(fill_sig, "fvg_confirm_bar_ms", None) or confirm
+    sig.price = float(fill_sig.price)
+    sig.sl_price = fill_sig.sl_price
+    sig.tp_price = fill_sig.tp_price
+    sig.entry_bar_open_ms = fill_sig.entry_bar_open_ms
+    if fill_sig.r_unit is not None:
+        sig.r_unit = fill_sig.r_unit
+
+
+def _pending_note_for_open(sig: OrbSignal, cfg: OrbConfig) -> str:
+    if uses_fvg_entry(cfg):
+        return live_pending_note(fvg_api_signal_id(sig))
+    return LIVE_PENDING_NOTE
+
+
+def _preview_fvg_live_notional(
+    sig: OrbSignal,
+    conn,
+    cfg: OrbConfig,
+    *,
+    use_robots: bool,
+    robot_count: int,
+    robot_init: float,
+    bot_equity: float,
+) -> None:
+    if use_robots:
+        rid = next_free_robot_id(conn.cursor(), count=robot_count, initial_equity_usdt=robot_init)
+        if rid is not None:
+            rw = robot_wallet_balance(conn, rid, initial_equity_usdt=robot_init, sync=False)
+            _apply_robot_notional(
+                sig,
+                entry=float(sig.price),
+                sl=float(sig.sl_price or sig.price),
+                cfg=cfg,
+                bot_equity=rw,
+            )
+            return
+    bot_wallet = symbol_bot_wallet_balance(conn, sig.symbol, initial_equity_usdt=bot_equity, sync=False)
+    _apply_robot_notional(
+        sig,
+        entry=float(sig.price),
+        sl=float(sig.sl_price or sig.price),
+        cfg=cfg,
+        bot_equity=bot_wallet,
+    )
+
+
+def _submit_fvg_live_limit(
+    sig: OrbSignal,
+    cfg: OrbConfig,
+    *,
+    sym: str,
+    stats: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not cfg.live_enabled or not live_enabled(cfg):
+        return None
+    if protocol_fvg_open_done(sig, cfg):
+        return {"skipped": True, "reason": "protocol_already_open", "details": [{"action": "duplicate"}]}
+    result = notify_open(sig, cfg)
+    stats["live"].append({"action": "fvg_limit", "symbol": sym, "result": result})
+    return result
+
+
+def _live_open_after_fvg(sig: OrbSignal, cfg: OrbConfig) -> Optional[Dict[str, Any]]:
+    if uses_fvg_entry(cfg) and protocol_fvg_open_done(sig, cfg):
+        return {"skipped": True, "reason": "protocol_already_open", "details": [{"action": "traded"}]}
+    return _live_open(sig, cfg)
+
+
+def _daily_atr_for_scan(
+    sym: str,
+    cfg: OrbConfig,
+    now_ms: int,
+    daily_cache: Dict[str, Any],
+) -> Optional[float]:
+    if (cfg.sl_mode or "").strip().lower() != "atr_pct":
+        return None
+    if sym not in daily_cache:
+        daily_cache[sym] = _load_daily_df(sym, cfg, now_ms=now_ms)
+    ddf = daily_cache.get(sym)
+    if ddf is None or getattr(ddf, "empty", True):
+        return None
+    from orb.core.indicators import daily_atr_asof
+
+    return daily_atr_asof(ddf, int(now_ms), period=cfg.atr_period, tz=cfg.session_tz)
+
+
+def _fvg_session_close_ms(cfg: OrbConfig, scan_ms: int) -> int:
+    anchor = session_anchor_ms(
+        int(scan_ms), tz=cfg.session_tz, session_open_time=cfg.session_open_time
+    )
+    close_ms = session_close_ms(anchor, tz=cfg.session_tz, session_close_time=cfg.session_close_time)
+    if close_ms is None:
+        close_ms = anchor + 6 * 60 * 60 * 1000
+    return int(close_ms)
+
+
+def _ensure_sig_session(sig: OrbSignal, session_day: str) -> None:
+    if not (sig.session_date or "").strip():
+        sig.session_date = session_day
+
+
+def _fvg_zone_from_sig_json(raw: str) -> Optional[int]:
+    try:
+        d = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return None
+    zms = d.get("fvg_zone_form_ms")
+    return int(zms) if zms is not None else None
+
+
+def _fvg_watch_sig_json(sig: OrbSignal, *, zone_form_ms: Optional[int] = None) -> str:
+    from dataclasses import asdict
+
+    payload = asdict(sig)
+    if zone_form_ms is not None:
+        payload["fvg_zone_form_ms"] = int(zone_form_ms)
+    return json.dumps(payload, default=str)
+
+
+def _resolve_fvg_entry(
+    sig: OrbSignal,
+    *,
+    sym: str,
+    cfg: OrbConfig,
+    now_ms: int,
+    confirm_scan_ms: int,
+    df5_cache: Dict[str, Any],
+    df1_cache: Dict[str, Any],
+    daily_cache: Optional[Dict[str, Any]] = None,
+    df5_fvg_cache: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[OrbSignal], str, Optional[Any]]:
+    fvg5 = df5_fvg_cache if df5_fvg_cache is not None else df5_cache
+    if sym not in df1_cache:
+        df1_cache[sym] = _load_1m_df(sym, cfg, now_ms=now_ms)
+    if sym not in fvg5:
+        fvg5[sym] = _load_signal_df(sym, cfg, now_ms=now_ms)
+    daily_atr = None
+    if daily_cache is not None:
+        daily_atr = _daily_atr_for_scan(sym, cfg, now_ms, daily_cache)
+    fill_sig, reason, zone = find_fvg_limit_entry(
+        sig,
+        df1_cache[sym],
+        fvg5[sym],
+        scan_ms=int(confirm_scan_ms),
+        close_ms=_fvg_session_close_ms(cfg, confirm_scan_ms),
+        bar=cfg.bar_step_ms(),
+        cfg=cfg,
+        asof_ms=now_ms,
+        daily_atr=daily_atr,
+    )
+    return fill_sig, reason, zone
 
 
 def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config] = None) -> Dict[str, Any]:
@@ -371,6 +582,242 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     gate_state = load_gate_day_state(cur, session_day, v2)
     daily_cache: Dict[str, Any] = {}
     df5_cache: Dict[str, Any] = {}
+    df5_fvg_cache: Dict[str, Any] = {}
+    df1_cache: Dict[str, Any] = {}
+    fvg_watched: set[str] = set()
+    if uses_fvg_entry(c):
+        stats["entry_fill"] = c.entry_fill
+        fvg_watched = {str(w["symbol"]).strip().upper() for w in list_fvg_watches(cur, session_day)}
+        stats["fvg_watches"] = len(fvg_watched)
+        for watch in list_fvg_watches(cur, session_day):
+            wsym = str(watch["symbol"]).strip().upper()
+            if v2_session_traded(cur, wsym, session_day, v2):
+                delete_fvg_watch(cur, session_day, wsym)
+                fvg_watched.discard(wsym)
+                continue
+            if fetch_open_hold(cur, wsym, default_notional=c.default_paper_notional()) is not None:
+                delete_fvg_watch(cur, session_day, wsym)
+                fvg_watched.discard(wsym)
+                continue
+            wsig = _orb_signal_from_json(str(watch.get("sig_json") or "{}"))
+            wsig.symbol = wsym
+            _ensure_sig_session(wsig, session_day)
+            fill_sig, fvg_reason, zone = _resolve_fvg_entry(
+                wsig,
+                sym=wsym,
+                cfg=c,
+                now_ms=now_ms,
+                confirm_scan_ms=int(watch.get("confirm_scan_ms") or now_ms),
+                df5_cache=df5_cache,
+                df5_fvg_cache=df5_fvg_cache,
+                df1_cache=df1_cache,
+                daily_cache=daily_cache,
+            )
+            if fvg_reason != "ok" and protocol_fvg_open_status(wsig, c) == "traded":
+                daily_atr = _daily_atr_for_scan(wsym, c, now_ms, daily_cache)
+                proto_px = protocol_fvg_entry_price(wsig, c)
+                synth = synthesize_fvg_fill_from_protocol(
+                    wsig,
+                    c,
+                    now_ms=now_ms,
+                    quote=fill_sig,
+                    daily_atr=daily_atr,
+                    protocol_entry_px=proto_px,
+                )
+                if synth is not None:
+                    fill_sig = synth
+                    fvg_reason = "ok"
+            if fvg_reason == "fvg_pending":
+                if str(watch.get("reason") or "") == "fvg_limit_pending":
+                    cancel_fvg_live_limit(wsig, c, reason="fvg_or_reclaim")
+                continue
+            if fvg_reason == "fvg_limit_pending":
+                quote = fill_sig
+                stored_zone_ms = _fvg_zone_from_sig_json(str(watch.get("sig_json") or "{}"))
+                zone_form_ms = int(zone.form_bar_open_ms) if zone is not None else None
+                if (
+                    quote is not None
+                    and stored_zone_ms is not None
+                    and zone_form_ms is not None
+                    and zone_form_ms != stored_zone_ms
+                ):
+                    cancel_fvg_live_limit(wsig, c, reason="fvg_zone_advance")
+                if quote is not None:
+                    _ensure_sig_session(quote, session_day)
+                    quote.symbol = wsym
+                    _preview_fvg_live_notional(
+                        quote,
+                        conn,
+                        c,
+                        use_robots=use_robots,
+                        robot_count=robot_count,
+                        robot_init=robot_init,
+                        bot_equity=bot_equity,
+                    )
+                    _submit_fvg_live_limit(quote, c, sym=wsym, stats=stats)
+                upsert_fvg_watch(
+                    cur,
+                    session_date=session_day,
+                    symbol=wsym,
+                    now_utc=now_utc,
+                    confirm_scan_ms=int(watch.get("confirm_scan_ms") or now_ms),
+                    sig_json=_fvg_watch_sig_json(wsig, zone_form_ms=zone_form_ms),
+                    p_true=float(watch.get("p_true") or 0),
+                    sync_n=int(watch.get("sync_n") or 0),
+                    breakout_score=watch.get("breakout_score"),
+                    reason="fvg_limit_pending",
+                )
+                continue
+            delete_fvg_watch(cur, session_day, wsym)
+            fvg_watched.discard(wsym)
+            if fill_sig is None:
+                mark_breakout_seen(
+                    cur,
+                    session_date=session_day,
+                    symbol=wsym,
+                    now_utc=now_utc,
+                    scan_open_ms=now_ms,
+                    p_true=float(watch.get("p_true") or 0),
+                    opened=False,
+                    reason=fvg_reason,
+                )
+                stats["skipped"].append({"symbol": wsym, "reason": fvg_reason, "source": "fvg_watch"})
+                continue
+            _merge_fvg_fill(wsig, fill_sig)
+            if use_robots and not robot_bound and len(busy_robot_ids(cur)) >= gate.max_opens_per_day:
+                upsert_fvg_watch(
+                    cur,
+                    session_date=session_day,
+                    symbol=wsym,
+                    now_utc=now_utc,
+                    confirm_scan_ms=int(watch.get("confirm_scan_ms") or now_ms),
+                    sig_json=_orb_signal_to_json(wsig),
+                    p_true=float(watch.get("p_true") or 0),
+                    sync_n=int(watch.get("sync_n") or 0),
+                    breakout_score=watch.get("breakout_score"),
+                    reason="fvg_fill_no_slot",
+                )
+                fvg_watched.add(wsym)
+                continue
+            gate_state.opens += 1
+            try:
+                assigned_robot: Optional[int] = None
+                wdecision = {
+                    "p_true": watch.get("p_true"),
+                    "breakout_score": watch.get("breakout_score"),
+                }
+                if use_robots:
+                    if robot_bound:
+                        assigned_robot = bound_robot_id_for_open(
+                            cur, wsym, syms, initial_equity_usdt=robot_init
+                        )
+                    else:
+                        assigned_robot = next_free_robot_id(
+                            cur, count=robot_count, initial_equity_usdt=robot_init
+                        )
+                    if assigned_robot is None:
+                        gate_state.opens = max(0, gate_state.opens - 1)
+                        upsert_fvg_watch(
+                            cur,
+                            session_date=session_day,
+                            symbol=wsym,
+                            now_utc=now_utc,
+                            confirm_scan_ms=int(watch.get("confirm_scan_ms") or now_ms),
+                            sig_json=_orb_signal_to_json(wsig),
+                            p_true=float(watch.get("p_true") or 0),
+                            sync_n=int(watch.get("sync_n") or 0),
+                            breakout_score=watch.get("breakout_score"),
+                            reason="fvg_fill_no_robot",
+                        )
+                        fvg_watched.add(wsym)
+                        continue
+                    rw = robot_wallet_balance(
+                        conn, assigned_robot, initial_equity_usdt=robot_init, sync=False
+                    )
+                    _apply_robot_notional(
+                        wsig,
+                        entry=float(wsig.price),
+                        sl=float(wsig.sl_price),
+                        cfg=c,
+                        bot_equity=rw,
+                    )
+                else:
+                    bot_wallet = symbol_bot_wallet_balance(
+                        conn, wsym, initial_equity_usdt=bot_equity, sync=False
+                    )
+                    _apply_robot_notional(
+                        wsig,
+                        entry=float(wsig.price),
+                        sl=float(wsig.sl_price),
+                        cfg=c,
+                        bot_equity=bot_wallet,
+                    )
+                mark_breakout_seen(
+                    cur,
+                    session_date=session_day,
+                    symbol=wsym,
+                    now_utc=now_utc,
+                    scan_open_ms=now_ms,
+                    p_true=float(watch.get("p_true") or 0),
+                    opened=True,
+                    reason="fvg_fill_ok",
+                )
+                _upsert_signal(
+                    cur,
+                    ts=now_utc,
+                    sig=wsig,
+                    scan_params=scan_params,
+                    cfg=c,
+                    robot_id=assigned_robot,
+                )
+                stats["written"] += 1
+                open_row = {
+                    "symbol": wsym,
+                    "side": wsig.side,
+                    "entry": wsig.price,
+                    "sl": wsig.sl_price,
+                    "tp": wsig.tp_price,
+                    "p_true": wdecision.get("p_true"),
+                    "breakout_score": wdecision.get("breakout_score"),
+                    "notional_usdt": wsig.paper_notional_usdt,
+                    "entry_mode": "fvg_prox",
+                }
+                if assigned_robot is not None:
+                    open_row["robot_id"] = assigned_robot
+                stats["opens"].append(open_row)
+                logger.info(
+                    "[orb_v2] fvg watch fill open %s %s entry=%.4f robot=%s",
+                    wsym,
+                    wsig.side,
+                    float(wsig.price),
+                    assigned_robot,
+                )
+                live_open = _live_open_after_fvg(wsig, c)
+                if live_open is not None:
+                    stats["live"].append({"action": "open", "symbol": wsym, "result": live_open})
+                if c.live_enabled and not live_ingest_succeeded(live_open):
+                    _rollback_failed_live_open(
+                        cur,
+                        session_day=session_day,
+                        sym=wsym,
+                        gate_state=gate_state,
+                        stats=stats,
+                        live_open=live_open,
+                    )
+                elif c.live_enabled and live_open_is_pending(live_open):
+                    cur.execute(
+                        """
+                        UPDATE orb_signals SET notes=?
+                        WHERE symbol=? AND outcome IS NULL AND side IN ('LONG', 'SHORT')
+                        """,
+                        (_pending_note_for_open(wsig, c), wsym),
+                    )
+            except Exception as exc:
+                gate_state.opens = max(0, gate_state.opens - 1)
+                stats["skipped"].append(
+                    {"symbol": wsym, "reason": "fvg_watch_open_error", "error": str(exc)}
+                )
+                logger.warning("[orb_v2] fvg watch open %s failed: %s", wsym, exc)
     if (c.sl_mode or "").strip().lower() == "atr_pct":
         for sym in syms:
             if c.one_trade_per_session and v2_session_traded(cur, sym, session_day, v2):
@@ -453,6 +900,8 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             session_day,
         )
     for p_true, sym, sig, sync_n, feat in scored:
+        if sym in fvg_watched:
+            continue
         if use_robots and not robot_bound:
             if len(busy_robot_ids(cur)) >= gate.max_opens_per_day:
                 break
@@ -555,6 +1004,138 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             continue
 
         try:
+            if gate_pass and not v2.shadow and uses_fvg_entry(c):
+                _ensure_sig_session(sig, session_day)
+                sig.symbol = sym
+                fill_sig, fvg_reason, zone = _resolve_fvg_entry(
+                    sig,
+                    sym=sym,
+                    cfg=c,
+                    now_ms=now_ms,
+                    confirm_scan_ms=now_ms,
+                    df5_cache=df5_cache,
+                    df5_fvg_cache=df5_fvg_cache,
+                    df1_cache=df1_cache,
+                    daily_cache=daily_cache,
+                )
+                if fvg_reason == "fvg_pending":
+                    rollback_open_decision(gate_state, symbol=sym)
+                    upsert_fvg_watch(
+                        cur,
+                        session_date=session_day,
+                        symbol=sym,
+                        now_utc=now_utc,
+                        confirm_scan_ms=now_ms,
+                        sig_json=_orb_signal_to_json(sig),
+                        p_true=float(decision.get("p_true") or 0),
+                        sync_n=sync_n,
+                        breakout_score=decision.get("breakout_score"),
+                        reason="fvg_pending",
+                    )
+                    fvg_watched.add(sym)
+                    mark_breakout_seen(
+                        cur,
+                        session_date=session_day,
+                        symbol=sym,
+                        now_utc=now_utc,
+                        scan_open_ms=now_ms,
+                        p_true=float(decision.get("p_true") or 0),
+                        opened=False,
+                        reason="fvg_pending",
+                    )
+                    stats["gate_skips"].append(
+                        {
+                            "symbol": sym,
+                            "p_true": decision.get("p_true"),
+                            "breakout_score": decision.get("breakout_score"),
+                            "reason": "fvg_pending",
+                            "sync": sync_n,
+                        }
+                    )
+                    gate_skips += 1
+                    logger.info("[orb_v2] fvg pending %s %s — waiting for zone", sym, sig.side)
+                    continue
+                if fvg_reason == "fvg_limit_pending" and fill_sig is not None:
+                    rollback_open_decision(gate_state, symbol=sym)
+                    quote = fill_sig
+                    _ensure_sig_session(quote, session_day)
+                    quote.symbol = sym
+                    zone_form_ms = int(zone.form_bar_open_ms) if zone is not None else None
+                    _preview_fvg_live_notional(
+                        quote,
+                        conn,
+                        c,
+                        use_robots=use_robots,
+                        robot_count=robot_count,
+                        robot_init=robot_init,
+                        bot_equity=bot_equity,
+                    )
+                    _submit_fvg_live_limit(quote, c, sym=sym, stats=stats)
+                    upsert_fvg_watch(
+                        cur,
+                        session_date=session_day,
+                        symbol=sym,
+                        now_utc=now_utc,
+                        confirm_scan_ms=now_ms,
+                        sig_json=_fvg_watch_sig_json(sig, zone_form_ms=zone_form_ms),
+                        p_true=float(decision.get("p_true") or 0),
+                        sync_n=sync_n,
+                        breakout_score=decision.get("breakout_score"),
+                        reason="fvg_limit_pending",
+                    )
+                    fvg_watched.add(sym)
+                    mark_breakout_seen(
+                        cur,
+                        session_date=session_day,
+                        symbol=sym,
+                        now_utc=now_utc,
+                        scan_open_ms=now_ms,
+                        p_true=float(decision.get("p_true") or 0),
+                        opened=False,
+                        reason="fvg_limit_pending",
+                    )
+                    stats["gate_skips"].append(
+                        {
+                            "symbol": sym,
+                            "p_true": decision.get("p_true"),
+                            "breakout_score": decision.get("breakout_score"),
+                            "reason": "fvg_limit_pending",
+                            "sync": sync_n,
+                            "limit_px": quote.price,
+                        }
+                    )
+                    gate_skips += 1
+                    logger.info(
+                        "[orb_v2] fvg limit pending %s %s @ %.4f — protocol LIMIT",
+                        sym,
+                        sig.side,
+                        float(quote.price),
+                    )
+                    continue
+                if fill_sig is None:
+                    rollback_open_decision(gate_state, symbol=sym)
+                    mark_breakout_seen(
+                        cur,
+                        session_date=session_day,
+                        symbol=sym,
+                        now_utc=now_utc,
+                        scan_open_ms=now_ms,
+                        p_true=float(decision.get("p_true") or 0),
+                        opened=False,
+                        reason=fvg_reason,
+                    )
+                    stats["skipped"].append({"symbol": sym, "reason": fvg_reason})
+                    continue
+                signal_entry_px = float(sig.price)
+                _merge_fvg_fill(sig, fill_sig)
+                logger.info(
+                    "[orb_v2] fvg fill %s %s entry=%.4f (signal=%.4f)",
+                    sym,
+                    sig.side,
+                    float(sig.price),
+                    signal_entry_px,
+                )
+
             open_persisted = False
             open_marked = False
             hold = fetch_open_hold(cur, sym, default_notional=c.default_paper_notional())
@@ -709,6 +1290,8 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
             }
             if assigned_robot is not None:
                 open_row["robot_id"] = assigned_robot
+            if uses_fvg_entry(c):
+                open_row["entry_mode"] = "fvg_prox"
             stats["opens"].append(open_row)
             logger.info(
                 "[orb_v2] gate open %s %s p=%.3f bs=%s sync=%d robot=%s",
@@ -719,7 +1302,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                 sync_n,
                 assigned_robot,
             )
-            live_open = _live_open(sig, c)
+            live_open = _live_open_after_fvg(sig, c)
             if live_open is not None:
                 stats["live"].append({"action": "open", "symbol": sym, "result": live_open})
             if c.live_enabled and not live_ingest_succeeded(live_open):
@@ -738,7 +1321,7 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
                     UPDATE orb_signals SET notes=?
                     WHERE symbol=? AND outcome IS NULL AND side IN ('LONG', 'SHORT')
                     """,
-                    (LIVE_PENDING_NOTE, sym),
+                    (_pending_note_for_open(sig, c), sym),
                 )
                 logger.info("[orb_v2] live pending entry %s — paper resolve deferred", sym)
         except Exception as exc:
@@ -779,7 +1362,6 @@ def run_scan_conn_v2(conn, *, do_resolve: bool = True, cfg: Optional[OrbV2Config
     conn.commit()
     resolve_post = resolve_open_positions(conn, cfg=c, now_ms=now_ms) if do_resolve else {}
     stats["live"].extend(resolve_post.get("live") or [])
-    stats["robot_resets"] = resolve_post.get("robot_resets") or []
     if use_robots and robot_wallets is not None:
         stats["robot_wallets"] = {
             f"R{i + 1}": round(

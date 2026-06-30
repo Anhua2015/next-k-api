@@ -24,10 +24,9 @@ from orb.core.db import (
     migrate_orb_tables,
     symbol_bot_enabled,
     symbol_bot_wallet_balance,
-    symbol_session_traded,
 )
 from orb.core.session import extended_fetch_anchor_ms
-from orb.core.resolve import pnl_r, pnl_usdt, resolve_forward
+from orb.core.resolve import entry_resolve_step_ms, pnl_r, pnl_usdt, resolve_forward
 from orb.core.session import (
     is_trading_session,
     session_day_floor_ms,
@@ -106,6 +105,17 @@ def _load_signal_df(symbol: str, cfg: OrbConfig, *, now_ms: Optional[int] = None
     end_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     day0 = extended_fetch_anchor_ms(end_ms, cfg)
     rows = fetch_klines_forward(symbol, cfg.signal_interval, day0, end_ms)
+    df = klines_to_df(rows)
+    if df.empty:
+        return df
+    df = df.drop_duplicates(subset=["open_time"], keep="last").sort_values("open_time").reset_index(drop=True)
+    return _drop_forming_bar(df, cfg, now_ms=end_ms)
+
+
+def _load_1m_df(symbol: str, cfg: OrbConfig, *, now_ms: Optional[int] = None) -> pd.DataFrame:
+    end_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+    day0 = extended_fetch_anchor_ms(end_ms, cfg)
+    rows = fetch_klines_forward(symbol, "1m", day0, end_ms)
     df = klines_to_df(rows)
     if df.empty:
         return df
@@ -350,23 +360,13 @@ def _wallet_sync_after_settle(
     cfg: OrbConfig,
     signal_id: Optional[int] = None,
     session_date: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+) -> None:
     if robot_id is not None:
-        from orb.v2.robots import (
-            maybe_reset_robot_wallet_after_settle,
-            robot_equity_from_env,
-            sync_robot_wallet,
-        )
+        from orb.v2.robots import robot_equity_from_env, sync_robot_wallet
 
         sync_robot_wallet(conn, int(robot_id), initial_equity_usdt=robot_equity_from_env())
-        return maybe_reset_robot_wallet_after_settle(
-            conn,
-            int(robot_id),
-            trigger_signal_id=signal_id,
-            session_date=session_date,
-        )
-    _sync_symbol_bot_wallet(conn, symbol, cfg)
-    return None
+    else:
+        _sync_symbol_bot_wallet(conn, symbol, cfg)
 
 
 def resolve_open_positions(
@@ -377,7 +377,7 @@ def resolve_open_positions(
 ) -> Dict[str, Any]:
     c = cfg or OrbConfig.from_env()
     now_utc = _utc_now()
-    stats = {"checked": 0, "resolved": 0, "skipped": 0, "live": [], "robot_resets": []}
+    stats = {"checked": 0, "resolved": 0, "skipped": 0, "live": []}
     conn.row_factory = __import__("sqlite3").Row
     migrate_orb_tables(conn.cursor())
     cur = conn.cursor()
@@ -389,8 +389,8 @@ def resolve_open_positions(
         if bar_open is None:
             stats["skipped"] += 1
             continue
-        signal_step = c.bar_step_ms()
-        resolve_start = int(bar_open) + signal_step
+        resolve_step = entry_resolve_step_ms(c, int(bar_open))
+        resolve_start = int(bar_open) + resolve_step
         kl = fetch_klines_forward(sym, "1m", resolve_start, end_ms)
         if not kl:
             stats["skipped"] += 1
@@ -404,15 +404,28 @@ def resolve_open_positions(
             sl=float(sl),
             tp=float(tp) if tp is not None else None,
             hist_end_ms=end_ms,
-            bar_step_ms=signal_step,
+            bar_step_ms=resolve_step,
             cfg=c,
         )
         if out is None:
             stats["skipped"] += 1
             logger.debug("[orb] resolve skip %s id=%s note=%s", sym, sid, note)
             continue
+        from orb.core.fees import fee_entry_mode_from_fill, trade_fee_usdt
+
         pr = pnl_r(side, float(entry), ex_px, float(sl))
-        pu = pnl_usdt(side, float(entry), ex_px, float(notion))
+        pu_gross = pnl_usdt(side, float(entry), ex_px, float(notion))
+        entry_mode = fee_entry_mode_from_fill(c.entry_fill)
+        fee = trade_fee_usdt(
+            float(notion),
+            entry_mode=entry_mode,
+            maker_bps=c.fee_maker_bps,
+            taker_bps=c.fee_taker_bps,
+        )
+        pu = round(float(pu_gross) - float(fee), 4)
+        settle_note = note
+        if fee > 0:
+            settle_note = f"{note}|fee={fee:.4f}"
         cur.execute("SELECT session_date, robot_id FROM orb_signals WHERE id=?", (int(sid),))
         sr = cur.fetchone()
         sess_date = str(sr[0]) if sr and sr[0] else None
@@ -422,7 +435,7 @@ def resolve_open_positions(
             UPDATE orb_signals SET outcome=?, outcome_at_utc=?, exit_price=?,
                 pnl_r=?, pnl_usdt=?, exit_rule=?, notes=? WHERE id=? AND outcome IS NULL
             """,
-            (out, now_utc, ex_px, round(pr, 6), round(pu, 4), note, note, int(sid)),
+            (out, now_utc, ex_px, round(pr, 6), round(pu, 4), note, settle_note, int(sid)),
         )
         if cur.rowcount:
             archive_settlement(
@@ -442,7 +455,7 @@ def resolve_open_positions(
                 session_date=sess_date,
                 robot_id=sig_robot_id,
             )
-            reset_evt = _wallet_sync_after_settle(
+            _wallet_sync_after_settle(
                 conn,
                 symbol=str(sym),
                 robot_id=sig_robot_id,
@@ -450,8 +463,6 @@ def resolve_open_positions(
                 signal_id=int(sid),
                 session_date=sess_date,
             )
-            if reset_evt:
-                stats["robot_resets"].append(reset_evt)
             stats["resolved"] += 1
             live_close = _live_close(
                 c,
