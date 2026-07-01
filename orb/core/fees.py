@@ -14,6 +14,7 @@ MAKER_ENTRY_MODES = frozenset(
         "stoplimit_gap",
         "stoplimit_honest",
         "stoplimit_gap_honest",
+        "ob_prox",
     }
 )
 

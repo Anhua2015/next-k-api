@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from orb.ml.paths import PROJECT_ROOT
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # K 线：data/orb/kline/<SYMBOL>/5m.csv ...
 KLINE_ROOT = Path(os.getenv("ORB_KLINE_CACHE_ROOT", "") or (PROJECT_ROOT / "data" / "orb" / "kline"))

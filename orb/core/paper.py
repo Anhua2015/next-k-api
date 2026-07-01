@@ -361,12 +361,7 @@ def _wallet_sync_after_settle(
     signal_id: Optional[int] = None,
     session_date: Optional[str] = None,
 ) -> None:
-    if robot_id is not None:
-        from orb.v2.robots import robot_equity_from_env, sync_robot_wallet
-
-        sync_robot_wallet(conn, int(robot_id), initial_equity_usdt=robot_equity_from_env())
-    else:
-        _sync_symbol_bot_wallet(conn, symbol, cfg)
+    _sync_symbol_bot_wallet(conn, symbol, cfg)
 
 
 def resolve_open_positions(

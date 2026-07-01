@@ -98,6 +98,31 @@ def cancel_pending_entries(
     return resp.json()
 
 
+def update_protective_sl(
+    *,
+    symbol: str,
+    side: str,
+    sl_price: float,
+    source: str = SOURCE_ORB,
+    timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+) -> Dict[str, Any]:
+    url = f"{protocol_api_url()}/api/binance/maintenance/update-protective-sl"
+    resp = requests.post(
+        url,
+        json={
+            "source": source,
+            "symbol": symbol,
+            "side": str(side).upper(),
+            "sl_price": float(sl_price),
+        },
+        timeout=timeout_sec,
+    )
+    if resp.status_code >= 400:
+        body = resp.text[:500]
+        raise RuntimeError(f"protocol update-sl HTTP {resp.status_code}: {body}")
+    return resp.json()
+
+
 def lookup_signal(
     *,
     source: str,

@@ -1,4 +1,4 @@
-"""Next K API — OI 雷达、收筹看盘、ORB 策略 API。"""
+"""Next K API — OI 雷达、收筹看盘、King Keltner 策略 API。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from routers import accumulation as accumulation_router
 from routers import core as core_router
 from routers import maintenance as maintenance_router
 from routers import s2 as s2_router
-from routers import orb as orb_router
+from routers import kk as kk_router
 import worker_tasks as wt
 
 logging.basicConfig(
@@ -57,31 +57,20 @@ async def lifespan(app: FastAPI):
         logger.warning("DB init on startup skipped: %s", e)
 
     try:
-        from orb.ml.paths import production_env_warnings
+        from orb.kk.vnpy.supervisor import kk_vnpy_supervisor
 
-        for msg in production_env_warnings():
-            logger.warning("ORB production env: %s", msg)
+        kk_vnpy_supervisor.start()
     except Exception as e:
-        logger.warning("ORB production env check skipped: %s", e)
-
-    try:
-        from orb.ml.live_bundle import ensure_live_bundle_on_startup, log_live_bundle_startup
-
-        copied = ensure_live_bundle_on_startup()
-        if copied:
-            logger.info("ORB live bundle bootstrapped on startup: %s", copied)
-        log_live_bundle_startup()
-    except Exception as e:
-        logger.warning("ORB live bundle startup check skipped: %s", e)
-
-    try:
-        from orb.ml.model.paths import log_symbols_startup
-
-        log_symbols_startup()
-    except Exception as e:
-        logger.warning("ORB symbols startup check skipped: %s", e)
+        logger.warning("KK vnpy supervisor startup skipped: %s", e)
 
     yield
+
+    try:
+        from orb.kk.vnpy.supervisor import kk_vnpy_supervisor
+
+        kk_vnpy_supervisor.stop()
+    except Exception as e:
+        logger.warning("KK vnpy supervisor shutdown skipped: %s", e)
 
     sch = getattr(app.state, "accumulation_scheduler", None)
     if sch is not None:
@@ -103,7 +92,7 @@ def _start_embedded_scheduler(app: FastAPI) -> None:
 
 app = FastAPI(
     title="Next K",
-    description="OI radar, accumulation watchlists, ORB strategy API.",
+    description="OI radar, accumulation watchlists, King Keltner strategy API.",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -119,7 +108,7 @@ app.add_middleware(
 app.include_router(core_router.router)
 app.include_router(maintenance_router.router)
 app.include_router(accumulation_router.router)
-app.include_router(orb_router.router)
+app.include_router(kk_router.router)
 app.include_router(s2_router.router)
 
 

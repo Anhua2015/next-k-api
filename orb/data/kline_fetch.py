@@ -22,7 +22,7 @@ from orb.core.kline_cache import (
     write_meta,
 )
 from orb.core.session import extended_fetch_anchor_ms
-from orb.ml.samples import parse_symbol_list
+from orb.core.symbols import parse_symbol_list
 
 
 class KlineFetchError(RuntimeError):

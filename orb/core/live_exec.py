@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional
 
 from orb.core.config import OrbConfig
 from orb.core.kline_cache import norm_symbol
-from orb.core.fvg import uses_fvg_entry
 from orb.core.protocol_client import (
     LIVE_PENDING_NOTE,
     SOURCE_ORB,
@@ -23,6 +22,10 @@ from orb.core.protocol_client import (
 from orb.core.signals import OrbSignal
 
 logger = logging.getLogger(__name__)
+
+
+def uses_fvg_entry(cfg: OrbConfig) -> bool:
+    return False
 
 
 def live_enabled(cfg: OrbConfig) -> bool:

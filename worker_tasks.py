@@ -15,15 +15,13 @@ logger = logging.getLogger(__name__)
 _API_DIR = Path(__file__).resolve().parent
 _RADAR_SCRIPT = _API_DIR / "accumulation_radar.py"
 _S2_FUNDING_SCRIPT = _API_DIR / "s2_oi_funding_rate_scanner.py"
-_ORB_SCRIPT = _API_DIR / "orb_scanner.py"
+_KK_SCRIPT = _API_DIR / "kk_scanner.py"
 
 _subprocess_locks: Dict[str, threading.Lock] = {
     "accumulation_pool": threading.Lock(),
     "accumulation_oi": threading.Lock(),
     "s2_funding": threading.Lock(),
-    "orb_scan": threading.Lock(),
-    "orb_v2_monthly_train": threading.Lock(),
-    "orb_ml_kline_refresh": threading.Lock(),
+    "kk_scan": threading.Lock(),
 }
 _heat_watch_refresh_lock = threading.Lock()
 
@@ -112,83 +110,41 @@ def run_s2_oi_funding_task() -> None:
     run_s2_oi_funding_subprocess()
 
 
-def _orb_scan_enabled() -> bool:
-    from orb.v2.config import OrbV2Config
-    from scheduler_config import ORB_V2_SCHEDULER_ENABLED
+def _kk_scan_enabled() -> bool:
+    from orb.kk.config import KKConfig
+    from scheduler_config import KK_SCHEDULER_ENABLED
 
-    if not ORB_V2_SCHEDULER_ENABLED:
+    if not KK_SCHEDULER_ENABLED:
         return False
-    return OrbV2Config.from_env().enabled
+    cfg = KKConfig.from_env()
+    if cfg.vnpy_enabled or cfg.is_vnpy_engine():
+        return False
+    return cfg.enabled and cfg.scheduler_enabled
 
 
-def run_orb_scan_subprocess() -> None:
-    logger.info("Starting orb_scanner subprocess")
+def run_kk_scan_subprocess() -> None:
+    logger.info("Starting kk_scanner subprocess")
     _run_subprocess_locked(
-        "orb_scan",
-        [sys.executable, str(_ORB_SCRIPT)],
-        cwd=_ORB_SCRIPT.parent,
+        "kk_scan",
+        [sys.executable, str(_KK_SCRIPT)],
+        cwd=_KK_SCRIPT.parent,
     )
 
 
-def run_orb_scan_task() -> None:
-    if not _orb_scan_enabled():
-        from scheduler_config import ORB_V2_SCHEDULER_ENABLED
+def run_kk_scan_task() -> None:
+    if not _kk_scan_enabled():
+        from orb.kk.config import KKConfig
+        from scheduler_config import KK_SCHEDULER_ENABLED
 
-        if not ORB_V2_SCHEDULER_ENABLED:
-            logger.info("ORB_V2_SCHEDULER_ENABLED=0，跳过 ORB 纸面扫描")
+        cfg = KKConfig.from_env()
+        if not KK_SCHEDULER_ENABLED:
+            logger.info("KK_SCHEDULER_ENABLED=0，跳过 King Keltner 纸面扫描")
+        elif cfg.is_vnpy_engine():
+            logger.info("KK_ENGINE=vnpy，跳过纸面 kk_scanner（由 vnpy supervisor 负责）")
         else:
-            logger.info("ORB_V2_ENABLED=0，跳过 ORB 纸面扫描")
+            logger.info("KK_ENABLED=0，跳过 King Keltner 纸面扫描")
         return
-    run_orb_scan_subprocess()
-
-
-def run_orb_v2_scan_task() -> None:
-    """兼容旧 maintenance cron 名 orb_v2_scan。"""
-    run_orb_scan_task()
-
-
-def _orb_v2_monthly_train_enabled() -> bool:
-    from scheduler_config import ORB_V2_MONTHLY_TRAIN_ENABLED
-
-    return bool(ORB_V2_MONTHLY_TRAIN_ENABLED)
-
-
-def run_orb_v2_monthly_train_subprocess() -> None:
-    logger.info("Starting orb_v2_monthly_train subprocess")
-    _run_subprocess_locked(
-        "orb_v2_monthly_train",
-        [sys.executable, str(_API_DIR / "tools" / "orb" / "v2" / "monthly_train.py")],
-        cwd=_API_DIR,
-    )
-
-
-def run_orb_v2_monthly_train_task() -> None:
-    if not _orb_v2_monthly_train_enabled():
-        logger.info("ORB_V2_MONTHLY_TRAIN_ENABLED=0，跳过 ORB 月度训练")
-        return
-    run_orb_v2_monthly_train_subprocess()
-
-
-def _orb_ml_kline_refresh_enabled() -> bool:
-    from scheduler_config import ORB_ML_KLINE_REFRESH_ENABLED
-
-    return bool(ORB_ML_KLINE_REFRESH_ENABLED)
-
-
-def run_orb_ml_kline_refresh_subprocess() -> None:
-    logger.info("Starting orb_ml_kline_refresh subprocess")
-    _run_subprocess_locked(
-        "orb_ml_kline_refresh",
-        [sys.executable, str(_API_DIR / "tools" / "orb" / "v2" / "refresh_klines.py")],
-        cwd=_API_DIR,
-    )
-
-
-def run_orb_ml_kline_refresh_task() -> None:
-    if not _orb_ml_kline_refresh_enabled():
-        logger.info("ORB_ML_KLINE_REFRESH_ENABLED=0，跳过 ORB K 线刷新")
-        return
-    run_orb_ml_kline_refresh_subprocess()
+    run_kk_scan_subprocess()
 
 
 def heat_watch_refresh_lock() -> threading.Lock:

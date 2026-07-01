@@ -124,3 +124,27 @@ def write_meta(symbol: str, *, days: float, intervals: list[str]) -> None:
         },
     }
     meta_path(sym).write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def session_dates_from_cache(symbol: str, cfg) -> list[str]:
+    """K 线缓存中的 session_date（NYSE 交易日过滤）。"""
+    from orb.core.config import OrbConfig
+    from orb.core.session import session_day_str
+    from orb.core.us_equity_calendar import is_us_equity_market, is_us_equity_trading_day
+
+    if not isinstance(cfg, OrbConfig):
+        cfg = OrbConfig.from_env()
+    sym = norm_symbol(symbol)
+    df = load_klines(sym, cfg.signal_interval)
+    if df.empty:
+        return []
+    tz = cfg.session_tz
+    open_time = cfg.session_open_time
+    dates = {
+        session_day_str(int(t), tz=tz, session_open_time=open_time)
+        for t in df["open_time"].astype("int64")
+    }
+    out = sorted(d for d in dates if d)
+    if is_us_equity_market(cfg.market):
+        out = [d for d in out if is_us_equity_trading_day(d)]
+    return out

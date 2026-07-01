@@ -31,10 +31,7 @@ _CRON_TASK_FUNCS: Dict[str, Any] = {
     "heat_bpc": wt.run_heat_watch_refresh_task,
     "oi": wt.run_oi_task,
     "s2_funding": wt.run_s2_oi_funding_task,
-    "orb_scan": wt.run_orb_scan_task,
-    "orb_v2_scan": wt.run_orb_v2_scan_task,
-    "orb_v2_monthly_train": wt.run_orb_v2_monthly_train_task,
-    "orb_ml_kline_refresh": wt.run_orb_ml_kline_refresh_task,
+    "kk_scan": wt.run_kk_scan_task,
 }
 
 

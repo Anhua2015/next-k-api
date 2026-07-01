@@ -16,4 +16,5 @@ aiohttp>=3.9.0
 
 # Utils
 tqdm>=4.65.0
-scikit-learn>=1.3.0
+# King Keltner vnpy lane（Railway 构建会再装 requirements-vnpy.txt）
+-r requirements-vnpy.txt
