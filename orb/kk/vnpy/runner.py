@@ -169,8 +169,20 @@ class KkVnpyEngine:
             if wallet_conn is not None:
                 wallet_conn.close()
 
-        self._cta_engine.init_all_strategies()
-        time.sleep(max(5.0, float(init_wait_sec)))
+        futures = self._cta_engine.init_all_strategies()
+        init_timeout = max(120.0, float(init_wait_sec) * max(1, len(symbols)))
+        deadline = time.time() + init_timeout
+        for name, fut in futures.items():
+            remaining = max(1.0, deadline - time.time())
+            try:
+                fut.result(timeout=remaining)
+            except Exception as exc:
+                logger.warning("[kk-vnpy] strategy init %s failed: %s", name, exc)
+        not_ready = [
+            n for n, s in self._cta_engine.strategies.items() if not getattr(s, "inited", False)
+        ]
+        if not_ready:
+            logger.error("[kk-vnpy] strategies not inited before start: %s", not_ready)
         self._cta_engine.start_all_strategies()
 
         out["strategies"] = list(self._started)
