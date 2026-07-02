@@ -1,4 +1,4 @@
-"""VeighNa Gateway → Next-k-protocol（KK vnpy 实盘链路）。"""
+"""[已废弃] 旧 Protocol 跳板 Gateway；KK 实盘已改用官方 vnpy_binance BinanceLinearGateway。"""
 
 from __future__ import annotations
 
@@ -42,12 +42,35 @@ from vnpy.trader.object import (
 from binance_fapi import fetch_klines_forward, fetch_mark_price, klines_to_df
 from orb.core.kline_cache import norm_symbol
 from orb.core.protocol_client import ingest_signals, lookup_signal, protocol_api_url
-from orb.kk.vnpy.sizing import fixed_size_for_symbol, order_volume_to_notional, round_order_volume
+from orb.kk.vnpy.sizing import fixed_size_for_symbol, round_order_volume
 from orb.kk.wallet_sync import estimate_close_pnl, record_vnpy_fill, sum_symbol_wallets
 
 logger = logging.getLogger(__name__)
 
 GATEWAY_NAME = "PROTOCOL"
+
+
+def tick_from_mark(symbol: str, mark_price: float, *, gateway_name: str = GATEWAY_NAME) -> TickData:
+    """合成 TickData：五档买卖价齐全，满足 vnpy CTA stop 触发定价契约。"""
+    px = float(mark_price)
+    sym = norm_symbol(symbol)
+    return TickData(
+        symbol=sym,
+        exchange=Exchange.GLOBAL,
+        datetime=datetime.now(timezone.utc),
+        last_price=px,
+        bid_price_1=px,
+        bid_price_2=px,
+        bid_price_3=px,
+        bid_price_4=px,
+        bid_price_5=px,
+        ask_price_1=px,
+        ask_price_2=px,
+        ask_price_3=px,
+        ask_price_4=px,
+        ask_price_5=px,
+        gateway_name=gateway_name,
+    )
 
 
 class ProtocolGateway(BaseGateway):
@@ -391,12 +414,12 @@ class ProtocolGateway(BaseGateway):
                     return
                 side = "LONG" if req.direction == Direction.LONG else "SHORT"
                 entry_px = float(req.price or 0.0)
-                eq = self._symbol_equity(sym)
-                notional = float(req.volume) * max(1e-9, entry_px)
-                if notional <= 0:
-                    notional = order_volume_to_notional(
-                        self.kk, entry_px, equity_usdt=eq, orb_cfg=self.orb_cfg
-                    )
+                notional = float(req.volume) * entry_px
+                if entry_px <= 0 or notional <= 0:
+                    order.status = Status.REJECTED
+                    self.on_order(order)
+                    self.write_log(f"无效委托价格 {sym} price={req.price}")
+                    return
                 sl_px = bootstrap_sl_price(side=side, entry=entry_px)
                 payload = build_open_payload(
                     symbol=sym,
@@ -441,8 +464,6 @@ class ProtocolGateway(BaseGateway):
                 return
 
             px = float(fill.get("entry_price") or fill.get("close_price") or req.price or 0.0)
-            if px <= 0:
-                px = float(req.price or 0.0)
             order.status = Status.ALLTRADED
             order.traded = float(req.volume)
             self.on_order(order)
@@ -485,8 +506,8 @@ class ProtocolGateway(BaseGateway):
                 pos_side = str(lot.get("side") or ("LONG" if req.direction == Direction.SHORT else "SHORT"))
                 entry_px = float(lot.get("entry") or px)
                 notion = float(lot.get("notional_usdt") or 0.0)
-                if notion <= 0:
-                    notion = float(req.volume) * max(1e-9, px)
+                if notion <= 0 and px > 0:
+                    notion = float(req.volume) * px
                 outcome = "eod" if self._is_eod_close() else "close"
                 gross, fee, net = estimate_close_pnl(
                     side=pos_side,
@@ -552,15 +573,7 @@ class ProtocolGateway(BaseGateway):
                     px = fetch_mark_price(sym)
                     if not px or px <= 0:
                         continue
-                    tick = TickData(
-                        symbol=sym,
-                        exchange=Exchange.GLOBAL,
-                        datetime=datetime.now(timezone.utc),
-                        last_price=float(px),
-                        ask_price_1=float(px),
-                        bid_price_1=float(px),
-                        gateway_name=self.gateway_name,
-                    )
+                    tick = tick_from_mark(sym, float(px), gateway_name=self.gateway_name)
                     self.on_tick(tick)
                 self._tick_stop.wait(self._tick_interval)
 

@@ -70,11 +70,15 @@ class TestKKLiveExec(unittest.TestCase):
         )
         self.assertEqual(payload["close_price"], 248.0)
 
-    def test_live_enabled_requires_protocol_url(self):
+    def test_live_enabled_requires_binance_keys(self):
         kk = KKConfig(live_enabled=True)
         with patch.dict("os.environ", {}, clear=True):
             self.assertFalse(live_enabled(kk))
-        with patch.dict("os.environ", {"PROTOCOL_API_URL": "http://127.0.0.1:8001"}, clear=False):
+        with patch.dict(
+            "os.environ",
+            {"BINANCE_API_KEY": "k", "BINANCE_API_SECRET": "s"},
+            clear=False,
+        ):
             self.assertTrue(live_enabled(kk))
 
     def test_leverage_defaults_to_5(self):

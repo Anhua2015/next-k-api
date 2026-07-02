@@ -1,4 +1,4 @@
-"""King Keltner 纸面成交 → Next-k-protocol 实盘（与 ORB 隔离）。"""
+"""King Keltner 实盘辅助（官方 vnpy_binance 直连币安）。"""
 
 from __future__ import annotations
 
@@ -23,15 +23,18 @@ SOURCE_KK = "kk"
 PLAY_KK = "KK"
 
 
-def _protocol_required() -> bool:
-    return bool((os.getenv("PROTOCOL_API_URL") or "").strip())
+def _binance_configured() -> bool:
+    return bool(
+        (os.getenv("BINANCE_API_KEY") or "").strip()
+        and (os.getenv("BINANCE_API_SECRET") or "").strip()
+    )
 
 
 def live_enabled(kk: KKConfig) -> bool:
     if not kk.live_enabled:
         return False
-    if not _protocol_required():
-        logger.warning("[kk] KK_LIVE_ENABLED=1 but PROTOCOL_API_URL unset")
+    if not _binance_configured():
+        logger.warning("[kk] KK_LIVE_ENABLED=1 but BINANCE_API_KEY/SECRET unset")
         return False
     return True
 

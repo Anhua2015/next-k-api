@@ -32,7 +32,6 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
 
     def __init__(self, cta_engine, strategy_name, vt_symbol, setting):
         super().__init__(cta_engine, strategy_name, vt_symbol, setting)
-        self._kk_last_sl: float = 0.0
 
     @classmethod
     def from_kk_config(cls, kk: KKConfig) -> dict:
@@ -74,26 +73,6 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
             return float(self.intra_trade_low) * (1 + float(self.trailing_percent) / 100.0)
         return None
 
-    def _sync_protocol_sl(self) -> None:
-        from orb.kk.live_exec import live_enabled, live_ingest_succeeded, notify_trailing_sl
-
-        kk = KKConfig.from_env()
-        if not live_enabled(kk) or kk.shadow:
-            return
-        sl = self._trailing_sl_price()
-        if sl is None or sl <= 0:
-            return
-        if self._kk_last_sl > 0 and abs(sl - self._kk_last_sl) < 1e-6:
-            return
-        sym = str(self.vt_symbol).split(".", 1)[0]
-        side = "LONG" if self.pos > 0 else "SHORT"
-        try:
-            result = notify_trailing_sl(symbol=sym, side=side, sl_price=sl)
-            if live_ingest_succeeded(result):
-                self._kk_last_sl = sl
-        except Exception as exc:
-            self.write_log(f"trailing sl sync failed: {exc}")
-
     def on_bar(self, bar: BarData) -> None:
         if self._is_eod_bar(bar) and self.pos != 0:
             self.cancel_all()
@@ -116,18 +95,16 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
                 self.cancel_all()
             return
         super().on_5min_bar(bar)
-        if self.pos != 0:
-            self._sync_protocol_sl()
 
     def _refresh_compound_size(self) -> None:
         kk = KKConfig.from_env()
         if not kk.compound:
             return
-        from orb.core.kline_cache import norm_symbol
         from binance_fapi import fetch_mark_price
         from orb.kk.vnpy.sizing import fixed_size_for_symbol
+        from orb.kk.vnpy.binance_gateway import kk_symbol_from_vt
 
-        sym = norm_symbol(str(self.vt_symbol).split(".", 1)[0])
+        sym = kk_symbol_from_vt(self.vt_symbol)
         px = fetch_mark_price(sym) or 100.0
         eq = float(kk.equity_usdt or 14.0)
         if kk.compound:
@@ -155,8 +132,5 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
 
     def on_trade(self, trade) -> None:
         super().on_trade(trade)
-        self._kk_last_sl = 0.0
         if self.pos == 0:
             self._refresh_compound_size()
-        elif self.pos != 0:
-            self._sync_protocol_sl()

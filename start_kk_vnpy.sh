@@ -49,23 +49,13 @@ should_start_kk_vnpy() {
     return 0
 }
 
-wait_for_protocol() {
-    local url="${PROTOCOL_API_URL:-}"
-    [[ -n "$url" ]] || { warn "PROTOCOL_API_URL 未设置，跳过 protocol 健康等待"; return 0; }
-    url="${url%/}"
-    local health="${url}/api/binance/health"
-    local max="${KK_PROTOCOL_WAIT_SEC:-90}"
-    info "等待 protocol 就绪: $health (最多 ${max}s)"
-    local i=0
-    while [[ $i -lt $max ]]; do
-        if curl -sf "$health" >/dev/null 2>&1; then
-            info "protocol 已就绪"
-            return 0
-        fi
-        sleep 2
-        i=$((i + 2))
-    done
-    warn "protocol 未在 ${max}s 内响应；kk_vnpy 仍将启动（请确认跳板已运行）"
+check_binance_keys() {
+    local live="${KK_LIVE_ENABLED:-0}"
+    live=$(echo "$live" | tr '[:upper:]' '[:lower:]')
+    [[ "$live" =~ ^(1|true|yes|on)$ ]] || return 0
+    if [[ -z "${BINANCE_API_KEY:-}" || -z "${BINANCE_API_SECRET:-}" ]]; then
+        warn "KK_LIVE_ENABLED=1 但 BINANCE_API_KEY/SECRET 未设置"
+    fi
 }
 
 if is_running "$PID_FILE"; then
@@ -111,7 +101,7 @@ if [[ "${START_KK_SKIP_DEPS:-0}" != "1" ]]; then
 fi
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
-wait_for_protocol
+check_binance_keys
 
 info "启动 kk_vnpy_runner（KK_ENGINE=$KK_ENGINE）..."
 nohup "$PYTHON_VENV" "$SCRIPT_DIR/kk_vnpy_runner.py" >> "$LOG_FILE" 2>&1 &

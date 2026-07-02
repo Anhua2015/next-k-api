@@ -10,29 +10,29 @@ from orb.kk.vnpy.runner import KkVnpyEngine
 
 
 class TestKkVnpyRunner(unittest.TestCase):
-    def test_bootstrap_fails_when_protocol_required_and_not_ready(self):
+    def test_bootstrap_fails_when_live_without_binance_keys(self):
         saved = {
             k: os.environ.get(k)
             for k in (
-                "PROTOCOL_API_URL",
+                "BINANCE_API_KEY",
+                "BINANCE_API_SECRET",
                 "KK_ENABLED",
                 "KK_ENGINE",
-                "KK_PROTOCOL_REQUIRED",
                 "KK_LIVE_ENABLED",
+                "KK_SYMBOLS",
             )
         }
         try:
-            os.environ["PROTOCOL_API_URL"] = "http://127.0.0.1:8001"
+            os.environ.pop("BINANCE_API_KEY", None)
+            os.environ.pop("BINANCE_API_SECRET", None)
             os.environ["KK_ENABLED"] = "1"
             os.environ["KK_ENGINE"] = "vnpy"
-            os.environ["KK_PROTOCOL_REQUIRED"] = "1"
             os.environ["KK_LIVE_ENABLED"] = "1"
+            os.environ["KK_SYMBOLS"] = "COINUSDT"
             engine = KkVnpyEngine()
-            with mock.patch("orb.kk.vnpy.runner._wait_protocol", return_value=False):
-                with mock.patch.object(engine, "_cta_engine", create=True):
-                    out = engine.bootstrap(init_wait_sec=0.1)
+            out = engine.bootstrap(init_wait_sec=0.1)
             self.assertFalse(out.get("ok"))
-            self.assertEqual(out.get("reason"), "protocol_not_ready")
+            self.assertEqual(out.get("reason"), "binance_credentials_missing")
         finally:
             for k, v in saved.items():
                 if v is None:
@@ -40,38 +40,14 @@ class TestKkVnpyRunner(unittest.TestCase):
                 else:
                     os.environ[k] = v
 
-    def test_bootstrap_skips_protocol_wait_when_not_live(self):
+    def test_bootstrap_allows_missing_binance_when_not_live(self):
         saved = {
             k: os.environ.get(k)
-            for k in ("PROTOCOL_API_URL", "KK_ENABLED", "KK_LIVE_ENABLED", "KK_PROTOCOL_REQUIRED")
+            for k in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "KK_ENABLED", "KK_LIVE_ENABLED")
         }
         try:
-            os.environ.pop("PROTOCOL_API_URL", None)
-            os.environ["KK_ENABLED"] = "1"
-            os.environ["KK_LIVE_ENABLED"] = "0"
-            os.environ["KK_PROTOCOL_REQUIRED"] = "1"
-            engine = KkVnpyEngine()
-            with mock.patch("orb.kk.vnpy.runner._wait_protocol") as mock_wait:
-                with mock.patch("orb.kk.vnpy.runner.EventEngine", side_effect=RuntimeError("stop")):
-                    try:
-                        engine.bootstrap(init_wait_sec=0.1)
-                    except RuntimeError:
-                        pass
-            mock_wait.assert_not_called()
-        finally:
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
-
-    def test_bootstrap_allows_missing_protocol_when_not_live(self):
-        saved = {
-            k: os.environ.get(k)
-            for k in ("PROTOCOL_API_URL", "KK_ENABLED", "KK_LIVE_ENABLED")
-        }
-        try:
-            os.environ.pop("PROTOCOL_API_URL", None)
+            os.environ.pop("BINANCE_API_KEY", None)
+            os.environ.pop("BINANCE_API_SECRET", None)
             os.environ["KK_ENABLED"] = "1"
             os.environ["KK_LIVE_ENABLED"] = "0"
             engine = KkVnpyEngine()
@@ -80,7 +56,7 @@ class TestKkVnpyRunner(unittest.TestCase):
                     out = engine.bootstrap(init_wait_sec=0.1)
                 except RuntimeError:
                     out = {"reason": None}
-            self.assertNotEqual(out.get("reason"), "protocol_api_url_missing")
+            self.assertNotEqual(out.get("reason"), "binance_credentials_missing")
         finally:
             for k, v in saved.items():
                 if v is None:

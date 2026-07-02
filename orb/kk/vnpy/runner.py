@@ -1,4 +1,4 @@
-"""KK vnpy 引擎：供 kk_vnpy_runner 与 Railway API 进程内嵌启动。"""
+"""KK vnpy 引擎：官方 BinanceLinearGateway + KingKeltnerStrategy。"""
 
 from __future__ import annotations
 
@@ -22,9 +22,13 @@ from binance_fapi import fetch_mark_price
 from orb.core.kline_cache import norm_symbol
 from orb.core.macro_calendar import is_macro_skip_day
 from orb.core.paper import _session_date_now
-from orb.core.protocol_client import protocol_api_url
-from orb.kk.live_exec import live_enabled
-from orb.kk.vnpy.protocol_gateway import GATEWAY_NAME, ProtocolGateway
+from orb.kk.vnpy.binance_gateway import (
+    GATEWAY_NAME,
+    KkBinanceLinearGateway,
+    binance_connect_setting,
+    binance_credentials_configured,
+    kk_vt_symbol,
+)
 from orb.kk.vnpy.sizing import fixed_size_for_symbol
 from orb.kk.vnpy.strategies.king_keltner_kk import KingKeltnerKkStrategy
 
@@ -36,22 +40,17 @@ def _configure_logging() -> None:
     SETTINGS["log.console"] = True
 
 
-def _wait_protocol(*, timeout_sec: float) -> bool:
-    import requests
-
-    url = (protocol_api_url() or "").strip().rstrip("/")
-    if not url:
-        return False
-    health = f"{url}/api/binance/health"
-    deadline = time.time() + max(5.0, float(timeout_sec))
+def _wait_contracts(gateway: KkBinanceLinearGateway, symbols: List[str], *, timeout_sec: float) -> bool:
+    names = {norm_symbol(s) for s in symbols}
+    deadline = time.time() + max(10.0, float(timeout_sec))
     while time.time() < deadline:
-        try:
-            if requests.get(health, timeout=5).status_code < 400:
-                return True
-        except Exception:
-            pass
-        time.sleep(2.0)
-    return False
+        if names.issubset(set(gateway.name_contract_map.keys())):
+            return True
+        time.sleep(0.5)
+    missing = sorted(names - set(gateway.name_contract_map.keys()))
+    if missing:
+        logger.error("[kk-vnpy] 合约未就绪: %s", missing)
+    return not missing
 
 
 class KkVnpyEngine:
@@ -68,6 +67,7 @@ class KkVnpyEngine:
         out: Dict[str, Any] = {
             "ok": False,
             "engine": "vnpy",
+            "gateway": GATEWAY_NAME,
             "lane": kk.lane,
             "symbols": [],
             "strategies": [],
@@ -79,8 +79,8 @@ class KkVnpyEngine:
         if not kk.vnpy_enabled:
             out.update({"ok": True, "skipped": True, "reason": "kk_vnpy_disabled"})
             return out
-        if live_enabled(kk) and not protocol_api_url().strip():
-            out.update({"ok": False, "reason": "protocol_api_url_missing"})
+        if kk.live_enabled and not binance_credentials_configured():
+            out.update({"ok": False, "reason": "binance_credentials_missing"})
             return out
 
         symbols = kk.symbol_list()
@@ -94,40 +94,30 @@ class KkVnpyEngine:
             out.update({"ok": True, "skipped": True, "reason": "macro_skip"})
             return out
 
-        wait_sec = float(
-            __import__("os").getenv("KK_PROTOCOL_WAIT_SEC") or 90
-        )
-        protocol_required = (
-            __import__("os").getenv("KK_PROTOCOL_REQUIRED", "1").strip().lower()
-            in ("1", "true", "yes", "on")
-        )
-        if live_enabled(kk) and not _wait_protocol(timeout_sec=wait_sec):
-            msg = "[kk-vnpy] protocol 未就绪"
-            if protocol_required:
-                logger.error("%s，启动中止", msg)
-                out.update({"ok": False, "reason": "protocol_not_ready"})
-                return out
-            logger.warning("%s，仍尝试启动引擎", msg)
-
         _configure_logging()
         self._event_engine = EventEngine()
         self._main_engine = MainEngine(self._event_engine)
-        self._main_engine.add_gateway(ProtocolGateway, GATEWAY_NAME)
+        self._main_engine.add_gateway(KkBinanceLinearGateway, GATEWAY_NAME)
         self._cta_engine = self._main_engine.add_app(CtaStrategyApp)
         self._cta_engine.classes["KingKeltnerKkStrategy"] = KingKeltnerKkStrategy
         self._event_engine.register(EVENT_CTA_LOG, lambda e: logger.info("[cta] %s", e.data))
 
         gateway = self._main_engine.get_gateway(GATEWAY_NAME)
         if gateway:
-            gateway._cta_engine = self._cta_engine
-            gateway.connect(
-                {
-                    "协议地址": protocol_api_url(),
-                    "轮询间隔秒": kk.vnpy_poll_sec,
-                    "行情间隔秒": kk.vnpy_tick_sec,
-                }
-            )
-        time.sleep(1.0)
+            gateway.connect(binance_connect_setting())
+
+        contract_wait = max(60.0, float(init_wait_sec) * max(1, len(symbols)))
+        if gateway and not _wait_contracts(gateway, symbols, timeout_sec=contract_wait):
+            out.update({"ok": False, "reason": "binance_contracts_not_ready"})
+            return out
+
+        if kk.live_enabled and binance_credentials_configured():
+            try:
+                from orb.kk.vnpy.binance_account import ensure_pool_leverage
+
+                ensure_pool_leverage(symbols, kk)
+            except Exception as exc:
+                logger.warning("[kk-vnpy] leverage setup failed: %s", exc)
 
         self._cta_engine.init_engine()
         kk_settings = KingKeltnerKkStrategy.from_kk_config(kk)
@@ -161,7 +151,7 @@ class KkVnpyEngine:
                 self._cta_engine.add_strategy(
                     class_name="KingKeltnerKkStrategy",
                     strategy_name=name,
-                    vt_symbol=f"{sym}.GLOBAL",
+                    vt_symbol=kk_vt_symbol(sym),
                     setting={**kk_settings, "fixed_size": vol},
                 )
                 self._started.append(name)
@@ -187,7 +177,7 @@ class KkVnpyEngine:
 
         out["strategies"] = list(self._started)
         out["ok"] = True
-        logger.info("[kk-vnpy] started %d strategies: %s", len(self._started), self._started)
+        logger.info("[kk-vnpy] started %d strategies via %s: %s", len(self._started), GATEWAY_NAME, self._started)
         return out
 
     def run_until(self, stop_event: Event) -> None:

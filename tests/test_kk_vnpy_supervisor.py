@@ -71,13 +71,13 @@ class TestKkVnpySupervisor(unittest.TestCase):
             sup = KkVnpySupervisor()
             with mock.patch(
                 "orb.kk.vnpy.runner.KkVnpyEngine.bootstrap",
-                return_value={"ok": False, "reason": "protocol_not_ready"},
+                return_value={"ok": False, "reason": "binance_credentials_missing"},
             ):
                 with mock.patch("orb.kk.vnpy.runner.KkVnpyEngine.shutdown"):
                     sup._stop.clear()
                     sup._run()
             self.assertFalse(sup.is_running)
-            self.assertEqual(sup.last_status.get("reason"), "protocol_not_ready")
+            self.assertEqual(sup.last_status.get("reason"), "binance_credentials_missing")
         finally:
             if saved is None:
                 os.environ.pop("KK_VNPY_RESTART_SEC", None)
