@@ -1717,6 +1717,7 @@ def init_db():
             pass
     # Removed Groq trade plan feature: drop legacy table if present.
     c.execute("DROP TABLE IF EXISTS ai_groq_trade_plan")
+    # S2 费率信号已迁至独立 s2.db；此处保留表定义供旧库一次性迁移源。
     c.execute("""CREATE TABLE IF NOT EXISTS s2_funding_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         recorded_at TEXT NOT NULL,

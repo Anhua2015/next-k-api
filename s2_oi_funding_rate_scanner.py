@@ -20,7 +20,7 @@ from typing import Any, Dict, List
 # ============ 配置 ============
 SCRIPT_DIR = Path(__file__).parent
 ENV_FILE = SCRIPT_DIR / ".env.oi"
-SIGNALS_HISTORY_FILE = SCRIPT_DIR / "s2_signals_history.json"  # 迁移后弃用，历史改存 accumulation.db
+SIGNALS_HISTORY_FILE = SCRIPT_DIR / "s2_signals_history.json"  # 迁移后弃用，历史改存 s2.db
 CST = timezone(timedelta(hours=8))
 SIGNAL_HISTORY_DAYS = 2
 
@@ -53,7 +53,23 @@ def _fr_snapshot_file() -> Path:
 
 
 def _accumulation_db_path() -> Path:
-    return Path(os.getenv("DATA_DIR", str(SCRIPT_DIR))) / "accumulation.db"
+    """旧路径：仅用于一次性从 accumulation.db 迁移 S2 历史。"""
+    return _data_dir() / "accumulation.db"
+
+
+def _s2_db_path() -> Path:
+    """S2 独立库，避免与 accumulation.db / KK 抢锁。"""
+    raw = (os.getenv("S2_DB_PATH") or "").strip()
+    if raw:
+        return Path(raw)
+    return _data_dir() / "s2.db"
+
+
+def _s2_busy_timeout_ms() -> int:
+    try:
+        return max(5000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "60000").strip() or "60000"))
+    except Exception:
+        return 60000
 
 
 def _ensure_s2_funding_table(conn: sqlite3.Connection) -> None:
@@ -81,6 +97,59 @@ def _ensure_s2_funding_table(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_s2_recorded_symbol "
         "ON s2_funding_signals(recorded_at, symbol)"
     )
+
+
+def _migrate_s2_from_accumulation_db(conn: sqlite3.Connection) -> None:
+    """一次性：accumulation.db.s2_funding_signals → s2.db（仅当 s2.db 为空）。"""
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM s2_funding_signals")
+    if int(cur.fetchone()[0] or 0) > 0:
+        return
+    acc_path = _accumulation_db_path()
+    if not acc_path.is_file():
+        return
+    try:
+        conn.execute("ATTACH DATABASE ? AS acc_legacy", (str(acc_path.resolve()),))
+        cur.execute(
+            "SELECT name FROM acc_legacy.sqlite_master "
+            "WHERE type='table' AND name='s2_funding_signals'"
+        )
+        if not cur.fetchone():
+            conn.execute("DETACH DATABASE acc_legacy")
+            return
+        conn.execute(
+            """INSERT OR IGNORE INTO main.s2_funding_signals (
+                recorded_at, symbol, coin, price, price_chg_24h, prev_fr, current_fr,
+                oi_change_pct, oi_segment_avgs_json, volume_usd, est_mcap_usd,
+                has_spot, square_posts, square_views
+            )
+            SELECT recorded_at, symbol, coin, price, price_chg_24h, prev_fr, current_fr,
+                   oi_change_pct, oi_segment_avgs_json, volume_usd, est_mcap_usd,
+                   has_spot, square_posts, square_views
+            FROM acc_legacy.s2_funding_signals"""
+        )
+        conn.execute("DETACH DATABASE acc_legacy")
+        conn.commit()
+    except Exception:
+        try:
+            conn.execute("DETACH DATABASE acc_legacy")
+        except Exception:
+            pass
+
+
+def init_s2_db() -> sqlite3.Connection:
+    """打开 s2.db（WAL + busy_timeout），建表并做 legacy 迁移。"""
+    busy_ms = _s2_busy_timeout_ms()
+    db_path = _s2_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), timeout=busy_ms / 1000.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={busy_ms}")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    _ensure_s2_funding_table(conn)
+    _migrate_s2_from_accumulation_db(conn)
+    conn.commit()
+    return conn
 
 
 def _insert_s2_signal(cur: sqlite3.Cursor, row: Dict[str, Any]) -> None:
@@ -184,19 +253,16 @@ def _s2_db_row_to_signal(row: sqlite3.Row) -> Dict[str, Any]:
 def get_s2_funding_signals_for_api(days: int = 2) -> Dict[str, Any]:
     """
     供 FastAPI GET /api/s2/funding-signals。
-    数据存 accumulation.db（s2_funding_signals），保留最近 ``days`` 天（与定时扫描裁剪一致）。
+    数据存独立 s2.db（表 s2_funding_signals），保留最近 ``days`` 天（与定时扫描裁剪一致）。
     """
     import time
-
-    from accumulation_radar import init_db
 
     last_exc: Exception | None = None
     for attempt in range(3):
         conn = None
         try:
-            conn = init_db()
+            conn = init_s2_db()
             conn.row_factory = sqlite3.Row
-            _ensure_s2_funding_table(conn)
             _migrate_s2_json_legacy(conn)
             now_cst = datetime.now(CST)
             _prune_s2_funding_rows(conn, now_cst, days=days)
@@ -255,7 +321,7 @@ SNAPSHOT_MAX_GAP_HOURS = 8
 def load_env():
     env = {}
     if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().strip().split('\n'):
+        for line in ENV_FILE.read_text(encoding="utf-8").strip().split('\n'):
             if '=' in line and not line.startswith('#'):
                 k, v = line.split('=', 1)
                 env[k.strip()] = v.strip()
@@ -589,7 +655,7 @@ def _parse_recorded_at(row):
 
 
 def persist_strong_signals(strong):
-    """写入 accumulation.db：与 Telegram 一致的强信号，供 GET /api/s2/funding-signals 读取。"""
+    """写入 s2.db：与 Telegram 一致的强信号，供 GET /api/s2/funding-signals 读取。"""
     if not strong:
         return
     try:
@@ -619,11 +685,9 @@ def persist_strong_signals(strong):
                 "square_posts": int(sq_posts or 0),
                 "square_views": int(sq_views or 0),
             })
-        db_path = _accumulation_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(db_path))
+        db_path = _s2_db_path()
+        conn = init_s2_db()
         try:
-            _ensure_s2_funding_table(conn)
             _migrate_s2_json_legacy(conn)
             cur = conn.cursor()
             for row in new_rows:

@@ -38,7 +38,7 @@ def _filter_s2_funding_signals_last_days(signals: List[Dict[str, Any]], days: in
 async def get_s2_funding_signals():
     """
     返回近 2 日「费率刚转负 + OI 涨」强信号（与 TG 同源）。
-    持久化：accumulation.db 表 s2_funding_signals（原 JSON 由脚本启动时迁移）。
+    持久化：独立 s2.db 表 s2_funding_signals（原 accumulation.db / JSON 启动时自动迁移）。
     """
     import sqlite3
 
