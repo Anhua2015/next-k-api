@@ -14,13 +14,11 @@ logger = logging.getLogger(__name__)
 
 _API_DIR = Path(__file__).resolve().parent
 _RADAR_SCRIPT = _API_DIR / "accumulation_radar.py"
-_S2_FUNDING_SCRIPT = _API_DIR / "s2_oi_funding_rate_scanner.py"
 _KK_SCRIPT = _API_DIR / "kk_scanner.py"
 
 _subprocess_locks: Dict[str, threading.Lock] = {
     "accumulation_pool": threading.Lock(),
     "accumulation_oi": threading.Lock(),
-    "s2_funding": threading.Lock(),
     "kk_scan": threading.Lock(),
 }
 _heat_watch_refresh_lock = threading.Lock()
@@ -94,20 +92,6 @@ def run_heat_watch_refresh_task() -> None:
         logger.exception("heat watch refresh failed: %s", e)
     finally:
         _heat_watch_refresh_lock.release()
-
-
-def run_s2_oi_funding_subprocess() -> None:
-    logger.info("Starting s2_oi_funding_rate_scanner subprocess")
-    _run_subprocess_locked(
-        "s2_funding",
-        [sys.executable, str(_S2_FUNDING_SCRIPT)],
-        cwd=_S2_FUNDING_SCRIPT.parent,
-    )
-
-
-def run_s2_oi_funding_task() -> None:
-    logger.info("开始执行 s2 OI+费率转负扫描...")
-    run_s2_oi_funding_subprocess()
 
 
 def _kk_scan_enabled() -> bool:

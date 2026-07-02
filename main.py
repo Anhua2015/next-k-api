@@ -21,7 +21,6 @@ from scheduler_config import embed_scheduler_enabled
 from routers import accumulation as accumulation_router
 from routers import core as core_router
 from routers import maintenance as maintenance_router
-from routers import s2 as s2_router
 from routers import kk as kk_router
 import worker_tasks as wt
 
@@ -109,7 +108,6 @@ app.include_router(core_router.router)
 app.include_router(maintenance_router.router)
 app.include_router(accumulation_router.router)
 app.include_router(kk_router.router)
-app.include_router(s2_router.router)
 
 
 if __name__ == "__main__":

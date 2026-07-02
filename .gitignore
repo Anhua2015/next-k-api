@@ -40,7 +40,6 @@ Thumbs.db
 # Local development
 *.log
 .cache/
-s2_signals_history.json
 s6_signals_history.json
 
 # Runtime data files (auto-generated)

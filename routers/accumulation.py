@@ -30,7 +30,6 @@ _CRON_TASK_FUNCS: Dict[str, Any] = {
     "heat_zones": wt.run_heat_watch_refresh_task,
     "heat_bpc": wt.run_heat_watch_refresh_task,
     "oi": wt.run_oi_task,
-    "s2_funding": wt.run_s2_oi_funding_task,
     "kk_scan": wt.run_kk_scan_task,
 }
 
@@ -302,7 +301,6 @@ async def post_trigger_accumulation_cron(
     - heat_watch: 热度看盘整表（现价/摘要 + 1h BPC，定时每小时 xx:07）
     - heat_zones / heat_bpc: 与 heat_watch 相同（兼容旧 task 名）
     - oi: accumulation_radar oi（定时每小时 :30）
-    - s2_funding: s2_oi_funding_rate_scanner（定时每时 :05）
     """
     key = (body.task or "").strip()
     fn = _CRON_TASK_FUNCS.get(key)

@@ -82,7 +82,6 @@ def register_scheduled_jobs(sch: Any, wt: Any) -> None:
         id="heat_watch_refresh",
     )
     sch.add_job(wt.run_oi_task, "cron", minute=30, id="oi_hourly")
-    sch.add_job(wt.run_s2_oi_funding_task, "cron", minute=5, id="s2_oi_funding")
     if KK_SCHEDULER_ENABLED:
         from orb.kk.config import KKConfig
 

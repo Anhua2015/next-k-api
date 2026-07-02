@@ -1717,28 +1717,6 @@ def init_db():
             pass
     # Removed Groq trade plan feature: drop legacy table if present.
     c.execute("DROP TABLE IF EXISTS ai_groq_trade_plan")
-    # S2 费率信号已迁至独立 s2.db；此处保留表定义供旧库一次性迁移源。
-    c.execute("""CREATE TABLE IF NOT EXISTS s2_funding_signals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        recorded_at TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        coin TEXT,
-        price REAL,
-        price_chg_24h REAL,
-        prev_fr REAL,
-        current_fr REAL,
-        oi_change_pct REAL,
-        oi_segment_avgs_json TEXT,
-        volume_usd REAL,
-        est_mcap_usd REAL,
-        has_spot INTEGER DEFAULT 0,
-        square_posts INTEGER DEFAULT 0,
-        square_views INTEGER DEFAULT 0
-    )""")
-    c.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ux_s2_recorded_symbol "
-        "ON s2_funding_signals(recorded_at, symbol)"
-    )
     try:
         from orb.core.db import migrate_orb_tables
 
