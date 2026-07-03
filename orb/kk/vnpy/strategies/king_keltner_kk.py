@@ -22,12 +22,16 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
     kk_eod_flat: bool = True
     kk_exit_hour: int = 15
     kk_exit_minute: int = 55
+    kk_no_entry_after_hour: int = 12
+    kk_no_entry_after_minute: int = 0
 
     parameters = KingKeltnerStrategy.parameters + [
         "kk_rth_only",
         "kk_eod_flat",
         "kk_exit_hour",
         "kk_exit_minute",
+        "kk_no_entry_after_hour",
+        "kk_no_entry_after_minute",
     ]
 
     def __init__(self, cta_engine, strategy_name, vt_symbol, setting):
@@ -40,6 +44,8 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
             "kk_eod_flat": bool(kk.eod_flat),
             "kk_exit_hour": int(kk.exit_hour),
             "kk_exit_minute": int(kk.exit_minute),
+            "kk_no_entry_after_hour": int(kk.no_entry_after_hour),
+            "kk_no_entry_after_minute": int(kk.no_entry_after_minute),
         }
 
     def _session_cfg(self):
@@ -66,6 +72,19 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
             ts.hour == int(self.kk_exit_hour) and ts.minute >= int(self.kk_exit_minute)
         )
 
+    def _past_entry_cutoff(self, bar: BarData) -> bool:
+        """>= kk_no_entry_after_* 后禁止新开仓（含该时刻）。"""
+        h_limit = int(self.kk_no_entry_after_hour)
+        if h_limit < 0:
+            return False
+        ts = self._bar_session_ts(bar)
+        m_limit = int(self.kk_no_entry_after_minute or 0)
+        if ts.hour > h_limit:
+            return True
+        if ts.hour == h_limit and ts.minute >= m_limit:
+            return True
+        return False
+
     def _trailing_sl_price(self) -> Optional[float]:
         if self.pos > 0:
             return float(self.intra_trade_high) * (1 - float(self.trailing_percent) / 100.0)
@@ -83,7 +102,7 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
             return
         if not self._in_rth(bar):
             kk = KKConfig.from_env()
-            if kk.vnpy_idle_outside_rth and self.pos == 0:
+            if kk.vnpy_idle_outside_rth:
                 self.cancel_all()
             return
         super().on_bar(bar)
@@ -91,8 +110,11 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
     def on_5min_bar(self, bar: BarData) -> None:
         if not self._in_rth(bar):
             kk = KKConfig.from_env()
-            if kk.vnpy_idle_outside_rth and self.pos == 0:
+            if kk.vnpy_idle_outside_rth:
                 self.cancel_all()
+            return
+        if self._past_entry_cutoff(bar) and self.pos == 0:
+            self.cancel_all()
             return
         super().on_5min_bar(bar)
 
@@ -133,4 +155,5 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
     def on_trade(self, trade) -> None:
         super().on_trade(trade)
         if self.pos == 0:
+            self.cancel_all()
             self._refresh_compound_size()

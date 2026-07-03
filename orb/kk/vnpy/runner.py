@@ -31,6 +31,8 @@ from orb.kk.vnpy.binance_gateway import (
 )
 from orb.kk.vnpy.sizing import fixed_size_for_symbol
 from orb.kk.vnpy.strategies.king_keltner_kk import KingKeltnerKkStrategy
+from orb.kk.vnpy.cta_rth_patch import apply_cta_engine_patches
+from orb.kk.vnpy.position_sync import sync_cta_positions
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,7 @@ class KkVnpyEngine:
         self._main_engine = MainEngine(self._event_engine)
         self._main_engine.add_gateway(KkBinanceLinearGateway, GATEWAY_NAME)
         self._cta_engine = self._main_engine.add_app(CtaStrategyApp)
+        apply_cta_engine_patches()
         self._cta_engine.classes["KingKeltnerKkStrategy"] = KingKeltnerKkStrategy
         self._event_engine.register(EVENT_CTA_LOG, lambda e: logger.info("[cta] %s", e.data))
 
@@ -174,6 +177,14 @@ class KkVnpyEngine:
         if not_ready:
             logger.error("[kk-vnpy] strategies not inited before start: %s", not_ready)
         self._cta_engine.start_all_strategies()
+
+        if kk.live_enabled and binance_credentials_configured():
+            try:
+                synced = sync_cta_positions(self._cta_engine, symbols)
+                if synced:
+                    logger.info("[kk-vnpy] position sync: %s", synced)
+            except Exception as exc:
+                logger.warning("[kk-vnpy] position sync failed: %s", exc)
 
         out["strategies"] = list(self._started)
         out["ok"] = True

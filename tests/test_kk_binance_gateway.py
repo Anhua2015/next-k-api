@@ -106,6 +106,16 @@ class TestKkBinanceGatewayGuards(unittest.TestCase):
         mock_super.assert_called_once()
 
     @mock.patch("orb.kk.vnpy.binance_gateway.live_enabled", return_value=True)
+    @mock.patch("orb.kk.vnpy.binance_gateway.BinanceLinearGateway.send_order")
+    def test_zero_volume_rejects_order(self, mock_super, _live):
+        gw = self._gateway()
+        req = self._open_req()
+        req.volume = 0.0
+        out = gw.send_order(req)
+        self.assertEqual(out, "")
+        mock_super.assert_not_called()
+
+    @mock.patch("orb.kk.vnpy.binance_gateway.live_enabled", return_value=True)
     @mock.patch("orb.kk.vnpy.binance_gateway.KKConfig.from_env")
     @mock.patch("orb.kk.vnpy.binance_gateway.BinanceLinearGateway.send_order")
     def test_max_open_positions_rejects(self, mock_super, mock_cfg, _live):

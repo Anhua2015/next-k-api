@@ -54,6 +54,36 @@ class TestKingKeltnerKkStrategy(unittest.TestCase):
         self.assertIsNotNone(sl)
         self.assertAlmostEqual(sl, 110.0 * (1 - 0.008), places=4)
 
+    def test_past_entry_cutoff_noon_et(self):
+        strat = self._strategy()
+        strat.kk_no_entry_after_hour = 12
+        strat.kk_no_entry_after_minute = 0
+        bar = _Bar(datetime(2026, 6, 2, 16, 0, tzinfo=timezone.utc))  # 12:00 ET
+        with mock.patch.object(strat, "_session_cfg") as cfg_mock:
+            cfg_mock.return_value.session_tz = "America/New_York"
+            cfg_mock.return_value.session_open_time = "09:30"
+            self.assertTrue(strat._past_entry_cutoff(bar))
+        bar2 = _Bar(datetime(2026, 6, 2, 15, 59, tzinfo=timezone.utc))  # 11:59 ET
+        with mock.patch.object(strat, "_session_cfg") as cfg_mock:
+            cfg_mock.return_value.session_tz = "America/New_York"
+            cfg_mock.return_value.session_open_time = "09:30"
+            self.assertFalse(strat._past_entry_cutoff(bar2))
+
+    def test_on_5min_bar_after_cutoff_skips_entry_when_flat(self):
+        strat = self._strategy()
+        strat.pos = 0
+        strat.kk_no_entry_after_hour = 12
+        bar = _Bar(datetime(2026, 6, 2, 16, 5, tzinfo=timezone.utc))
+        with mock.patch.object(strat, "_in_rth", return_value=True):
+            with mock.patch.object(strat, "_past_entry_cutoff", return_value=True):
+                with mock.patch.object(strat, "cancel_all") as cancel_mock:
+                    with mock.patch(
+                        "orb.kk.vnpy.strategies.king_keltner_kk.KingKeltnerStrategy.on_5min_bar"
+                    ) as super_mock:
+                        strat.on_5min_bar(bar)
+        cancel_mock.assert_called_once()
+        super_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

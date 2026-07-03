@@ -82,6 +82,12 @@ class KkBinanceLinearGateway(BinanceLinearGateway):
         if not live_enabled(kk):
             self.write_log(f"KK_LIVE_ENABLED=0 或未配置币安 Key，拒单 {sym}")
             return ""
+        vol = float(req.volume or 0.0)
+        if vol <= 0:
+            self.write_log(
+                f"拒单 volume<=0 {sym} {req.direction.value} {req.offset.value} price={req.price}"
+            )
+            return ""
         if req.offset == Offset.OPEN:
             max_pos = int(kk.max_open_positions or 0)
             if max_pos > 0 and sym not in self._active_symbols:

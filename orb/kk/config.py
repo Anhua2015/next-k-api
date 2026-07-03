@@ -50,6 +50,8 @@ class KKConfig:
     eod_flat: bool = True
     exit_hour: int = 15
     exit_minute: int = 55
+    no_entry_after_hour: int = 12
+    no_entry_after_minute: int = 0
     fee_maker_bps: float = 2.0
     fee_taker_bps: float = 4.0
     slip_bps_entry: float = 5.0
@@ -97,6 +99,8 @@ class KKConfig:
             eod_flat=_truthy("KK_EOD_FLAT", default=True),
             exit_hour=int(_float_env("KK_EXIT_HOUR", 15)),
             exit_minute=int(_float_env("KK_EXIT_MINUTE", 55)),
+            no_entry_after_hour=int(_float_env("KK_NO_ENTRY_AFTER_HOUR", 12)),
+            no_entry_after_minute=int(_float_env("KK_NO_ENTRY_AFTER_MINUTE", 0)),
             fee_maker_bps=_float_env("KK_FEE_MAKER_BPS", 2.0),
             fee_taker_bps=_float_env("KK_FEE_TAKER_BPS", 4.0),
             slip_bps_entry=_float_env("KK_SLIP_BPS_ENTRY", 5.0),

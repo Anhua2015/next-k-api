@@ -50,6 +50,24 @@ class TestKKConfig(unittest.TestCase):
             else:
                 os.environ["KK_EQUITY_USDT"] = saved
 
+    def test_default_no_entry_after_noon(self):
+        saved = {
+            k: os.environ.pop(k, None)
+            for k in ("KK_NO_ENTRY_AFTER_HOUR", "KK_NO_ENTRY_AFTER_MINUTE")
+        }
+        try:
+            os.environ.pop("KK_NO_ENTRY_AFTER_HOUR", None)
+            os.environ.pop("KK_NO_ENTRY_AFTER_MINUTE", None)
+            kk = KKConfig.from_env()
+            self.assertEqual(kk.no_entry_after_hour, 12)
+            self.assertEqual(kk.no_entry_after_minute, 0)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_env_symbols_override_file(self):
         saved = {k: os.environ.pop(k, None) for k in ("KK_SYMBOLS", "KK_SYMBOLS_FILE")}
         try:

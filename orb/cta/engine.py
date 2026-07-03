@@ -35,6 +35,9 @@ class CtaBacktestConfig:
     entry_risk_sl_pct: float = 0.01
     # False 时由策略在 5m 回调内维护 intra_high/low（King Keltner）
     bar_intra_update: bool = True
+    # >=0 时该时刻（含）起禁止新开仓，仅允许平仓/移动止损；-1 表示不限制
+    no_entry_after_hour: int = -1
+    no_entry_after_minute: int = 0
 
 
 @dataclass
@@ -191,6 +194,10 @@ class CtaContext:
             self.pos.sl = float(px)
 
     def set_entry_stops(self, long_px: float, short_px: float) -> None:
+        ms = self.state.get("_bar_ms")
+        if ms is not None and not entries_allowed(int(ms), self.cfg, self.orb_cfg.session_tz):
+            self.pending = [p for p in self.pending if not p.is_entry]
+            return
         self.pending = []
         if long_px > 0:
             self.pending.append(PendingStop(side=1, px=float(long_px), is_entry=True))
@@ -203,6 +210,20 @@ StrategyFn = Callable[[CtaContext, pd.Series, int], None]
 
 def in_rth(ms: int, orb_cfg: OrbConfig) -> bool:
     return _in_rth(ms, orb_cfg)
+
+
+def entries_allowed(ms: int, cta_cfg: CtaBacktestConfig, tz: str) -> bool:
+    """RTH 内是否允许新开仓（no_entry_after_*  cutoff，含该时刻）。"""
+    h_limit = int(getattr(cta_cfg, "no_entry_after_hour", -1))
+    if h_limit < 0:
+        return True
+    m_limit = int(getattr(cta_cfg, "no_entry_after_minute", 0) or 0)
+    ts = pd.Timestamp(int(ms), unit="ms", tz=tz)
+    if ts.hour > h_limit:
+        return False
+    if ts.hour == h_limit and ts.minute >= m_limit:
+        return False
+    return True
 
 
 def try_bar_fills(ctx: CtaContext, bar: pd.Series, *, cta_cfg: Optional[CtaBacktestConfig] = None) -> None:
@@ -273,6 +294,8 @@ def _try_fills(ctx: CtaContext, bar: pd.Series, cta_cfg: Optional[CtaBacktestCon
         if ctx.pos.side != 0 and p.is_entry:
             continue
         if p.is_entry and ctx.pos.side == 0:
+            if not entries_allowed(ms, cfg, ctx.orb_cfg.session_tz):
+                continue
             if p.side == 1 and h >= p.px:
                 ctx.pending = []
                 sl_px = p.px * (1.0 - entry_sl_pct) if entry_sl_pct > 0 else 0.0
@@ -320,6 +343,7 @@ def run_cta_backtest(
         if cta_cfg.bar_intra_update and ctx.pos.side != 0:
             ctx.intra_high = max(ctx.intra_high, float(row["high"]))
             ctx.intra_low = min(ctx.intra_low, float(row["low"]))
+        ctx.state["_bar_ms"] = ms
         strategy_fn(ctx, row, ms)
         last_day = day
 
