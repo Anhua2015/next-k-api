@@ -30,6 +30,18 @@ def tick_in_kk_rth(tick: Any) -> bool:
     return bool(in_regular_session(kk.orb_session_cfg(), now_ms=ms))
 
 
+def _engine_has_open_positions(engine: Any) -> bool:
+    """任一 KK 策略仍有持仓时需继续收 tick 以完成 EOD 强平。"""
+    for strategy in getattr(engine, "strategies", {}).values():
+        if getattr(strategy, "pos", 0) != 0:
+            return True
+    return False
+
+
+def _allow_tick_outside_rth(engine: Any, kk: KKConfig) -> bool:
+    return bool(kk.eod_flat and kk.enabled and _engine_has_open_positions(engine))
+
+
 def apply_cta_engine_patches() -> None:
     global _PATCHED
     if _PATCHED:
@@ -45,6 +57,8 @@ def apply_cta_engine_patches() -> None:
         tick = event.data
         kk = KKConfig.from_env()
         if kk.rth_only and kk.vnpy_idle_outside_rth and not tick_in_kk_rth(tick):
+            if _allow_tick_outside_rth(self, kk):
+                return _orig_process_tick(self, event)
             return
         return _orig_process_tick(self, event)
 

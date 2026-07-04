@@ -39,14 +39,27 @@ class TestKingKeltnerKkStrategy(unittest.TestCase):
         with mock.patch.object(strat, "_session_cfg") as cfg_mock:
             cfg_mock.return_value.session_tz = "America/New_York"
             cfg_mock.return_value.session_open_time = "09:30"
+            cfg_mock.return_value.session_close_time = "16:00"
+            cfg_mock.return_value.market = "us_equity"
             self.assertTrue(strat._is_eod_bar(bar))
 
-        # 同 UTC 时刻在 15:54 ET 不应触发
+        # 15:54 ET 是 15:55 EOD 前最后一根 1m bar，应触发
         bar2 = _Bar(datetime(2026, 6, 2, 19, 54, tzinfo=timezone.utc))
         with mock.patch.object(strat, "_session_cfg") as cfg_mock:
             cfg_mock.return_value.session_tz = "America/New_York"
             cfg_mock.return_value.session_open_time = "09:30"
-            self.assertFalse(strat._is_eod_bar(bar2))
+            cfg_mock.return_value.session_close_time = "16:00"
+            cfg_mock.return_value.market = "us_equity"
+            self.assertTrue(strat._is_eod_bar(bar2))
+
+        # 15:53 ET 不应触发
+        bar3 = _Bar(datetime(2026, 6, 2, 19, 53, tzinfo=timezone.utc))
+        with mock.patch.object(strat, "_session_cfg") as cfg_mock:
+            cfg_mock.return_value.session_tz = "America/New_York"
+            cfg_mock.return_value.session_open_time = "09:30"
+            cfg_mock.return_value.session_close_time = "16:00"
+            cfg_mock.return_value.market = "us_equity"
+            self.assertFalse(strat._is_eod_bar(bar3))
 
     def test_trailing_sl_price_long(self):
         strat = self._strategy()
@@ -82,6 +95,53 @@ class TestKingKeltnerKkStrategy(unittest.TestCase):
                     ) as super_mock:
                         strat.on_5min_bar(bar)
         cancel_mock.assert_called_once()
+        super_mock.assert_not_called()
+
+    def test_early_close_eod_on_last_rth_bar(self):
+        strat = self._strategy()
+        # 2026-07-03 12:59 ET
+        bar = _Bar(datetime(2026, 7, 3, 16, 59, tzinfo=timezone.utc))
+        with mock.patch.object(strat, "_session_cfg") as cfg_mock:
+            cfg = cfg_mock.return_value
+            cfg.session_tz = "America/New_York"
+            cfg.session_open_time = "09:30"
+            cfg.session_close_time = "16:00"
+            cfg.market = "us_equity"
+            self.assertTrue(strat._is_eod_bar(bar))
+
+    def test_on_bar_outside_rth_flattens_open_position(self):
+        strat = self._strategy()
+        bar = _Bar(datetime(2026, 7, 4, 14, 0, tzinfo=timezone.utc))
+        with mock.patch.object(strat, "_in_rth", return_value=False):
+            with mock.patch.object(strat, "_is_eod_bar", return_value=False):
+                with mock.patch.object(strat, "_flatten_at_bar") as flat_mock:
+                    with mock.patch(
+                        "orb.kk.vnpy.strategies.king_keltner_kk.KingKeltnerStrategy.on_bar"
+                    ) as super_mock:
+                        strat.on_bar(bar)
+        flat_mock.assert_called_once_with(bar)
+        super_mock.assert_not_called()
+
+    def test_flatten_skips_when_exit_orders_pending(self):
+        strat = self._strategy()
+        strat.vt_orderids = ["existing-order"]
+        bar = _Bar(datetime(2026, 7, 4, 14, 0, tzinfo=timezone.utc))
+        with mock.patch.object(strat, "cancel_all") as cancel_mock:
+            with mock.patch.object(strat, "sell") as sell_mock:
+                strat._flatten_at_bar(bar)
+        cancel_mock.assert_not_called()
+        sell_mock.assert_not_called()
+
+    def test_on_5min_bar_eod_inside_rth(self):
+        strat = self._strategy()
+        bar = _Bar(datetime(2026, 6, 2, 19, 54, tzinfo=timezone.utc))
+        with mock.patch.object(strat, "_should_flatten_eod", return_value=True):
+            with mock.patch.object(strat, "_flatten_at_bar") as flat_mock:
+                with mock.patch(
+                    "orb.kk.vnpy.strategies.king_keltner_kk.KingKeltnerStrategy.on_5min_bar"
+                ) as super_mock:
+                    strat.on_5min_bar(bar)
+        flat_mock.assert_called_once_with(bar)
         super_mock.assert_not_called()
 
 

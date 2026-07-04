@@ -7,6 +7,7 @@ from typing import Optional
 import pandas as pd
 
 from orb.kk.config import KKConfig
+from orb.kk.eod import should_eod_flat_bar
 from orb.kk.vnpy.bootstrap import ensure_vnpy_path
 
 ensure_vnpy_path()
@@ -67,10 +68,39 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
     def _is_eod_bar(self, bar: BarData) -> bool:
         if not self.kk_eod_flat:
             return False
+        cfg = self._session_cfg()
+        ms = int(bar.datetime.timestamp() * 1000)
         ts = self._bar_session_ts(bar)
-        return ts.hour > int(self.kk_exit_hour) or (
-            ts.hour == int(self.kk_exit_hour) and ts.minute >= int(self.kk_exit_minute)
+        return should_eod_flat_bar(
+            bar_ms=ms,
+            ts=ts,
+            cfg=cfg,
+            exit_hour=int(self.kk_exit_hour),
+            exit_minute=int(self.kk_exit_minute),
         )
+
+    def _should_flatten_eod(self, bar: BarData) -> bool:
+        if not self.kk_eod_flat or self.pos == 0:
+            return False
+        return self._is_eod_bar(bar) or not self._in_rth(bar)
+
+    def _flatten_at_bar(self, bar: BarData) -> None:
+        if self.pos == 0:
+            return
+        pending = list(getattr(self, "vt_orderids", None) or [])
+        if pending:
+            return
+        self.cancel_all()
+        vol = abs(self.pos)
+        side = "LONG" if self.pos > 0 else "SHORT"
+        msg = f"EOD flatten {self.vt_symbol} {side} vol={vol} px={bar.close_price}"
+        write_log = getattr(self, "write_log", None)
+        if callable(write_log):
+            write_log(msg)
+        if self.pos > 0:
+            self.sell(bar.close_price, vol)
+        elif self.pos < 0:
+            self.cover(bar.close_price, vol)
 
     def _past_entry_cutoff(self, bar: BarData) -> bool:
         """>= kk_no_entry_after_* 后禁止新开仓（含该时刻）。"""
@@ -93,12 +123,8 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
         return None
 
     def on_bar(self, bar: BarData) -> None:
-        if self._is_eod_bar(bar) and self.pos != 0:
-            self.cancel_all()
-            if self.pos > 0:
-                self.sell(bar.close_price, abs(self.pos))
-            elif self.pos < 0:
-                self.cover(bar.close_price, abs(self.pos))
+        if self._should_flatten_eod(bar):
+            self._flatten_at_bar(bar)
             return
         if not self._in_rth(bar):
             kk = KKConfig.from_env()
@@ -108,6 +134,9 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
         super().on_bar(bar)
 
     def on_5min_bar(self, bar: BarData) -> None:
+        if self._should_flatten_eod(bar):
+            self._flatten_at_bar(bar)
+            return
         if not self._in_rth(bar):
             kk = KKConfig.from_env()
             if kk.vnpy_idle_outside_rth:
