@@ -1,4 +1,4 @@
-"""Next K API — OI 雷达、收筹看盘、King Keltner 策略 API。"""
+"""Next K API — OI 雷达、收筹看盘、Trading ORB / King Keltner API。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from routers import accumulation as accumulation_router
 from routers import core as core_router
 from routers import maintenance as maintenance_router
 from routers import kk as kk_router
+from routers import trading_orb as trading_orb_router
 import worker_tasks as wt
 
 logging.basicConfig(
@@ -56,20 +57,36 @@ async def lifespan(app: FastAPI):
         logger.warning("DB init on startup skipped: %s", e)
 
     try:
-        from orb.kk.vnpy.supervisor import kk_vnpy_supervisor
+        from orb.vnpy.lane import get_active_vnpy_config
 
-        kk_vnpy_supervisor.start()
+        lane, _cfg = get_active_vnpy_config()
+        if lane == "trading_orb":
+            from orb.trading_orb.vnpy.supervisor import orb_vnpy_supervisor
+
+            orb_vnpy_supervisor.start()
+        elif lane == "king_keltner":
+            from orb.kk.vnpy.supervisor import kk_vnpy_supervisor
+
+            kk_vnpy_supervisor.start()
     except Exception as e:
-        logger.warning("KK vnpy supervisor startup skipped: %s", e)
+        logger.warning("vnpy supervisor startup skipped: %s", e)
 
     yield
 
     try:
-        from orb.kk.vnpy.supervisor import kk_vnpy_supervisor
+        from orb.vnpy.lane import get_active_vnpy_config
 
-        kk_vnpy_supervisor.stop()
+        lane, _cfg = get_active_vnpy_config()
+        if lane == "trading_orb":
+            from orb.trading_orb.vnpy.supervisor import orb_vnpy_supervisor
+
+            orb_vnpy_supervisor.stop()
+        elif lane == "king_keltner":
+            from orb.kk.vnpy.supervisor import kk_vnpy_supervisor
+
+            kk_vnpy_supervisor.stop()
     except Exception as e:
-        logger.warning("KK vnpy supervisor shutdown skipped: %s", e)
+        logger.warning("vnpy supervisor shutdown skipped: %s", e)
 
     sch = getattr(app.state, "accumulation_scheduler", None)
     if sch is not None:
@@ -108,6 +125,7 @@ app.include_router(core_router.router)
 app.include_router(maintenance_router.router)
 app.include_router(accumulation_router.router)
 app.include_router(kk_router.router)
+app.include_router(trading_orb_router.router)
 
 
 if __name__ == "__main__":

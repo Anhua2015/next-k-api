@@ -1,45 +1,18 @@
-# King Keltner — Railway 部署（官方 vnpy_binance 直连）
+# King Keltner — 已停用
 
-## 你需要做的
+KK vnpy 车道已由 **Trading ORB** 接管。请勿再部署 KK。
 
-1. **Railway 部署 next-k-api**（`railway.json`，`startCommand` = `uvicorn main:app`）
-2. 在 **next-k-api 服务** 配置静态出口 IP（若币安 API Key 绑定了 IP 白名单）
-3. 在 **next-k-api** Variables 里设置：
+## 当前推荐
+
+见 `config/trading_orb/RAILWAY.md` 与 `.env.oi.example`：
 
 ```env
-KK_ENGINE=vnpy
-KK_ENABLED=1
-KK_LIVE_ENABLED=1
-BINANCE_API_KEY=你的-key
-BINANCE_API_SECRET=你的-secret
-BINANCE_SERVER=REAL
-KK_EQUITY_USDT=14
-KK_RISK_PCT=0.01
-KK_LIVE_LEVERAGE=5
-KK_MAX_OPEN_POSITIONS=7
+ORB_VNPY_ENABLED=1
+ORB_VNPY_AUTO_START=1
+KK_ENABLED=0
+KK_SCHEDULER_ENABLED=0
 ```
 
-4. **Deploy** — 无需 shell 脚本
+## 回滚 KK（仅应急）
 
-## 启动时发生什么
-
-`main.py` lifespan 会：
-
-1. 启动内嵌 APScheduler
-2. 自动拉起 KK vnpy 后台线程（`KK_ENGINE=vnpy`）
-3. 连接官方 `BinanceLinearGateway`（WebSocket depth10 + 直连下单）
-4. 加载 `KingKeltnerKkStrategy` 全池
-
-日志搜 `[kk-vnpy]`、`BINANCE_LINEAR`。
-
-## 构建
-
-- `pip install -r requirements.txt -r requirements-vnpy.txt`
-- `vnpy-master` 在仓库内；另装 `vnpy_binance`、`vnpy-rest`、`vnpy-websocket`
-
-## 注意
-
-- 一个 replica 只跑一个 vnpy 线程
-- **币安 Key 放在 next-k-api**（不再经 Protocol 跳板）
-- 公开行情 WebSocket **不需要** IP 白名单；**交易接口**需要 Key 与白名单对齐
-- `KK_SHADOW=1` 时策略运行但 Gateway 拒单
+在 Variables 中设 `KK_ENABLED=1`、`ORB_VNPY_ENABLED=0` 后重新部署。同一 replica 不要同时启用两条 vnpy lane。

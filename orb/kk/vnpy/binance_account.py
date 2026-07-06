@@ -15,7 +15,7 @@ import requests
 from binance_fapi import FAPI
 from orb.core.kline_cache import norm_symbol
 from orb.kk.config import KKConfig
-from orb.kk.live_exec import _leverage
+from orb.kk.live_exec import _leverage as _kk_leverage
 
 logger = logging.getLogger(__name__)
 
@@ -106,22 +106,42 @@ def ensure_one_way_mode() -> None:
 
 def fetch_position_amounts(symbols: List[str]) -> Dict[str, float]:
     """symbol -> 净持仓张数（多为正、空为负）。"""
+    return {sym: float(snap.get("amount") or 0.0) for sym, snap in fetch_position_snapshots(symbols).items()}
+
+
+def fetch_position_snapshots(symbols: List[str]) -> Dict[str, Dict[str, float]]:
+    """symbol -> {amount, entry}（仅非零持仓）。"""
     want = {norm_symbol(s) for s in symbols}
     rows = _signed_get("/fapi/v2/positionRisk", {})
-    out: Dict[str, float] = {}
+    out: Dict[str, Dict[str, float]] = {}
     if not isinstance(rows, list):
         return out
     for row in rows:
         sym = norm_symbol(str(row.get("symbol") or ""))
         if sym not in want:
             continue
-        out[sym] = float(row.get("positionAmt") or 0.0)
+        amt = float(row.get("positionAmt") or 0.0)
+        if abs(amt) < 1e-12:
+            continue
+        out[sym] = {
+            "amount": amt,
+            "entry": float(row.get("entryPrice") or 0.0),
+        }
     return out
 
 
-def ensure_pool_leverage(symbols: List[str], kk: KKConfig) -> None:
+def _lane_leverage(cfg) -> int:
+    lev = float(getattr(cfg, "live_leverage", 0.0) or 0.0)
+    if lev > 0:
+        return int(lev)
+    if isinstance(cfg, KKConfig):
+        return int(_kk_leverage(cfg, cfg.orb_session_cfg()))
+    return 5
+
+
+def ensure_pool_leverage(symbols: List[str], cfg) -> None:
     ensure_one_way_mode()
-    lev = int(_leverage(kk, kk.orb_session_cfg()))
+    lev = _lane_leverage(cfg)
     for raw in symbols:
         sym = norm_symbol(raw)
         set_symbol_margin_isolated(sym)

@@ -6,8 +6,13 @@ import logging
 import time
 from typing import Any
 
-from orb.kk.config import KKConfig
 from orb.kk.vnpy.bootstrap import ensure_vnpy_path
+from orb.vnpy.lane import (
+    active_lane_session_cfg,
+    lane_eod_flat_and_enabled,
+    lane_rth_only,
+    lane_vnpy_idle_outside_rth,
+)
 
 ensure_vnpy_path()
 
@@ -15,31 +20,17 @@ logger = logging.getLogger(__name__)
 _PATCHED = False
 
 
-def tick_in_kk_rth(tick: Any) -> bool:
-    """按 tick 时间判断是否在 KK RTH 内。"""
-    kk = KKConfig.from_env()
-    if not kk.rth_only:
+def tick_in_lane_rth(tick: Any) -> bool:
+    if not lane_rth_only():
         return True
-    from orb.core.paper import in_regular_session
+    from orb.core.session_paper import in_regular_session
 
     dt = getattr(tick, "datetime", None)
     if dt is not None:
         ms = int(dt.timestamp() * 1000)
     else:
         ms = int(time.time() * 1000)
-    return bool(in_regular_session(kk.orb_session_cfg(), now_ms=ms))
-
-
-def _engine_has_open_positions(engine: Any) -> bool:
-    """任一 KK 策略仍有持仓时需继续收 tick 以完成 EOD 强平。"""
-    for strategy in getattr(engine, "strategies", {}).values():
-        if getattr(strategy, "pos", 0) != 0:
-            return True
-    return False
-
-
-def _allow_tick_outside_rth(engine: Any, kk: KKConfig) -> bool:
-    return bool(kk.eod_flat and kk.enabled and _engine_has_open_positions(engine))
+    return bool(in_regular_session(active_lane_session_cfg(), now_ms=ms))
 
 
 def apply_cta_engine_patches() -> None:
@@ -55,9 +46,8 @@ def apply_cta_engine_patches() -> None:
 
     def process_tick_event(self, event) -> None:
         tick = event.data
-        kk = KKConfig.from_env()
-        if kk.rth_only and kk.vnpy_idle_outside_rth and not tick_in_kk_rth(tick):
-            if _allow_tick_outside_rth(self, kk):
+        if lane_rth_only() and lane_vnpy_idle_outside_rth() and not tick_in_lane_rth(tick):
+            if lane_eod_flat_and_enabled(self):
                 return _orig_process_tick(self, event)
             return
         return _orig_process_tick(self, event)
@@ -103,7 +93,7 @@ def apply_cta_engine_patches() -> None:
                 if vt_set and sid in vt_set:
                     vt_set.discard(sid)
             logger.warning(
-                "[kk-vnpy] removed zero-volume local stop %s %s",
+                "[vnpy] removed zero-volume local stop %s %s",
                 so.vt_symbol,
                 sid,
             )
@@ -113,4 +103,21 @@ def apply_cta_engine_patches() -> None:
     CtaEngine.send_order = send_order
     CtaEngine.check_stop_order = check_stop_order
     _PATCHED = True
-    logger.info("[kk-vnpy] CtaEngine patches applied (RTH tick guard, volume<=0)")
+    logger.info("[vnpy] CtaEngine patches applied (RTH tick guard, volume<=0)")
+
+
+def tick_in_kk_rth(tick: Any) -> bool:
+    """兼容旧测试名。"""
+    return tick_in_lane_rth(tick)
+
+
+def _allow_tick_outside_rth(engine: Any, cfg=None) -> bool:
+    """兼容旧测试名；显式传入 cfg 时按该 lane 配置判断。"""
+    if cfg is not None:
+        if not getattr(cfg, "enabled", False) or not getattr(cfg, "eod_flat", False):
+            return False
+        for strategy in getattr(engine, "strategies", {}).values():
+            if getattr(strategy, "pos", 0) != 0:
+                return True
+        return False
+    return lane_eod_flat_and_enabled(engine)

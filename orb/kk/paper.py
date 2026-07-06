@@ -12,7 +12,7 @@ import pandas as pd
 
 from accumulation_radar import init_db
 from orb.core.macro_calendar import is_macro_skip_day, macro_calendar_status
-from orb.core.paper import _load_1m_df, _session_date_now, in_regular_session
+from orb.core.session_paper import _load_1m_df, _session_date_now, in_regular_session
 from orb.cta.engine import CtaBacktestConfig, process_cta_bar
 from orb.cta.strategies import cta_config_for_strategy
 from orb.kk.config import KKConfig

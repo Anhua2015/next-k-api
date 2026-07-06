@@ -9,7 +9,7 @@ def _db_conn():
 
     return accumulation_radar.init_db()
 from orb.core.kline_cache import norm_symbol
-from orb.core.paper import _session_date_now
+from orb.core.session_paper import _session_date_now
 from orb.core.session_today import build_session_today
 from orb.kk.config import KKConfig
 from orb.kk.db import load_state_json, load_wallet, migrate_kk_tables

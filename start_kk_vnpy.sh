@@ -38,7 +38,7 @@ load_env_file() {
 
 should_start_kk_vnpy() {
     local engine="${KK_ENGINE:-vnpy}"
-    local enabled="${KK_ENABLED:-1}"
+    local enabled="${KK_ENABLED:-0}"
     local auto="${KK_VNPY_AUTO_START:-1}"
     engine=$(echo "$engine" | tr '[:upper:]' '[:lower:]')
     enabled=$(echo "$enabled" | tr '[:upper:]' '[:lower:]')
@@ -70,7 +70,7 @@ fi
 export KK_ENGINE="${KK_ENGINE:-vnpy}"
 
 if ! should_start_kk_vnpy; then
-    info "KK_VNPY 自动启动已跳过（KK_ENGINE=${KK_ENGINE} KK_ENABLED=${KK_ENABLED:-1}）"
+    info "KK_VNPY 自动启动已跳过（KK_ENGINE=${KK_ENGINE} KK_ENABLED=${KK_ENABLED:-0}）"
     exit 0
 fi
 

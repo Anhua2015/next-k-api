@@ -82,6 +82,8 @@ def _market_defaults(market: str) -> dict:
             "tick_size": 0.01,
             "early_exit_minutes": 0,
             "macro_filter": True,
+            "momentum_filter": False,
+            "momentum_days": 5,
             "resolve_max_hold_ms": 0,
             "resolve_max_bars": 0,
             "resolve_at_session_close": True,
@@ -157,6 +159,8 @@ class OrbConfig:
     tick_size: float = 0.01
     early_exit_minutes: int = 0
     macro_filter: bool = True
+    momentum_filter: bool = False
+    momentum_days: int = 5
     margin_usdt: float = 100.0
     leverage: float = 10.0
     max_open_positions: int = 6
@@ -301,6 +305,15 @@ class OrbConfig:
                 _truthy(os.getenv("ORB_MACRO_FILTER"), default=False)
                 if os.getenv("ORB_MACRO_FILTER") is not None
                 else bool(md.get("macro_filter", True))
+            ),
+            momentum_filter=(
+                _truthy(os.getenv("ORB_MOMENTUM_FILTER"), default=False)
+                if os.getenv("ORB_MOMENTUM_FILTER") is not None
+                else bool(md.get("momentum_filter", False))
+            ),
+            momentum_days=max(
+                1,
+                _int_env("ORB_MOMENTUM_DAYS", int(md.get("momentum_days", 5))),
             ),
             sl_buffer_bps=_float_env("ORB_SL_BUFFER_BPS", 5.0),
             min_sl_pct=_float_env("ORB_MIN_SL_PCT", float(md.get("min_sl_pct", 0.0))),

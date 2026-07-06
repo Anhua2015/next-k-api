@@ -7,7 +7,7 @@ import os
 from typing import Any, Dict, Optional
 
 from orb.core.kline_cache import norm_symbol
-from orb.core.live_exec import live_ingest_succeeded
+from orb.core.protocol_ingest import live_ingest_succeeded
 from orb.core.protocol_client import (
     ingest_signals,
     lookup_signal,

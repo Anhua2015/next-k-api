@@ -28,7 +28,7 @@ def embed_scheduler_enabled() -> bool:
     return env_truthy("NEXT_K_EMBED_SCHEDULER", default=True)
 
 
-KK_SCHEDULER_ENABLED = env_truthy("KK_SCHEDULER_ENABLED", default=True)
+KK_SCHEDULER_ENABLED = env_truthy("KK_SCHEDULER_ENABLED", default=False)
 
 
 def _int_env_scan_interval(name: str, default: int) -> int:
@@ -70,6 +70,11 @@ def kk_scan_cron_kwargs(interval_minutes: int, *, second: Optional[int] = None) 
     if n == 1:
         return {"minute": "*", "second": sec, "timezone": KK_SCAN_CRON_TZ}
     return {"minute": f"*/{n}", "second": sec, "timezone": KK_SCAN_CRON_TZ}
+
+
+# 兼容 ORB V2 调度测试 / 旧引用
+ORB_SCAN_CRON_TZ = KK_SCAN_CRON_TZ
+orb_scan_cron_kwargs = kk_scan_cron_kwargs
 
 
 def register_scheduled_jobs(sch: Any, wt: Any) -> None:

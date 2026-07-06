@@ -60,7 +60,7 @@ class KingKeltnerKkStrategy(KingKeltnerStrategy):
     def _in_rth(self, bar: BarData) -> bool:
         if not self.kk_rth_only:
             return True
-        from orb.core.paper import in_regular_session
+        from orb.core.session_paper import in_regular_session
 
         ms = int(bar.datetime.timestamp() * 1000)
         return bool(in_regular_session(self._session_cfg(), now_ms=ms))

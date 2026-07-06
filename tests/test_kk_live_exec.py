@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from orb.core.live_exec import live_ingest_succeeded
+from orb.core.protocol_ingest import live_ingest_succeeded
 from orb.kk.config import KKConfig
 from orb.kk.live_exec import (
     SOURCE_KK,

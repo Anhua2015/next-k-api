@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""King Keltner 单 session 回测（拉 Binance 1m K 线，实盘口径）。"""
+"""King Keltner 单 session 回测。
+
+默认：vnpy 官方 BacktestingEngine → tools/cta/backtest_kk_vnpy.py
+本脚本 1m 触价引擎仅 --legacy 对照用（显著乐观，勿用于上线决策）。
+"""
 from __future__ import annotations
 
 import argparse
@@ -84,7 +88,33 @@ def main() -> None:
         default="",
         help="optional ET time filter e.g. 12:35-15:57 (America/New_York)",
     )
+    ap.add_argument(
+        "--legacy",
+        action="store_true",
+        help="use deprecated 1m touch engine (optimistic); default delegates to backtest_kk_vnpy.py",
+    )
     args = ap.parse_args()
+
+    if not args.legacy:
+        vnpy_argv = [
+            sys.executable,
+            str(ROOT / "tools" / "cta" / "backtest_kk_vnpy.py"),
+            "--session",
+            args.session.strip(),
+            "--warmup-from",
+            args.warmup_from.strip(),
+            "--equity",
+            str(float(args.equity)),
+        ]
+        if args.symbols.strip():
+            vnpy_argv.extend(["--symbols", args.symbols.strip()])
+        if args.out_csv.strip():
+            vnpy_argv.extend(["--out-csv", args.out_csv.strip()])
+        if args.window_et.strip():
+            vnpy_argv.extend(["--window-et", args.window_et.strip()])
+        import subprocess
+
+        raise SystemExit(subprocess.call(vnpy_argv))
 
     cfg = OrbConfig.from_env()
     meta = CTA_STRATEGIES["king_keltner"]
@@ -102,7 +132,8 @@ def main() -> None:
         win_lo_ms = int(pd.Timestamp(f"{session} {lo_s}", tz=cfg.session_tz).value // 1_000_000)
         win_hi_ms = int(pd.Timestamp(f"{session} {hi_s}", tz=cfg.session_tz).value // 1_000_000)
 
-    print(f"=== KK session backtest | session={session} | equity={equity}U | live-aligned ===")
+    print(f"=== KK session backtest | session={session} | equity={equity}U | engine=orb/cta (1m touch) ===")
+    print("  (vnpy official: python tools/cta/backtest_kk_vnpy.py --session", session, ")")
     if args.window_et.strip():
         print(f"window ET {args.window_et.strip()}")
     print(f"fetch {warmup_from} .. {session} (warmup + target)\n")

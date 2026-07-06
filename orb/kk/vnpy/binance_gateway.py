@@ -8,11 +8,16 @@ import time
 from typing import Any, Dict, Optional, Set
 
 from orb.core.kline_cache import norm_symbol
-from orb.core.paper import _session_date_now
+from orb.core.session_paper import _session_date_now
 from orb.kk.config import KKConfig
-from orb.kk.live_exec import live_enabled
+from orb.kk.live_exec import live_enabled as kk_live_enabled
 from orb.kk.vnpy.bootstrap import ensure_vnpy_path
-from orb.kk.wallet_sync import estimate_close_pnl, record_vnpy_fill
+from orb.kk.wallet_sync import estimate_close_pnl as kk_estimate_close_pnl
+from orb.kk.wallet_sync import record_vnpy_fill as kk_record_vnpy_fill
+from orb.trading_orb.live_exec import live_enabled as orb_live_enabled
+from orb.trading_orb.wallet_sync import estimate_close_pnl as orb_estimate_close_pnl
+from orb.trading_orb.wallet_sync import record_vnpy_fill as orb_record_vnpy_fill
+from orb.vnpy.lane import get_active_vnpy_config
 
 ensure_vnpy_path()
 
@@ -36,7 +41,10 @@ def binance_connect_setting() -> dict:
     server = (os.getenv("BINANCE_SERVER") or "REAL").strip().upper()
     if server not in ("REAL", "TESTNET"):
         server = "REAL"
-    kline = (os.getenv("BINANCE_KLINE_STREAM") or "False").strip()
+    kline = (os.getenv("BINANCE_KLINE_STREAM") or "").strip()
+    if not kline:
+        lane, _ = get_active_vnpy_config()
+        kline = "True" if lane == "trading_orb" else "False"
     if kline.lower() in ("1", "true", "yes", "on"):
         kline = "True"
     else:
@@ -66,21 +74,32 @@ def kk_symbol_from_vt(vt_symbol: str) -> str:
 
 
 class KkBinanceLinearGateway(BinanceLinearGateway):
-    """官方 Gateway + KK 实盘守卫与复利记账。"""
+    """官方 Gateway + vnpy 实盘守卫与复利记账（KK / Trading ORB）。"""
 
     def __init__(self, event_engine, gateway_name: str = GATEWAY_NAME) -> None:
         super().__init__(event_engine, gateway_name)
         self._open_lots: Dict[str, Dict[str, Any]] = {}
         self._active_symbols: Set[str] = set()
 
+    def _lane_cfg(self):
+        _, cfg = get_active_vnpy_config()
+        if cfg is not None:
+            return cfg
+        return KKConfig.from_env()
+
+    def _lane_live_enabled(self, cfg) -> bool:
+        if isinstance(cfg, KKConfig):
+            return live_enabled(cfg)
+        return orb_live_enabled(cfg)
+
     def send_order(self, req: OrderRequest) -> str:
-        kk = KKConfig.from_env()
+        cfg = self._lane_cfg()
         sym = kk_symbol_from_vt(req.symbol)
-        if kk.shadow:
-            self.write_log(f"KK_SHADOW=1 跳过实盘下单 {sym}")
+        if getattr(cfg, "shadow", False):
+            self.write_log(f"SHADOW=1 跳过实盘下单 {sym}")
             return ""
-        if not live_enabled(kk):
-            self.write_log(f"KK_LIVE_ENABLED=0 或未配置币安 Key，拒单 {sym}")
+        if not self._lane_live_enabled(cfg):
+            self.write_log(f"LIVE_ENABLED=0 或未配置币安 Key，拒单 {sym}")
             return ""
         vol = float(req.volume or 0.0)
         if vol <= 0:
@@ -89,7 +108,7 @@ class KkBinanceLinearGateway(BinanceLinearGateway):
             )
             return ""
         if req.offset == Offset.OPEN:
-            max_pos = int(kk.max_open_positions or 0)
+            max_pos = int(getattr(cfg, "max_open_positions", 0) or 0)
             if max_pos > 0 and sym not in self._active_symbols:
                 if self._open_position_count() >= max_pos:
                     self.write_log(f"已达最大持仓数 {max_pos}，拒单 {sym}")
@@ -98,7 +117,7 @@ class KkBinanceLinearGateway(BinanceLinearGateway):
 
     def on_position(self, position: PositionData) -> None:
         sym = kk_symbol_from_vt(position.symbol)
-        if float(position.volume or 0) > 0:
+        if abs(float(position.volume or 0.0)) > 0:
             self._active_symbols.add(sym)
         else:
             self._active_symbols.discard(sym)
@@ -111,33 +130,34 @@ class KkBinanceLinearGateway(BinanceLinearGateway):
         except Exception as exc:
             self.write_log(f"trade persist failed {trade.symbol}: {exc}")
 
-    def _kk_pool(self) -> Set[str]:
-        return {norm_symbol(s) for s in KKConfig.from_env().symbol_list()}
+    def _lane_pool(self) -> Set[str]:
+        cfg = self._lane_cfg()
+        return {norm_symbol(s) for s in cfg.symbol_list()}
 
     def _open_position_count(self) -> int:
-        pool = self._kk_pool()
+        pool = self._lane_pool()
         return sum(1 for sym in self._active_symbols if sym in pool)
 
     def _session_date(self) -> str:
-        kk = KKConfig.from_env()
-        return _session_date_now(kk.orb_session_cfg())
+        cfg = self._lane_cfg()
+        return _session_date_now(cfg.orb_session_cfg())
 
     def _is_eod_close(self) -> bool:
-        kk = KKConfig.from_env()
-        if not kk.eod_flat:
+        cfg = self._lane_cfg()
+        if not getattr(cfg, "eod_flat", False):
             return False
         import pandas as pd
 
-        cfg = kk.orb_session_cfg()
+        sess = cfg.orb_session_cfg()
         now_ms = int(time.time() * 1000)
-        ts = pd.Timestamp(now_ms, unit="ms", tz=cfg.session_tz)
-        return ts.hour > int(kk.exit_hour) or (
-            ts.hour == int(kk.exit_hour) and ts.minute >= int(kk.exit_minute)
-        )
+        ts = pd.Timestamp(now_ms, unit="ms", tz=sess.session_tz)
+        exit_hour = int(getattr(cfg, "exit_hour", 15))
+        exit_minute = int(getattr(cfg, "exit_minute", 55))
+        return ts.hour > exit_hour or (ts.hour == exit_hour and ts.minute >= exit_minute)
 
     def _persist_trade(self, trade: TradeData) -> None:
-        kk = KKConfig.from_env()
-        if not live_enabled(kk) or kk.shadow:
+        cfg = self._lane_cfg()
+        if not self._lane_live_enabled(cfg) or getattr(cfg, "shadow", False):
             return
         sym = kk_symbol_from_vt(trade.symbol)
         bar_ms = int(time.time() * 1000)
@@ -156,17 +176,30 @@ class KkBinanceLinearGateway(BinanceLinearGateway):
                 "notional_usdt": notional,
                 "volume": vol,
             }
-            record_vnpy_fill(
-                symbol=sym,
-                event="open",
-                side=side,
-                price=px,
-                volume=vol,
-                notional_usdt=notional,
-                session_date=session_date,
-                bar_ms=bar_ms,
-                kk=kk,
-            )
+            if isinstance(cfg, KKConfig):
+                record_vnpy_fill(
+                    symbol=sym,
+                    event="open",
+                    side=side,
+                    price=px,
+                    volume=vol,
+                    notional_usdt=notional,
+                    session_date=session_date,
+                    bar_ms=bar_ms,
+                    kk=cfg,
+                )
+            else:
+                orb_record_vnpy_fill(
+                    symbol=sym,
+                    event="open",
+                    side=side,
+                    price=px,
+                    volume=vol,
+                    notional_usdt=notional,
+                    session_date=session_date,
+                    bar_ms=bar_ms,
+                    cfg=cfg,
+                )
             return
 
         lot = self._open_lots.get(sym, {})
@@ -176,29 +209,59 @@ class KkBinanceLinearGateway(BinanceLinearGateway):
         if notion <= 0:
             notion = px * vol
         outcome = "eod" if self._is_eod_close() else "close"
-        gross, fee, net = estimate_close_pnl(
-            side=pos_side,
-            entry=entry_px,
-            exit_px=px,
-            notional_usdt=notion,
-            kk=kk,
-        )
-        record_vnpy_fill(
-            symbol=sym,
-            event="close",
-            side=pos_side,
-            price=px,
-            volume=vol,
-            notional_usdt=notion,
-            session_date=session_date,
-            bar_ms=bar_ms,
-            kk=kk,
-            outcome=outcome,
-            pnl_usdt=net,
-            pnl_gross=gross,
-            fee_usdt=fee,
-        )
+        if isinstance(cfg, KKConfig):
+            gross, fee, net = estimate_close_pnl(
+                side=pos_side,
+                entry=entry_px,
+                exit_px=px,
+                notional_usdt=notion,
+                kk=cfg,
+            )
+            record_vnpy_fill(
+                symbol=sym,
+                event="close",
+                side=pos_side,
+                price=px,
+                volume=vol,
+                notional_usdt=notion,
+                session_date=session_date,
+                bar_ms=bar_ms,
+                kk=cfg,
+                outcome=outcome,
+                pnl_usdt=net,
+                pnl_gross=gross,
+                fee_usdt=fee,
+            )
+        else:
+            gross, fee, net = orb_estimate_close_pnl(
+                side=pos_side,
+                entry=entry_px,
+                exit_px=px,
+                notional_usdt=notion,
+                cfg=cfg,
+            )
+            orb_record_vnpy_fill(
+                symbol=sym,
+                event="close",
+                side=pos_side,
+                price=px,
+                volume=vol,
+                notional_usdt=notion,
+                session_date=session_date,
+                bar_ms=bar_ms,
+                cfg=cfg,
+                outcome=outcome,
+                pnl_usdt=net,
+                pnl_gross=gross,
+                fee_usdt=fee,
+            )
         self._open_lots.pop(sym, None)
+
+
+# 兼容旧测试 / import
+live_enabled = kk_live_enabled
+estimate_close_pnl = kk_estimate_close_pnl
+record_vnpy_fill = kk_record_vnpy_fill
 
 
 __all__ = [

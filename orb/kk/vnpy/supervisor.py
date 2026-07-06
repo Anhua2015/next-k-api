@@ -47,7 +47,7 @@ class KkVnpySupervisor:
             logger.info(
                 "[kk-vnpy] supervisor skipped (KK_ENGINE=%s KK_ENABLED=%s AUTO_START=%s)",
                 os.getenv("KK_ENGINE", "vnpy"),
-                os.getenv("KK_ENABLED", "1"),
+                os.getenv("KK_ENABLED", "0"),
                 os.getenv("KK_VNPY_AUTO_START", "1"),
             )
             return

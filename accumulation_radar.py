@@ -1717,12 +1717,6 @@ def init_db():
             pass
     # Removed Groq trade plan feature: drop legacy table if present.
     c.execute("DROP TABLE IF EXISTS ai_groq_trade_plan")
-    try:
-        from orb.core.db import migrate_orb_tables
-
-        migrate_orb_tables(c)
-    except ImportError:
-        pass
     conn.commit()
     _migrate_legacy_heat_accum_json(conn)
     return conn

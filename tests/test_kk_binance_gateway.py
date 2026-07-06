@@ -43,20 +43,36 @@ class TestBinanceGatewayHelpers(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(binance_credentials_configured())
 
+    def test_binance_connect_setting_orb_defaults_kline_stream(self):
+        from orb.trading_orb.config import OrbVnpyConfig
+
+        orb = OrbVnpyConfig(enabled=True, engine="vnpy")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch(
+                "orb.kk.vnpy.binance_gateway.get_active_vnpy_config",
+                return_value=("trading_orb", orb),
+            ):
+                s = binance_connect_setting()
+        self.assertEqual(s["Kline Stream"], "True")
+
     def test_binance_connect_setting(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "BINANCE_API_KEY": "key1",
-                "BINANCE_API_SECRET": "sec1",
-                "BINANCE_SERVER": "TESTNET",
-                "BINANCE_KLINE_STREAM": "true",
-                "BINANCE_PROXY_HOST": "127.0.0.1",
-                "BINANCE_PROXY_PORT": "7890",
-            },
-            clear=True,
+        with mock.patch(
+            "orb.kk.vnpy.binance_gateway.get_active_vnpy_config",
+            return_value=(None, None),
         ):
-            s = binance_connect_setting()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "BINANCE_API_KEY": "key1",
+                    "BINANCE_API_SECRET": "sec1",
+                    "BINANCE_SERVER": "TESTNET",
+                    "BINANCE_KLINE_STREAM": "true",
+                    "BINANCE_PROXY_HOST": "127.0.0.1",
+                    "BINANCE_PROXY_PORT": "7890",
+                },
+                clear=True,
+            ):
+                s = binance_connect_setting()
         self.assertEqual(s["API Key"], "key1")
         self.assertEqual(s["API Secret"], "sec1")
         self.assertEqual(s["Server"], "TESTNET")
@@ -66,6 +82,16 @@ class TestBinanceGatewayHelpers(unittest.TestCase):
 
 
 class TestKkBinanceGatewayGuards(unittest.TestCase):
+    def setUp(self) -> None:
+        self._lane_patcher = mock.patch(
+            "orb.kk.vnpy.binance_gateway.get_active_vnpy_config",
+            return_value=(None, None),
+        )
+        self._lane_patcher.start()
+
+    def tearDown(self) -> None:
+        self._lane_patcher.stop()
+
     def _gateway(self, **kk_kw) -> KkBinanceLinearGateway:
         gw = KkBinanceLinearGateway(EventEngine())
         return gw

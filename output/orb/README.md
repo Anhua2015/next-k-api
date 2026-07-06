@@ -1,5 +1,5 @@
-# ORB 输出
+# ORB 研究输出
 
-回测与评估报告：`output/orb/v2/eval/`
+回测与 CTA 研究产物：`output/orb/cta/`
 
-训练/研究产物在 `data/orb/ml/`；实盘参数在 `orb_live/`。
+实盘车道：**Trading ORB vnpy**（见 `config/trading_orb/`）。

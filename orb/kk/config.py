@@ -1,4 +1,4 @@
-"""King Keltner lane 配置（KK_* env，与 ORB_V2_* 隔离）。"""
+"""King Keltner lane 配置（KK_* env）。"""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ def _str_env(name: str, default: str) -> str:
 class KKConfig:
     lane: str = "king_keltner"
     engine: str = "vnpy"  # vnpy | paper
-    enabled: bool = True
-    scheduler_enabled: bool = True
+    enabled: bool = False
+    scheduler_enabled: bool = False
     shadow: bool = False
     symbols_file: str = ""
     symbols: List[str] | None = None
@@ -87,8 +87,8 @@ class KKConfig:
         vnpy_on = engine == "vnpy"
         return cls(
             engine=engine,
-            enabled=_truthy("KK_ENABLED", default=True),
-            scheduler_enabled=_truthy("KK_SCHEDULER_ENABLED", default=True),
+            enabled=_truthy("KK_ENABLED", default=False),
+            scheduler_enabled=_truthy("KK_SCHEDULER_ENABLED", default=False),
             shadow=_truthy("KK_SHADOW", default=False),
             symbols_file=sym_file,
             symbols=symbols,
@@ -133,7 +133,7 @@ class KKConfig:
         return str(self.engine).lower() == "vnpy"
 
     def orb_session_cfg(self) -> OrbConfig:
-        """共用 session / RTH / 宏观日历（只读 ORB_SESSION_*，不写 orb_signals）。"""
+        """共用 session / RTH / 宏观日历（ORB_SESSION_*）。"""
         cfg = OrbConfig.from_env()
         cfg.risk_pct = float(self.risk_pct)
         cfg.fixed_notional_usdt = 0.0

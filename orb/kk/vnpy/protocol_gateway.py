@@ -285,7 +285,7 @@ class ProtocolGateway(BaseGateway):
         )
 
     def _session_date(self) -> str:
-        from orb.core.paper import _session_date_now
+        from orb.core.session_paper import _session_date_now
 
         return _session_date_now(self.orb_cfg)
 

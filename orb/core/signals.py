@@ -10,6 +10,7 @@ import pandas as pd
 from orb.core.breakout import breakout_long as _breakout_long, breakout_short as _breakout_short, entry_price_for_side
 from orb.core.config import OrbConfig
 from orb.core.macro_calendar import is_macro_skip_day
+from orb.core.momentum import daily_momentum_asof
 from orb.core.session import (
     compute_opening_range,
     session_anchor_ms,
@@ -222,6 +223,7 @@ def classify_signal(
     cfg: Optional[OrbConfig] = None,
     session_traded: bool = False,
     daily_atr: Optional[float] = None,
+    daily_df: Optional[pd.DataFrame] = None,
     bot_equity_usdt: Optional[float] = None,
 ) -> OrbSignal:
     c = cfg or OrbConfig.from_env()
@@ -328,6 +330,26 @@ def classify_signal(
             return flat("below_vwap")
         if side == "SHORT" and vwap_ref >= vwap:
             return flat("above_vwap")
+
+    if c.momentum_filter:
+        if daily_df is None or daily_df.empty:
+            return flat("momentum_data_missing")
+        mom_dir, mom_ret = daily_momentum_asof(
+            daily_df,
+            int(asof_open_ms),
+            lookback_days=c.momentum_days,
+            tz=c.session_tz,
+        )
+        if mom_dir is None:
+            return flat("momentum_data_missing")
+        if mom_ret is not None:
+            reasons.append(f"mom{c.momentum_days}d={mom_ret * 100:.2f}%")
+        if mom_dir == 0:
+            return flat("momentum_flat")
+        if side == "LONG" and mom_dir < 0:
+            return flat("momentum_conflict")
+        if side == "SHORT" and mom_dir > 0:
+            return flat("momentum_conflict")
 
     entry_px = entry_price_for_side(
         side=side,
