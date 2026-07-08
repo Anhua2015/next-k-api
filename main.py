@@ -23,7 +23,6 @@ from routers import core as core_router
 from routers import maintenance as maintenance_router
 from routers import strategy_signals as strategy_signals_router
 from routers import trading_orb as trading_orb_router
-from routers import binance_live as binance_live_router
 import worker_tasks as wt
 
 logging.basicConfig(
@@ -113,7 +112,6 @@ app.include_router(maintenance_router.router)
 app.include_router(accumulation_router.router)
 app.include_router(trading_orb_router.router)
 app.include_router(strategy_signals_router.router)
-app.include_router(binance_live_router.router)
 
 
 if __name__ == "__main__":
