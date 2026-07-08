@@ -249,6 +249,24 @@ class TradingIct2022VnpyStrategy(CtaTemplate):
         if vol <= 0:
             return
         cfg = self._ict_cfg()
+        side_u = "LONG" if str(side).lower() == "long" else "SHORT"
+        status = "shadow" if (cfg.shadow or not cfg.live_enabled) else "emitted"
+        try:
+            from orb.vnpy.strategy_signals import LANE_ICT_2022, record_strategy_signal
+
+            record_strategy_signal(
+                lane=LANE_ICT_2022,
+                symbol=symbol_from_vt(self.vt_symbol),
+                side=side_u,
+                entry_price=entry,
+                sl_price=sl,
+                tp_price=tp,
+                status=status,
+                bar_ms=int(t_ms or 0),
+                detail={"hmm": self.hmm_regime, "vol": vol},
+            )
+        except Exception:
+            pass
         if cfg.shadow or not cfg.live_enabled:
             self._pending_limit_px = entry
             self._pending_sl = sl

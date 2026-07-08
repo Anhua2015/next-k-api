@@ -446,6 +446,22 @@ class TradingOrbVnpyStrategy(CtaTemplate):
             f"ORB signal {self.vt_symbol} side={'LONG' if side > 0 else 'SHORT'} "
             f"px={close:.4f} relVol={rel_vol:.2f} risk=${risk_usd:.2f} vol={vol}"
         )
+        try:
+            from orb.vnpy.strategy_signals import LANE_TRADING_ORB, record_strategy_signal
+
+            record_strategy_signal(
+                lane=LANE_TRADING_ORB,
+                symbol=symbol_from_vt(self.vt_symbol),
+                side="LONG" if side > 0 else "SHORT",
+                entry_price=close,
+                sl_price=float(self.stop_price) if self.stop_price else None,
+                tp_price=float(self.target_price) if self.target_price else None,
+                status="shadow" if (orb_cfg.shadow or not orb_cfg.live_enabled) else "emitted",
+                bar_ms=int(self._bar_session_ts(bar) or 0),
+                detail={"rel_vol": rel_vol, "vol": vol, "risk_usd": risk_usd},
+            )
+        except Exception:
+            pass
         self._open_market(side, vol)
 
     def on_init(self) -> None:
