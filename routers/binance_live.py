@@ -95,3 +95,27 @@ async def binance_trades(
     per_sym = max(20, int(limit // max(1, len(symbols))) + 5)
     rows = fetch_user_trades(symbols, days=days, limit_per_symbol=per_sym)
     return {"ok": True, "trades": rows[: int(limit)], "days": days}
+
+
+@router.get("/orders/open")
+async def binance_open_orders(
+    limit: int = Query(200, ge=1, le=500),
+    symbol: Optional[str] = Query(None, description="可选，筛选单标的"),
+) -> Dict[str, Any]:
+    _require_credentials()
+    from orb.vnpy.binance_account import fetch_open_orders
+
+    rows = fetch_open_orders(symbol=symbol, limit=limit)
+    return {"ok": True, "orders": rows, "count": len(rows)}
+
+
+@router.get("/position-history")
+async def binance_position_history(
+    days: int = Query(7, ge=1, le=30),
+    limit: int = Query(200, ge=1, le=1000),
+) -> Dict[str, Any]:
+    _require_credentials()
+    from orb.vnpy.binance_account import fetch_realized_pnl_history
+
+    rows = fetch_realized_pnl_history(days=days, limit=limit)
+    return {"ok": True, "records": rows, "days": days, "count": len(rows)}

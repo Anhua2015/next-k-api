@@ -239,6 +239,114 @@ def fetch_user_trades(
     return merged
 
 
+def _order_status_label(status: str) -> str:
+    s = str(status or "").upper()
+    mapping = {
+        "NEW": "待成交",
+        "PARTIALLY_FILLED": "部分成交",
+        "FILLED": "已成交",
+        "CANCELED": "已撤销",
+        "EXPIRED": "已过期",
+        "NEW_INSURANCE": "待触发",
+        "NEW_ADL": "待触发",
+        "WORKING": "待触发",
+        "TRIGGERED": "已触发",
+        "FINISHED": "已完成",
+        "CANCELLED": "已撤销",
+    }
+    return mapping.get(s, s or "—")
+
+
+def _normalize_open_order(row: Dict[str, Any], *, kind: str) -> Dict[str, Any]:
+    if kind == "algo":
+        return {
+            "id": str(row.get("algoId") or ""),
+            "order_id": str(row.get("algoId") or ""),
+            "symbol": norm_symbol(str(row.get("symbol") or "")),
+            "side": str(row.get("side") or "").upper(),
+            "order_type": str(row.get("orderType") or row.get("algoType") or "ALGO"),
+            "price": _opt_float(row.get("triggerPrice") or row.get("price")),
+            "qty": _opt_float(row.get("quantity") or row.get("origQty")),
+            "filled_qty": _opt_float(row.get("executedQty")),
+            "status": str(row.get("algoStatus") or row.get("status") or ""),
+            "status_label": _order_status_label(str(row.get("algoStatus") or row.get("status") or "")),
+            "reduce_only": bool(row.get("reduceOnly")),
+            "time_ms": int(row.get("createTime") or row.get("time") or 0),
+            "kind": "algo",
+        }
+    return {
+        "id": str(row.get("orderId") or ""),
+        "order_id": str(row.get("orderId") or ""),
+        "symbol": norm_symbol(str(row.get("symbol") or "")),
+        "side": str(row.get("side") or "").upper(),
+        "order_type": str(row.get("type") or row.get("origType") or ""),
+        "price": _opt_float(row.get("price") or row.get("stopPrice")),
+        "qty": _opt_float(row.get("origQty")),
+        "filled_qty": _opt_float(row.get("executedQty")),
+        "status": str(row.get("status") or ""),
+        "status_label": _order_status_label(str(row.get("status") or "")),
+        "reduce_only": bool(row.get("reduceOnly")),
+        "time_ms": int(row.get("time") or row.get("updateTime") or 0),
+        "kind": "limit",
+    }
+
+
+def fetch_open_orders(*, symbol: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+    """当前挂单：普通委托 + 条件单（algo）。"""
+    params: Dict[str, Any] = {}
+    if symbol:
+        params["symbol"] = norm_symbol(symbol)
+    merged: List[Dict[str, Any]] = []
+    try:
+        rows = _signed_get("/fapi/v1/openOrders", params)
+        if isinstance(rows, list):
+            merged.extend(_normalize_open_order(row, kind="limit") for row in rows)
+    except Exception as exc:
+        logger.warning("[binance] openOrders failed: %s", exc)
+    try:
+        algo_rows = _signed_get("/fapi/v1/openAlgoOrders", params)
+        if isinstance(algo_rows, list):
+            merged.extend(_normalize_open_order(row, kind="algo") for row in algo_rows)
+    except Exception as exc:
+        logger.warning("[binance] openAlgoOrders failed: %s", exc)
+    merged.sort(key=lambda r: r.get("time_ms") or 0, reverse=True)
+    cap = max(1, min(500, int(limit)))
+    return merged[:cap]
+
+
+def fetch_realized_pnl_history(*, days: int = 7, limit: int = 200) -> List[Dict[str, Any]]:
+    """仓位历史：币安 REALIZED_PNL 流水（近 7 天默认可查）。"""
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - max(1, int(days)) * 86_400_000
+    cap = max(1, min(1000, int(limit)))
+    rows = _signed_get(
+        "/fapi/v1/income",
+        {
+            "incomeType": "REALIZED_PNL",
+            "startTime": start_ms,
+            "endTime": end_ms,
+            "limit": cap,
+        },
+    )
+    out: List[Dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        out.append(
+            {
+                "symbol": norm_symbol(str(row.get("symbol") or "")),
+                "pnl_usdt": float(row.get("income") or 0.0),
+                "asset": str(row.get("asset") or "USDT"),
+                "time_ms": int(row.get("time") or 0),
+                "trade_id": str(row.get("tradeId") or ""),
+                "tran_id": str(row.get("tranId") or ""),
+                "info": str(row.get("info") or ""),
+            }
+        )
+    out.sort(key=lambda r: r.get("time_ms") or 0, reverse=True)
+    return out[:cap]
+
+
 def fetch_position_snapshots(symbols: List[str]) -> Dict[str, Dict[str, float]]:
     """symbol -> {amount, entry}（仅非零持仓）。"""
     want = {norm_symbol(s) for s in symbols}
