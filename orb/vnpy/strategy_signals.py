@@ -18,6 +18,14 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _db_conn() -> sqlite3.Connection:
+    from accumulation_radar import init_db
+
+    conn = init_db()
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def migrate_strategy_signals_table(c: sqlite3.Cursor) -> None:
     c.execute(
         """
@@ -65,9 +73,7 @@ def record_strategy_signal(
     side_u = str(side or "").upper()
     if not sym or side_u not in ("LONG", "SHORT"):
         return
-    from accumulation_radar import init_db
-
-    conn = init_db()
+    conn = _db_conn()
     try:
         cur = conn.cursor()
         migrate_strategy_signals_table(cur)
@@ -188,9 +194,7 @@ def list_strategy_signals(*, lane: str, limit: int = 100) -> Dict[str, Any]:
     if lane_s not in VALID_LANES:
         return {"ok": False, "lane": lane_s, "count": 0, "signals": [], "error": "invalid_lane"}
     lim = max(1, min(int(limit or 100), 500))
-    from accumulation_radar import init_db
-
-    conn = init_db()
+    conn = _db_conn()
     try:
         cur = conn.cursor()
         migrate_strategy_signals_table(cur)

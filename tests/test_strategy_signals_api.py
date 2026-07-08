@@ -19,10 +19,11 @@ class TestStrategySignals(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
-    def _patch_db(self):
+    def _patch_db(self, *, row_factory=None):
         def _init_db():
             conn = sqlite3.connect(str(self.db_path))
-            conn.row_factory = sqlite3.Row
+            if row_factory is not None:
+                conn.row_factory = row_factory
             return conn
 
         return mock.patch("accumulation_radar.init_db", side_effect=_init_db)
@@ -50,6 +51,20 @@ class TestStrategySignals(unittest.TestCase):
     def test_invalid_lane(self):
         out = ss.list_strategy_signals(lane="bad", limit=10)
         self.assertFalse(out["ok"])
+
+    def test_list_without_row_factory_on_init_db(self):
+        with self._patch_db(row_factory=None):
+            ss.record_strategy_signal(
+                lane=ss.LANE_ICT_2022,
+                symbol="ethusdt",
+                side="SHORT",
+                entry_price=2000.0,
+                status="emitted",
+            )
+            out = ss.list_strategy_signals(lane=ss.LANE_ICT_2022, limit=10)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["signals"][0]["symbol"], "ETHUSDT")
 
     def test_dedup_key_uses_entry_and_time(self):
         a = ss._signal_dedup_key(
