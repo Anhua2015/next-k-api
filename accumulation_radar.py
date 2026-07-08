@@ -121,13 +121,13 @@ WORTH_HIGHLIGHT_CATEGORY_ORDER: Tuple[str, ...] = (
     "ambush_gem",
 )
 WORTH_HIGHLIGHT_CATEGORY_LABEL_ZH: Dict[str, str] = {
-    "heat_accum": "🔥💤 热度+收筹",
-    "patrick_core": "📍 Patrick核心",
-    "hot_oi": "🔥⚡ 热度+OI",
-    "chase_fire": "🔥 追多·费率加速",
-    "dual_list": "⭐ 追多+综合双榜",
-    "ambush_dark": "🎯 埋伏·暗流",
-    "ambush_gem": "💎 埋伏·低市值+OI",
+    "heat_accum": "🌡⏳ 风口+吸筹",
+    "patrick_core": "🧭 Patrick 精选",
+    "hot_oi": "🌡📊 风口+持仓",
+    "chase_fire": "🚀 做多·费率急升",
+    "dual_list": "✦ 做多+多维双榜",
+    "ambush_dark": "🌊 静默·静建",
+    "ambush_gem": "🪙 静默·小盘+持仓",
 }
 # 值得关注合并后的 API / 电报展示条数上限（7 类 × 每类至多 MAX_K 条）
 WORTH_HIGHLIGHTS_MAX = WORTH_CATEGORY_MAX_K * len(WORTH_HIGHLIGHT_CATEGORY_ORDER)
@@ -146,27 +146,32 @@ FOCUS_DARK_ABS_PX_MAX = 3.0
 FOCUS_DARK_D6H_MIN = 4.0
 FOCUS_DARK_MCAP_MAX_USD = 200_000_000
 FOCUS_VOL_IGNITE_BREAKOUT_MIN = 10.0
-FOCUS_VOL_IGNITE_STATUS_NEEDLE = "放量启动"
+FOCUS_VOL_IGNITE_STATUS_NEEDLE = "脉冲启动"
 FOCUS_CHANNEL_PRIORITY: Dict[str, int] = {
     "squeeze": 1,
     "volume_ignite": 2,
     "dark_flow": 3,
 }
 FOCUS_CHANNEL_LABEL_ZH: Dict[str, str] = {
-    "squeeze": "极致逼空",
-    "volume_ignite": "绝地天量",
-    "dark_flow": "纯正暗流",
+    "squeeze": "极端轧空",
+    "volume_ignite": "天量点火",
+    "dark_flow": "隐蔽建仓",
 }
 FOCUS_CHANNEL_EMOJI: Dict[str, str] = {
-    "squeeze": "🚀",
+    "squeeze": "🗜",
     "volume_ignite": "🌋",
     "dark_flow": "🥷",
 }
 FOCUS_STRATEGY_TIP_ZH: Dict[str, str] = {
-    "squeeze": "关注突破前高与费率变化，谨防末端踩踏反转。",
-    "volume_ignite": "等待 1h 缩量回踩价值区上沿再跟随，慎追阳线末端。",
-    "dark_flow": "贴近 POC/价值区观察，仓位随波动分批。",
+    "squeeze": "留意前高突破与费率反转，谨防末端踩踏。",
+    "volume_ignite": "等 1h 缩量回踩价值区上沿再跟随，勿追阳线尾端。",
+    "dark_flow": "贴近 POC/价值区观察，按波动分批建仓。",
 }
+# 费率趋势标签（追多榜展示；chase_fire 筛选依赖 TREND_FR_ACCEL_TAG）
+TREND_FR_ACCEL_TAG = "急升"
+TREND_FR_TURN_NEG_TAG = "转负"
+TREND_FR_FLAT_TAG = "持稳"
+TREND_FR_RECOVER_TAG = "回暖"
 _LEGACY_HEAT_ACCUM_JSON = Path(db_dir) / "heat_accum_watchlist.json"
 # 热度收筹表：突破—回踩—延续状态机（1h K 线，不含 OI）
 HEAT_ACCUM_BPC_INTERVAL = "1h"
@@ -405,19 +410,20 @@ def _persist_oi_radar_snapshot(payload: Dict[str, Any]) -> None:
 
 
 def _heat_accum_summary_line(sig: Dict[str, Any]) -> str:
-    """与「值得关注」热力+收筹条一致的单行摘要（CST 语境）。"""
+    """与「精选推荐」风口+吸筹条一致的单行摘要（CST 语境）。"""
     tags = list(sig.get("tags") or [])
     coin = sig.get("coin") or ""
     sw = sig.get("sideways_days") or 0
-    return f"🔥💤 {coin} 热度({'+'.join(tags)})+收筹{sw}天=OI将涨"
+    tag_s = "+".join(tags) if tags else "—"
+    return f"🌡⏳ {coin} 风口({tag_s})+吸筹{sw}日→持仓将升"
 
 
 def _patrick_core_summary_line(sig: Dict[str, Any]) -> str:
-    """Patrick 核心看盘摘要（与「值得关注」📍 条一致）。"""
+    """Patrick 精选看盘摘要（与「精选推荐」🧭 条一致）。"""
     coin = sig.get("coin") or ""
     sw = int(sig.get("sideways_days") or 0)
     d6 = float(sig.get("d6h") or 0)
-    return f"📍 {coin} 收筹{sw}天+OI{d6:+.0f}%（Patrick核心）"
+    return f"🧭 {coin} 吸筹{sw}日+持仓{d6:+.0f}%（Patrick 精选）"
 
 
 def _heat_accum_now_cst(now: datetime) -> datetime:
@@ -1499,7 +1505,7 @@ def merge_and_persist_ambush_watchlist(
         if not isinstance(s, dict):
             continue
         summ = (
-            f"🎯 {s['coin']} 暗流！OI{s['d6h']:+.0f}%但价格没动，市值仅{mcap_str_fn(s['est_mcap'])}"
+            f"🌊 {s['coin']} 静建！持仓{s['d6h']:+.0f}%但价格平，盘仅{mcap_str_fn(s['est_mcap'])}"
         )
         upsert(s, "dark_flow", summ)
 
@@ -1507,7 +1513,7 @@ def merge_and_persist_ambush_watchlist(
         if not isinstance(s, dict):
             continue
         summ = (
-            f"💎 {s['coin']} 低市值{mcap_str_fn(s['est_mcap'])}+OI{s['d6h']:+.0f}%，埋伏首选"
+            f"🪙 {s['coin']} 小盘{mcap_str_fn(s['est_mcap'])}+持仓{s['d6h']:+.0f}%，静默首选"
         )
         upsert(s, "low_mcap_oi", summ)
 
@@ -1864,11 +1870,11 @@ def analyze_accumulation(symbol, klines):
     
     # 状态判断
     if vol_breakout >= VOL_BREAKOUT_MULT:
-        status = "🔥放量启动"
+        status = "🌋脉冲启动"
     elif vol_breakout >= 1.5:
-        status = "⚡开始放量"
+        status = "⬆量能抬头"
     else:
-        status = "💤收筹中"
+        status = "⏳吸筹中"
     
     return {
         "symbol": symbol,
@@ -2001,16 +2007,16 @@ def build_pool_report(results, top_n=25):
     ]
     
     # 分组：放量启动 > 开始放量 > 收筹中
-    firing = [r for r in results if "放量启动" in r["status"]]
-    warming = [r for r in results if "开始放量" in r["status"]]
-    sleeping = [r for r in results if "收筹中" in r["status"]]
+    firing = [r for r in results if "脉冲启动" in r["status"]]
+    warming = [r for r in results if "量能抬头" in r["status"]]
+    sleeping = [r for r in results if "吸筹中" in r["status"]]
     
     if firing:
-        lines.append(f"🔥 **放量启动** ({len(firing)}个) — 最高优先级！")
+        lines.append(f"🌋 **脉冲启动** ({len(firing)}个) — 最高优先级！")
         for r in firing[:10]:
             lines.append(
-                f"  🔥 **{r['coin']}** | 分:{r['score']:.0f} | "
-                f"横盘{r['sideways_days']}天 | 波动{r['range_pct']:.0f}% | "
+                f"  🌋 **{r['coin']}** | 分:{r['score']:.0f} | "
+                f"盘整{r['sideways_days']}日 | 波动{r['range_pct']:.0f}% | "
                 f"Vol放大{r['vol_breakout']:.1f}x"
             )
             lines.append(
@@ -2021,21 +2027,21 @@ def build_pool_report(results, top_n=25):
         lines.append("")
     
     if warming:
-        lines.append(f"⚡ **开始放量** ({len(warming)}个) — 关注中")
+        lines.append(f"⬆ **量能抬头** ({len(warming)}个) — 关注中")
         for r in warming[:10]:
             lines.append(
-                f"  ⚡ {r['coin']} | 分:{r['score']:.0f} | "
-                f"横盘{r['sideways_days']}天 | 波动{r['range_pct']:.0f}% | "
+                f"  ⬆ {r['coin']} | 分:{r['score']:.0f} | "
+                f"盘整{r['sideways_days']}日 | 波动{r['range_pct']:.0f}% | "
                 f"Vol{r['vol_breakout']:.1f}x"
             )
         lines.append("")
     
     if sleeping:
-        lines.append(f"💤 **收筹中** ({len(sleeping)}个) — 持续监控")
+        lines.append(f"⏳ **吸筹中** ({len(sleeping)}个) — 持续监控")
         for r in sleeping[:15]:
             lines.append(
-                f"  💤 {r['coin']} | 分:{r['score']:.0f} | "
-                f"横盘{r['sideways_days']}天 | 波动{r['range_pct']:.0f}% | "
+                f"  ⏳ {r['coin']} | 分:{r['score']:.0f} | "
+                f"盘整{r['sideways_days']}日 | 波动{r['range_pct']:.0f}% | "
                 f"日均Vol {format_usd(r['avg_vol'])}"
             )
     
@@ -2289,16 +2295,16 @@ def _focus_build_summary_line(coin: str, channel: str, d: Dict[str, Any], vb: fl
     em = FOCUS_CHANNEL_EMOJI[channel]
     if channel == "squeeze":
         return (
-            f"👑 {coin} · {em}{lab} | 费率{d['fr_pct']:.2f}% OI{d['d6h']:+.0f}% 横盘{int(d.get('sw_days') or 0)}天"
+            f"👑 {coin} · {em}{lab} | 费率{d['fr_pct']:.2f}% 持仓{d['d6h']:+.0f}% 盘整{int(d.get('sw_days') or 0)}日"
         )
     if channel == "volume_ignite":
         return (
-            f"👑 {coin} · {em}{lab} | Vol×{vb:.1f} 热度{float(d.get('heat') or 0):.0f} 横盘{int(d.get('sw_days') or 0)}天"
+            f"👑 {coin} · {em}{lab} | Vol×{vb:.1f} 风口{float(d.get('heat') or 0):.0f} 盘整{int(d.get('sw_days') or 0)}日"
         )
     m = float(d.get("est_mcap") or 0)
     m_s = f"${m/1e6:.0f}M" if m >= 1e6 else f"${m/1e3:.0f}K"
     return (
-        f"👑 {coin} · {em}{lab} | OI{d['d6h']:+.0f}% 涨跌{d['px_chg']:+.1f}% ~{m_s}"
+        f"👑 {coin} · {em}{lab} | 持仓{d['d6h']:+.0f}% 涨跌{d['px_chg']:+.1f}% ~{m_s}"
     )
 
 
@@ -2651,7 +2657,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     # 3. 扫OI（标的池中放量的 + Top100）
     scan_syms = set()
     for sym, pd in pool_map.items():
-        if "放量" in pd.get("status", "") or "开始" in pd.get("status", ""):
+        if "脉冲" in pd.get("status", "") or "抬头" in pd.get("status", ""):
             scan_syms.add(sym)
     top_by_vol = sorted(ticker_map.items(), key=lambda x: x[1]["vol"], reverse=True)[:100]
     for sym, _ in top_by_vol:
@@ -2737,7 +2743,15 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             fr_prev = fr_rates[-2] if len(fr_rates) >= 2 else d["fr_pct"]
             fr_delta = d["fr_pct"] - fr_prev
             
-            trend = "🔥加速" if fr_delta < -0.05 else "⬇️变负" if fr_delta < -0.01 else "➡️" if abs(fr_delta) < 0.01 else "⬆️回升"
+            trend = (
+                f"🚀{TREND_FR_ACCEL_TAG}"
+                if fr_delta < -0.05
+                else f"↘{TREND_FR_TURN_NEG_TAG}"
+                if fr_delta < -0.01
+                else f"·{TREND_FR_FLAT_TAG}·"
+                if abs(fr_delta) < 0.01
+                else f"↗{TREND_FR_RECOVER_TAG}"
+            )
             
             chase.append({**d, "fr_delta": fr_delta, "trend": trend,
                           "rates": " → ".join([f"{x:.3f}" for x in fr_rates[-3:]])})
@@ -2885,22 +2899,22 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         key=lambda x: x["heat"], reverse=True
     )
     if hot_coins:
-        lines.append(f"\n🔥 **热度榜** (CG趋势+成交量暴增)")
+        lines.append(f"\n🌡 **风口榜** (榜热+成交脉冲)")
         for s in hot_coins[:8]:
             tags = []
-            if s["in_cg"]: tags.append("🌐CG热搜")
-            if s["vol_surge"]: tags.append("📈放量")
-            oi_tag = f"OI{s['d6h']:+.0f}%" if abs(s["d6h"]) >= 3 else ""
-            if oi_tag: tags.append(f"⚡{oi_tag}")
-            if s["in_pool"]: tags.append(f"💤池{s['sw_days']}天")
-            fr_tag = f"🧊{s['fr_pct']:.2f}%" if s["fr_pct"] < -0.03 else ""
+            if s["in_cg"]: tags.append("🔍榜热")
+            if s["vol_surge"]: tags.append("⬆脉冲")
+            oi_tag = f"持仓{s['d6h']:+.0f}%" if abs(s["d6h"]) >= 3 else ""
+            if oi_tag: tags.append(f"📊{oi_tag}")
+            if s["in_pool"]: tags.append(f"⏳蓄{s['sw_days']}日")
+            fr_tag = f"🔻{s['fr_pct']:.2f}%" if s["fr_pct"] < -0.03 else ""
             if fr_tag: tags.append(fr_tag)
             lines.append(
                 f"  {s['coin']:<8} ~{mcap_str(s['est_mcap'])} 涨{s['px_chg']:+.0f}% | {' '.join(tags)}"
             )
     
     # 表1: 追多
-    lines.append(f"\n🔥 **追多** (按费率排名)")
+    lines.append(f"\n🚀 **空头挤压** (按费率排名)")
     if chase:
         for s in chase[:8]:
             lines.append(
@@ -2911,24 +2925,24 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         lines.append("  暂无（需涨>3%+费率负）")
     
     # 表2: 综合
-    lines.append(f"\n📊 **综合** (费率+市值+横盘+OI 各25)")
+    lines.append(f"\n📊 **多维共振** (费率+市值+盘整+持仓 各25)")
     for s in combined[:8]:
         dims = []
-        if s["f_sc"] >= 10: dims.append(f"🧊{s['fr_pct']:.2f}%")
-        if s["m_sc"] >= 12: dims.append(f"💎{mcap_str(s['est_mcap'])}")
-        if s["s_sc"] >= 10: dims.append(f"💤{s['sw_days']}天")
-        if s["o_sc"] >= 10: dims.append(f"⚡OI{s['d6h']:+.0f}%")
+        if s["f_sc"] >= 10: dims.append(f"🔻{s['fr_pct']:.2f}%")
+        if s["m_sc"] >= 12: dims.append(f"🪙{mcap_str(s['est_mcap'])}")
+        if s["s_sc"] >= 10: dims.append(f"⏳{s['sw_days']}日")
+        if s["o_sc"] >= 10: dims.append(f"📊持仓{s['d6h']:+.0f}%")
         lines.append(
             f"  {s['coin']:<7} {s['total']}分 | {' '.join(dims)}"
         )
     
     # 表3: 埋伏
-    lines.append(f"\n🎯 **埋伏** (市值35+OI30+横盘20+费率15)")
+    lines.append(f"\n🌊 **静默建仓** (市值35+持仓30+盘整20+费率15)")
     for s in ambush[:8]:
         tags = [f"~{mcap_str(s['est_mcap'])}"]
-        if abs(s["d6h"]) >= 2: tags.append(f"OI{s['d6h']:+.0f}%")
-        if s["d6h"] > 2 and abs(s["px_chg"]) < 5: tags.append("🎯暗流")
-        if s["sw_days"] >= 45: tags.append(f"横盘{s['sw_days']}天")
+        if abs(s["d6h"]) >= 2: tags.append(f"持仓{s['d6h']:+.0f}%")
+        if s["d6h"] > 2 and abs(s["px_chg"]) < 5: tags.append("🌊静建")
+        if s["sw_days"] >= 45: tags.append(f"盘整{s['sw_days']}日")
         if s["fr_pct"] < -0.01: tags.append(f"费率{s['fr_pct']:.2f}%")
         lines.append(
             f"  {s['coin']:<7} {s['total']}分 | {' '.join(tags)}"
@@ -2962,10 +2976,10 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     for rank, s in enumerate(heat_pick, start=1):
         tags = []
         if s["in_cg"]:
-            tags.append("CG热搜")
+            tags.append("榜热")
         if s["vol_surge"]:
-            tags.append("放量")
-        summary = f"🔥💤 {s['coin']} 热度({'+'.join(tags)})+收筹{s['sw_days']}天=OI将涨"
+            tags.append("脉冲")
+        summary = f"🌡⏳ {s['coin']} 风口({'+'.join(tags) if tags else '—'})+吸筹{s['sw_days']}日→持仓将升"
         ls = s.get("liquidity_spring") if isinstance(s.get("liquidity_spring"), dict) else {}
         if ls and ls.get("detected"):
             summary += "·弹簧"
@@ -3035,7 +3049,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
             }
         )
     for rank, s in enumerate(patrick_pick, start=1):
-        summary = f"📍 {s['coin']} 收筹{s['sw_days']}天+OI{s['d6h']:+.0f}%（Patrick核心）"
+        summary = f"🧭 {s['coin']} 吸筹{s['sw_days']}日+持仓{s['d6h']:+.0f}%（Patrick 精选）"
         ls = s.get("liquidity_spring") if isinstance(s.get("liquidity_spring"), dict) else {}
         if ls and ls.get("detected"):
             summary += "·弹簧"
@@ -3064,7 +3078,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         score_min=WORTH_MIN_SCORE_HOT_OI,
     )
     for rank, s in enumerate(hot_oi_pick, start=1):
-        summary = f"🔥⚡ {s['coin']} 热度+OI{s['d6h']:+.0f}%双涨！"
+        summary = f"🌡📊 {s['coin']} 风口+持仓{s['d6h']:+.0f}%同步上行"
         worth_buckets["hot_oi"].append(
             {
                 "symbol": s["sym"],
@@ -3076,14 +3090,14 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         )
 
     # 4 追多·费率加速
-    chase_fire_raw = [s for s in chase[:16] if "加速" in s.get("trend", "")]
+    chase_fire_raw = [s for s in chase[:16] if TREND_FR_ACCEL_TAG in s.get("trend", "")]
     chase_fire = worth_pick_dynamic(
         chase_fire_raw,
         score_fn=lambda s: -float(s["fr_pct"]),
         score_min=WORTH_MIN_FR_STRENGTH_CHASE_FIRE,
     )
     for rank, s in enumerate(chase_fire, start=1):
-        summary = f"🔥 {s['coin']} 费率{s['fr_pct']:.3f}%加速恶化，空头涌入中"
+        summary = f"🚀 {s['coin']} 费率{s['fr_pct']:.3f}%持续走低，空头加码中"
         worth_buckets["chase_fire"].append(
             {
                 "symbol": s["sym"],
@@ -3125,7 +3139,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
     )
     for rank, row in enumerate(dual_pick, start=1):
         c = row["coin"]
-        summary = f"⭐ {c} 追多+综合双榜上榜"
+        summary = f"✦ {c} 做多+多维双榜共振"
         worth_buckets["dual_list"].append(
             {
                 "symbol": row["sym"],
@@ -3149,7 +3163,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         score_min=WORTH_MIN_AMBUSH_TOTAL,
     )
     for rank, s in enumerate(ambush_dark, start=1):
-        summary = f"🎯 {s['coin']} 暗流！OI{s['d6h']:+.0f}%但价格没动，市值仅{mcap_str(s['est_mcap'])}"
+        summary = f"🌊 {s['coin']} 静建！持仓{s['d6h']:+.0f}%但价格平，盘仅{mcap_str(s['est_mcap'])}"
         worth_buckets["ambush_dark"].append(
             {
                 "symbol": s["sym"],
@@ -3172,7 +3186,7 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
         score_min=WORTH_MIN_AMBUSH_TOTAL,
     )
     for rank, s in enumerate(ambush_gem, start=1):
-        summary = f"💎 {s['coin']} 低市值{mcap_str(s['est_mcap'])}+OI{s['d6h']:+.0f}%，埋伏首选"
+        summary = f"🪙 {s['coin']} 小盘{mcap_str(s['est_mcap'])}+持仓{s['d6h']:+.0f}%，静默首选"
         worth_buckets["ambush_gem"].append(
             {
                 "symbol": s["sym"],
@@ -3195,17 +3209,17 @@ def run_oi_hourly_radar(conn: sqlite3.Connection, *, notify: bool = True) -> Dic
 
     highlights = highlights[:WORTH_HIGHLIGHTS_MAX]
     if highlights:
-        lines.append(f"\n💡 **值得关注**")
+        lines.append(f"\n💡 **精选推荐**")
         for h in highlights:
             lines.append(f"  {h}")
     
     # 图例说明
-    lines.append(f"\n📖 **图例**")
-    lines.append("  🔥热度=CG热搜+成交量暴增(OI领先指标)")
-    lines.append("  费率负=空头燃料 | 💎市值 | 💤横盘(收筹)")
-    lines.append("  🔥💤热度+收筹=最强预判 | 🔥⚡热度+OI=正在发生")
-    lines.append("  📍收筹池+OI异动=Patrick核心（可无热度）")
-    lines.append("  👑重点关注=逼空/天量/暗流三通道+否决假上涨（详见段首）")
+    lines.append(f"\n📖 **符号说明**")
+    lines.append("  🌡风口=榜热+成交脉冲（持仓领先指标）")
+    lines.append("  负费率=空头燃料 | 🪙盘小 | ⏳盘整(吸筹)")
+    lines.append("  🌡⏳风口+吸筹=最强预判 | 🌡📊风口+持仓=正在发生")
+    lines.append("  🧭吸筹池+持仓异动=Patrick精选（可无风口）")
+    lines.append("  👑核心关注=轧空/天量/静建三通道+否决假上涨（详见段首）")
     
     report = "\n".join(lines)
     # 🎯 暗流 / 💎 低市值+OI：与上文 highlights 中对应条目同源，每类至多 AMBUSH_WATCH_TOP_N 条写入 ambush_watch
