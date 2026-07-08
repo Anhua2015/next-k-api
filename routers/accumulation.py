@@ -30,7 +30,6 @@ _CRON_TASK_FUNCS: Dict[str, Any] = {
     "heat_zones": wt.run_heat_watch_refresh_task,
     "heat_bpc": wt.run_heat_watch_refresh_task,
     "oi": wt.run_oi_task,
-    "kk_scan": wt.run_kk_scan_task,
 }
 
 
