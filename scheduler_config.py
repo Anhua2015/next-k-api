@@ -66,6 +66,9 @@ def kk_scan_cron_kwargs(interval_minutes: int, *, second: Optional[int] = None) 
     sec = KK_SCAN_CRON_SECOND if second is None else max(0, min(59, int(second)))
     if n == 1:
         return {"minute": "*", "second": sec, "timezone": KK_SCAN_CRON_TZ}
+    if n >= 60:
+        # cron minute 仅 0–59；整点每小时用 minute=0
+        return {"minute": 0, "second": sec, "timezone": KK_SCAN_CRON_TZ}
     return {"minute": f"*/{n}", "second": sec, "timezone": KK_SCAN_CRON_TZ}
 
 

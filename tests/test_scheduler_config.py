@@ -52,6 +52,12 @@ class TestOrbScanCron(unittest.TestCase):
 
         self.assertIsNone(sc.orb_scan_cron_kwargs(7))
 
+    def test_cron_kwargs_60m_hourly(self):
+        import scheduler_config as sc
+
+        kw = sc.orb_scan_cron_kwargs(60, second=5)
+        self.assertEqual(kw, {"minute": 0, "second": 5, "timezone": sc.ORB_SCAN_CRON_TZ})
+
 
 if __name__ == "__main__":
     unittest.main()
