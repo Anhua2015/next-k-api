@@ -1,4 +1,4 @@
-"""vnpy 多 lane 配置（ICT + ORB + Aberration）。"""
+"""vnpy 多 lane 配置（ICT + ORB；Aberration 需 ABERRATION_VNPY_ENABLED=1 才启用）。"""
 
 from __future__ import annotations
 

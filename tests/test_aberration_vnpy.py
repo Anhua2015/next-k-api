@@ -68,6 +68,19 @@ class TestAberrationVnpy(unittest.TestCase):
         self.assertEqual(s._shadow_pos, 0.0)
         self.assertEqual(s.last_signal, "")
 
+    def test_aberration_disabled_when_env_off(self):
+        env = {
+            "ICT_VNPY_ENABLED": "1",
+            "ORB_VNPY_ENABLED": "1",
+            "ABERRATION_VNPY_ENABLED": "0",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            lanes = get_enabled_vnpy_lanes()
+        names = [n for n, _ in lanes]
+        self.assertNotIn("aberration", names)
+        self.assertIn("ict_2022", names)
+        self.assertIn("trading_orb", names)
+
     def test_lane_registration_with_env(self):
         env = {
             "ICT_VNPY_ENABLED": "0",
