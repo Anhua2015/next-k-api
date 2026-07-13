@@ -78,11 +78,12 @@ class VnpyLiveGatewayMixin:
             )
             return ""
         if req.offset == Offset.OPEN:
-            max_pos = int(getattr(cfg, "max_open_positions", 0) or 0)
-            if max_pos > 0 and sym not in self._active_symbols:
-                if self._open_position_count(cfg) >= max_pos:
-                    self.write_log(f"已达最大持仓数 {max_pos}，拒单 {sym}")
-                    return ""
+            from quant.common.portfolio_guard import portfolio_allows_open
+
+            ok, reason = portfolio_allows_open(sym, cfg, active_symbols=self._active_symbols)
+            if not ok:
+                self.write_log(reason)
+                return ""
         return super().send_order(req)
 
     def on_position(self, position: PositionData) -> None:
@@ -219,7 +220,7 @@ class VnpyLiveGatewayMixin:
         sym = get_live_adapter().symbol_from_vt(trade.symbol)
         cfg = self._lane_cfg(sym)
         lane = getattr(cfg, "lane", None)
-        if lane in ("mtfmomo", "kama_trend", "squeeze_breakout"):
+        if lane in ("mtfmomo", "kama_trend", "squeeze_breakout", "breakout_donchian"):
             if not lane_live_enabled(cfg) or getattr(cfg, "shadow", False):
                 return
             self._persist_lane_trade(trade, cfg=cfg, sym=sym)

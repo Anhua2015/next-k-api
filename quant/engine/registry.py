@@ -45,16 +45,28 @@ class VnpyLanePlugin:
 
 
 def _load_plugins() -> List[VnpyLanePlugin]:
+    from quant.anchor_drift.register import ANCHOR_DRIFT_VNPY_PLUGIN
+    from quant.ibs_aggressive.register import IBS_AGGRESSIVE_VNPY_PLUGIN
+    from quant.ibs_conservative.register import IBS_CONSERVATIVE_VNPY_PLUGIN
+    from quant.ibs_tv.register import IBS_TV_VNPY_PLUGIN
     from quant.kama_trend.register import KAMA_TREND_VNPY_PLUGIN
     from quant.mtfmomo.register import MTFMOMO_VNPY_PLUGIN
     from quant.squeeze_breakout.register import SQUEEZE_BREAKOUT_VNPY_PLUGIN
+    from quant.breakout_donchian.register import BREAKOUT_DONCHIAN_VNPY_PLUGIN
+    from quant.ib50.register import IB50_VNPY_PLUGIN
     from quant.trading_orb.register import TRADING_ORB_VNPY_PLUGIN
 
     return [
         TRADING_ORB_VNPY_PLUGIN,
+        IB50_VNPY_PLUGIN,
+        ANCHOR_DRIFT_VNPY_PLUGIN,
         MTFMOMO_VNPY_PLUGIN,
         KAMA_TREND_VNPY_PLUGIN,
         SQUEEZE_BREAKOUT_VNPY_PLUGIN,
+        BREAKOUT_DONCHIAN_VNPY_PLUGIN,
+        IBS_CONSERVATIVE_VNPY_PLUGIN,
+        IBS_AGGRESSIVE_VNPY_PLUGIN,
+        IBS_TV_VNPY_PLUGIN,
     ]
 
 

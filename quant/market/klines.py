@@ -28,4 +28,5 @@ def interval_step_ms(interval: str) -> int:
         "15m": 900_000,
         "1h": 3_600_000,
         "1d": 86_400_000,
+        "1w": 604_800_000,
     }.get(interval.strip().lower(), 300_000)

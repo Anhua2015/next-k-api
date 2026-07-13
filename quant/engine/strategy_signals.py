@@ -17,11 +17,23 @@ LANE_TRADING_ORB = "trading_orb"
 LANE_MTFMOMO = "mtfmomo"
 LANE_KAMA_TREND = "kama_trend"
 LANE_SQUEEZE_BREAKOUT = "squeeze_breakout"
+LANE_BREAKOUT_DONCHIAN = "breakout_donchian"
+LANE_ANCHOR_DRIFT = "anchor_drift"
+LANE_IBS_CONSERVATIVE = "ibs_conservative"
+LANE_IBS_AGGRESSIVE = "ibs_aggressive"
+LANE_IBS_TV = "ibs_tv"
+LANE_IB50 = "ib50"
 VALID_LANES = {
     LANE_TRADING_ORB,
     LANE_MTFMOMO,
     LANE_KAMA_TREND,
     LANE_SQUEEZE_BREAKOUT,
+    LANE_BREAKOUT_DONCHIAN,
+    LANE_ANCHOR_DRIFT,
+    LANE_IBS_CONSERVATIVE,
+    LANE_IBS_AGGRESSIVE,
+    LANE_IBS_TV,
+    LANE_IB50,
 }
 
 
