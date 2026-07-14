@@ -18,6 +18,7 @@ LANE_MTFMOMO = "mtfmomo"
 LANE_KAMA_TREND = "kama_trend"
 LANE_SQUEEZE_BREAKOUT = "squeeze_breakout"
 LANE_BREAKOUT_DONCHIAN = "breakout_donchian"
+LANE_TIER_A_MOM = "tier_a_mom"
 LANE_ANCHOR_DRIFT = "anchor_drift"
 LANE_IBS_CONSERVATIVE = "ibs_conservative"
 LANE_IBS_AGGRESSIVE = "ibs_aggressive"
@@ -29,6 +30,7 @@ VALID_LANES = {
     LANE_KAMA_TREND,
     LANE_SQUEEZE_BREAKOUT,
     LANE_BREAKOUT_DONCHIAN,
+    LANE_TIER_A_MOM,
     LANE_ANCHOR_DRIFT,
     LANE_IBS_CONSERVATIVE,
     LANE_IBS_AGGRESSIVE,

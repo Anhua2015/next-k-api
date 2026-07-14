@@ -82,6 +82,10 @@ def cfg_for_lane(lane_name: str) -> Any:
         from quant.breakout_donchian.config import BreakoutDonchianConfig
 
         return BreakoutDonchianConfig.from_env()
+    if lane_name == "tier_a_mom":
+        from quant.tier_a_mom.config import TierAMomConfig
+
+        return TierAMomConfig.from_env()
     if lane_name == "anchor_drift":
         from quant.anchor_drift.config import AnchorDriftConfig
 
@@ -141,6 +145,10 @@ def lane_live_enabled(cfg: Any) -> bool:
         from quant.breakout_donchian.live_exec import live_enabled as dcn_live
 
         return dcn_live(cfg)
+    if lane == "tier_a_mom":
+        from quant.tier_a_mom.live_exec import live_enabled as tam_live
+
+        return tam_live(cfg)
     if lane == "anchor_drift":
         from quant.anchor_drift.live_exec import live_enabled as drift_live
 

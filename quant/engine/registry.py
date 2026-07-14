@@ -66,6 +66,7 @@ def _load_plugins() -> List[VnpyLanePlugin]:
         ("quant.kama_trend.register", "KAMA_TREND_VNPY_PLUGIN"),
         ("quant.squeeze_breakout.register", "SQUEEZE_BREAKOUT_VNPY_PLUGIN"),
         ("quant.breakout_donchian.register", "BREAKOUT_DONCHIAN_VNPY_PLUGIN"),
+        ("quant.tier_a_mom.register", "TIER_A_MOM_VNPY_PLUGIN"),
         ("quant.ibs_conservative.register", "IBS_CONSERVATIVE_VNPY_PLUGIN"),
         ("quant.ibs_aggressive.register", "IBS_AGGRESSIVE_VNPY_PLUGIN"),
         ("quant.ibs_tv.register", "IBS_TV_VNPY_PLUGIN"),
