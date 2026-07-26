@@ -6,7 +6,7 @@ One bot per watchlist address (default 1000U; override via watchlist paper_balan
   hard cap: |notional| ≤ equity × leverage_cap
 
 WS snapshots are ignored so deploy starts flat. Mark refresh updates uPnL and
-runs the daily-loss circuit breaker (same gate as fill ingest).
+optionally runs the per-bot hard-stop (OFF unless HL_DAILY_LOSS_PCT>0).
 """
 
 from __future__ import annotations
@@ -95,10 +95,13 @@ def paper_config() -> dict[str, Any]:
         "copy_scale": 1.0,
         "min_notional": _env_float("HL_MIN_NOTIONAL", 10.0),
         "leverage_adjustment": _env_float("HL_LEVERAGE_ADJUSTMENT", 1.0),
-        # Per-bot hard stop vs cycle anchor. Unlock via cooldown (desk rebase if enabled).
-        "daily_loss_pct": _env_float("HL_DAILY_LOSS_PCT", 0.25),
+        # Per-bot hard stop vs cycle anchor. OFF by default (7d explore: −25% halt
+        # cut desk +20%→+4% and worsened MDD). Re-enable via HL_DAILY_LOSS_PCT.
+        "daily_loss_pct": _env_float("HL_DAILY_LOSS_PCT", 0.0),
         "bot_halt_cooldown_sec": _env_float("HL_BOT_HALT_COOLDOWN_SEC", 6 * 3600),
-        # Desk-wide TP/SL off by default (7d backtest: clipped ~47%→~27% with little benefit).
+        # Desk peak-to-trough: flatten all when equity falls ≥N from running peak.
+        "portfolio_peak_dd_pct": _env_float("HL_PORTFOLIO_PEAK_DD_PCT", 0.15),
+        # Desk-wide TP/SL vs compound anchor (optional; off by default).
         # Re-enable via env: HL_PORTFOLIO_TP_PCT / _HARD / _SL / _HALT_COUNT_TRIGGER.
         "portfolio_tp_pct": _env_float("HL_PORTFOLIO_TP_PCT", 0.0),
         "portfolio_tp_hard_pct": _env_float("HL_PORTFOLIO_TP_HARD_PCT", 0.0),
@@ -110,9 +113,11 @@ def paper_config() -> dict[str, Any]:
         "target_empty_av": target_empty_av(),
         "target_inactive_hours": target_inactive_hours(),
         "note": (
-            "Fill-delta market follow. Risk: per-bot −25% → flatten+halt; "
-            "unlock after cooldown hours. "
-            "Desk soft/hard TP/SL and multi-halt rebase are OFF by default "
+            "Fill-delta market follow. Per-bot hard halt OFF by default "
+            "(set HL_DAILY_LOSS_PCT e.g. 0.25 to re-enable). "
+            "Desk peak drawdown flatten ON at −15% "
+            "(HL_PORTFOLIO_PEAK_DD_PCT; 0 disables). "
+            "Desk soft/hard TP/SL vs anchor OFF by default "
             "(set HL_PORTFOLIO_* env to re-enable). "
             "Target empty/inactive via target_health."
         ),
@@ -237,6 +242,33 @@ def _empty_bot(wallet: dict[str, Any], balance: float) -> dict[str, Any]:
     }
 
 
+def _rebase_desk_peak_anchor(data: dict[str, Any], bots: dict[str, Any], *, why: str) -> None:
+    """Reset desk peak/anchor to current equity after membership changes.
+
+    Without this, cutting seats (e.g. 11→4) leaves a stale high-water mark and the
+    peak-DD stop can false-trip flatten + Bitget sync.
+    """
+    for bot in bots.values():
+        if isinstance(bot, dict):
+            _recompute_bot(bot)
+    eq = 0.0
+    for bot in bots.values():
+        if not isinstance(bot, dict):
+            continue
+        try:
+            eq += float(bot.get("equity") or bot.get("balance") or 0)
+        except (TypeError, ValueError):
+            continue
+    eq = round(eq, 4)
+    data["portfolio_anchor_equity"] = eq
+    data["portfolio_peak_equity"] = eq
+    data["portfolio_peak_dd_pct"] = 0.0
+    data["portfolio_return_pct"] = 0.0
+    data["portfolio_soft_tp_taken"] = False
+    data["portfolio_copy_scale"] = 1.0
+    logger.info("desk peak/anchor rebase to %.2f (%s, bots=%s)", eq, why, len(bots))
+
+
 def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
     """Migrate legacy single-ledger → multi-bot, ensure every watchlist wallet has a bot."""
     cfg = paper_config()
@@ -268,6 +300,14 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
                 _apply_initial_balance(bot, init, default=legacy_bal)
             bots[bid] = bot
 
+    before_ids = set(bots.keys())
+    before_addrs = {
+        k: str((v or {}).get("address") or "").strip().lower()
+        for k, v in bots.items()
+        if isinstance(v, dict)
+    }
+    membership_changed = False
+
     want_ids: set[str] = set()
     for w in wallets:
         bid = str(w.get("id") or w.get("address") or "")[:32]
@@ -277,6 +317,7 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
         if bid not in bots:
             bots[bid] = _empty_bot(w, init)
             bots[bid]["paper_balance"] = init
+            membership_changed = True
         else:
             old_addr = str(bots[bid].get("address") or "").strip().lower()
             # Same bot_* id rebound to a new leader → wipe stale positions/fills
@@ -289,6 +330,7 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
                 )
                 bots[bid] = _empty_bot(w, init)
                 bots[bid]["paper_balance"] = init
+                membership_changed = True
             else:
                 bots[bid]["id"] = bid
                 bots[bid]["address"] = w.get("address")
@@ -341,6 +383,23 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
     # Drop bots removed from the watchlist (old dig ids clutter the desk)
     if want_ids:
         bots = {k: v for k, v in bots.items() if k in want_ids}
+
+    after_ids = set(bots.keys())
+    if before_ids != after_ids:
+        membership_changed = True
+    else:
+        for bid in after_ids:
+            cur = str((bots.get(bid) or {}).get("address") or "").strip().lower()
+            if before_addrs.get(bid) != cur:
+                membership_changed = True
+                break
+
+    if membership_changed:
+        _rebase_desk_peak_anchor(
+            data,
+            bots,
+            why=f"membership {sorted(before_ids)}→{sorted(after_ids)}",
+        )
 
     data["bots"] = bots
     return data
@@ -400,6 +459,19 @@ def _aggregate(data: dict[str, Any]) -> dict[str, Any]:
         data["portfolio_return_pct"] = round((equity - anchor_f) / anchor_f, 6)
     else:
         data["portfolio_return_pct"] = None
+    try:
+        peak_f = float(data.get("portfolio_peak_equity") or 0)
+    except (TypeError, ValueError):
+        peak_f = 0.0
+    if peak_f < equity:
+        peak_f = equity
+        if peak_f > 0:
+            data["portfolio_peak_equity"] = round(peak_f, 4)
+    data["portfolio_peak_equity"] = round(peak_f, 4) if peak_f > 0 else None
+    if peak_f > 1e-9:
+        data["portfolio_peak_dd_pct"] = round((peak_f - equity) / peak_f, 6)
+    else:
+        data["portfolio_peak_dd_pct"] = None
     data["portfolio_copy_scale"] = float(data.get("portfolio_copy_scale") or 1.0)
     data["portfolio_halted_count"] = sum(
         1 for b in bots.values() if isinstance(b, dict) and b.get("risk_halted")
@@ -1758,12 +1830,26 @@ def _ensure_portfolio_anchor(book: dict[str, Any], cfg: dict[str, Any] | None = 
 def _maybe_release_bot_halt_cooldown(
     book: dict[str, Any], cfg: dict[str, Any]
 ) -> list[str]:
-    """Unlock per-bot halt after cooldown; rebase that bot's −25% anchor."""
+    """Unlock per-bot halt after cooldown; rebase that bot's risk anchor.
+
+    When daily_loss_pct is OFF (≤0), clear any leftover halts immediately so
+    bots resume following after the feature is disabled.
+    """
+    released: list[str] = []
+    if float(cfg.get("daily_loss_pct") or 0) <= 0:
+        for bot in list(_halted_bots(book)):
+            _reset_bot_after_portfolio_rebase(bot)
+            released.append(str(bot.get("id") or ""))
+            logger.info(
+                "HL per-bot halt cleared %s (daily_loss_pct off)",
+                bot.get("id"),
+            )
+        return released
+
     cool = float(cfg.get("bot_halt_cooldown_sec") or 0)
     if cool <= 0:
         return []
     now = time.time()
-    released: list[str] = []
     for bot in _halted_bots(book):
         try:
             halted_at = float(bot.get("risk_halted_at") or 0)
@@ -1963,7 +2049,7 @@ def _hard_portfolio_rebase(
         if reason in ("portfolio_tp_hard", "portfolio_tp")
         else (
             "risk_sl_close"
-            if reason == "portfolio_sl"
+            if reason in ("portfolio_sl", "portfolio_peak_dd")
             else "risk_halt_close"
         )
     )
@@ -1979,6 +2065,8 @@ def _hard_portfolio_rebase(
 
     new_eq = _portfolio_equity(book, active_only=False)
     book["portfolio_anchor_equity"] = new_eq
+    book["portfolio_peak_equity"] = new_eq
+    book["portfolio_peak_dd_pct"] = 0.0
     book["portfolio_return_pct"] = 0.0
     book["portfolio_soft_tp_taken"] = False
     book["portfolio_copy_scale"] = 1.0
@@ -1986,12 +2074,15 @@ def _hard_portfolio_rebase(
         "reason": reason,
         "tripped_at": _now(),
         "anchor_before": round(anchor, 4),
+        "peak_before": round(anchor, 4) if reason == "portfolio_peak_dd" else None,
         "equity_before": round(equity, 4),
         "return_pct": round(ret, 6),
         "anchor_after": round(new_eq, 4),
+        "peak_after": round(new_eq, 4),
         "tp_soft_pct": float(cfg.get("portfolio_tp_pct") or 0),
         "tp_hard_pct": float(cfg.get("portfolio_tp_hard_pct") or 0),
         "sl_pct": float(cfg.get("portfolio_sl_pct") or 0),
+        "peak_dd_pct": float(cfg.get("portfolio_peak_dd_pct") or 0),
     }
     logger.warning(
         "HL portfolio HARD %s ret=%.2f%% equity=%.2f anchor=%.2f → rebase %.2f "
@@ -2012,15 +2103,19 @@ def _maybe_portfolio_risk(
     mids: dict[str, float],
     cfg: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Full-desk return (all bots). Soft TP cut+scale; hard TP/SL/multi-halt rebase."""
+    """Full-desk risk: peak DD flatten; soft TP; hard TP/SL/multi-halt rebase."""
     _maybe_release_bot_halt_cooldown(book, cfg)
     _ensure_portfolio_anchor(book, cfg)
 
     soft_tp = float(cfg.get("portfolio_tp_pct") or 0)
     hard_tp = float(cfg.get("portfolio_tp_hard_pct") or 0)
     sl = float(cfg.get("portfolio_sl_pct") or 0)
+    peak_dd_limit = float(cfg.get("portfolio_peak_dd_pct") or 0)
     soft_keep = float(cfg.get("portfolio_soft_reduce") or 0.5)
-    halt_trigger = int(cfg.get("portfolio_halt_count_trigger") or 3)
+    try:
+        halt_trigger = int(cfg.get("portfolio_halt_count_trigger") or 0)
+    except (TypeError, ValueError):
+        halt_trigger = 0
 
     halted = _halted_bots(book)
     active = _active_bots(book)
@@ -2039,6 +2134,19 @@ def _maybe_portfolio_risk(
     ret = (equity - anchor) / anchor if anchor > 1e-9 else 0.0
     book["portfolio_return_pct"] = round(ret, 6)
 
+    # Running peak for peak-to-trough desk stop.
+    try:
+        peak = float(book.get("portfolio_peak_equity") or 0)
+    except (TypeError, ValueError):
+        peak = 0.0
+    if peak < equity:
+        peak = equity
+    if peak <= 1e-9:
+        peak = max(equity, anchor)
+    book["portfolio_peak_equity"] = round(peak, 4)
+    peak_dd = (peak - equity) / peak if peak > 1e-9 else 0.0
+    book["portfolio_peak_dd_pct"] = round(peak_dd, 6)
+
     # ≥N bots halted (or no active left) → hard reset. Disabled when trigger ≤ 0.
     if halt_trigger > 0 and (
         len(halted) >= halt_trigger or (halted and not active)
@@ -2051,6 +2159,18 @@ def _maybe_portfolio_risk(
             ret=ret,
             anchor=anchor,
             equity=full_eq,
+        )
+
+    # Peak drawdown flatten (default −15% from high-water mark).
+    if peak_dd_limit > 0 and peak_dd >= peak_dd_limit:
+        return _hard_portfolio_rebase(
+            book,
+            mids,
+            cfg,
+            reason="portfolio_peak_dd",
+            ret=-peak_dd,
+            anchor=peak,
+            equity=equity,
         )
 
     if soft_tp <= 0 and hard_tp <= 0 and sl <= 0:
@@ -2124,7 +2244,7 @@ def _maybe_portfolio_risk(
 def _maybe_risk_halt(
     bot: dict[str, Any], mids: dict[str, float], cfg: dict[str, Any]
 ) -> list[dict[str, Any]] | None:
-    """Per-bot hard stop: −daily_loss_pct vs risk_anchor_equity (default 25%).
+    """Per-bot hard stop: −daily_loss_pct vs risk_anchor_equity (OFF when ≤0).
 
     Halt until portfolio hard rebase OR bot_halt_cooldown_sec.
     """

@@ -1,6 +1,6 @@
 {
-  "updated": "2026-07-24",
-  "note": "Desk A–K. Bitget live hard-cap default 10 (K needs HL_BITGET_MAX_SUBACCOUNTS>=11). Enable via enabled:true or HL_BITGET_SUB_<ID>_ENABLED=1.",
+  "updated": "2026-07-26",
+  "note": "Elite4 active bot_ids: bot_a (stocks bb77), bot_b, bot_d, bot_k. Other subaccounts stay enabled:false. Bitget live hard-cap default 10.",
   "subaccounts": [
     {
       "id": "A",
