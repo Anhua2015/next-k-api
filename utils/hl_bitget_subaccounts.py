@@ -63,19 +63,11 @@ def max_subaccounts() -> int:
 
 
 def _config_path() -> Path:
-    """Prefer repo config when newer than DATA_DIR copy (same rule as watchlist)."""
+    """Prefer repo config when present (same deploy-config rule as watchlist)."""
     root = PROJECT_ROOT / CONFIG_NAME
-    data = resolve_data_dir() / CONFIG_NAME
-    if root.is_file() and data.is_file():
-        try:
-            if root.stat().st_mtime >= data.stat().st_mtime:
-                return root
-        except OSError:
-            return root
-        return data
     if root.is_file():
         return root
-    return data
+    return resolve_data_dir() / CONFIG_NAME
 
 
 def invalidate_cache() -> None:

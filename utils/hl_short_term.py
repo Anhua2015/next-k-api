@@ -36,23 +36,15 @@ def resolve_data_dir() -> Path:
 
 
 def _watchlist_path() -> Path:
-    """Watchlist is deploy config: prefer repo file when newer or when DATA_DIR has none.
+    """Watchlist is deploy config: always prefer the repo copy when present.
 
     Runtime volumes often keep a stale ``hl_short_term_watchlist.json`` that would
-    otherwise shadow a pushed A–J update forever.
+    otherwise shadow a pushed seat update forever if DATA_DIR mtime is newer.
     """
     root = PROJECT_ROOT / WATCHLIST_NAME
-    data = resolve_data_dir() / WATCHLIST_NAME
-    if root.is_file() and data.is_file():
-        try:
-            if root.stat().st_mtime >= data.stat().st_mtime:
-                return root
-        except OSError:
-            return root
-        return data
     if root.is_file():
         return root
-    return data
+    return resolve_data_dir() / WATCHLIST_NAME
 
 
 def _state_path() -> Path:
