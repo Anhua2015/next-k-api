@@ -1,6 +1,6 @@
 {
   "updated": "2026-07-27",
-  "note": "HT7 active bot_ids: bot_a BTC, bot_b majors+MU, bot_c majors+stocks, bot_d BTC/HYPE+stocks, bot_e majors basket, bot_f stocks, bot_k AVAX. Other subaccounts stay enabled:false. Bitget live hard-cap default 10.",
+  "note": "Return4 active bot_ids: bot_a BTC 20bc9c, bot_b majors b31506, bot_c d05d2e, bot_k AVAX. Other subaccounts stay enabled:false. Bitget live hard-cap default 10.",
   "subaccounts": [
     {
       "id": "A",
