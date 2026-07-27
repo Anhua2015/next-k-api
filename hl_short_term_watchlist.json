@@ -1,8 +1,8 @@
 {
-  "updated": "2026-07-26",
+  "updated": "2026-07-27",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Elite6 (2026-07-26): A stocks, B HYPE/BTC, C WLD, D BTC, E ACE/alts, K AVAX. Per-bot hard halt OFF; desk peak DD −15% flatten. paper_balance=1000U each. Not financial advice.",
+  "note": "Elite6 (2026-07-27): A stocks, B HYPE/BTC, C WLD, D BTC, E ETH (b7e557), K AVAX. Per-bot hard halt OFF; desk peak DD −15% flatten. paper_balance=1000U each. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -59,16 +59,17 @@
     },
     {
       "id": "bot_e",
-      "address": "0xc9c78160120cd6ecf3dea892e9ae5af4115bf5f8",
+      "address": "0xb7e557e94fa6a8f19b7596da8d0d7be363131243",
       "priority": 5,
       "paper_balance": 1000,
-      "style": "day · ACE/KAITO/PUMP",
-      "why": "5th-screen · WR96% · trips26 · complementary alts · paper+13%",
-      "coins": null,
-      "watch": ["alts Bitget map", "pace"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xc9c78160120cd6ecf3dea892e9ae5af4115bf5f8",
-      "ht_style": "day_trader",
-      "tag": "日内"
+      "style": "swing · ETH",
+      "why": "replace ACE spray · ETH only · 7d WR100%/trips10 paper≈+67% · 30d WR73% but paper MDD≈48% — hot streak, watch DD",
+      "coins": ["ETH"],
+      "watch": ["ETH Bitget", "fill noise", "30d MDD"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xb7e557e94fa6a8f19b7596da8d0d7be363131243",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": ["concentrated"]
     },
     {
       "id": "bot_k",
@@ -86,6 +87,10 @@
     }
   ],
   "reject_for_now": [
+    {
+      "address": "0xc9c78160120cd6ecf3dea892e9ae5af4115bf5f8",
+      "reason": "Dropped 2026-07-27 — ex bot_e ACE/alts spray; replaced by ETH b7e557"
+    },
     {
       "address": "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
       "reason": "Dropped 2026-07-26 elite4 — ex bot_a; cut for 少而精"

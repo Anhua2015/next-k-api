@@ -1,6 +1,6 @@
 {
-  "updated": "2026-07-26",
-  "note": "Elite6 active bot_ids: bot_a stocks, bot_b, bot_c WLD, bot_d, bot_e ACE/alts, bot_k. Other subaccounts stay enabled:false. Bitget live hard-cap default 10.",
+  "updated": "2026-07-27",
+  "note": "Elite6 active bot_ids: bot_a stocks, bot_b, bot_c WLD, bot_d, bot_e ETH, bot_k. Other subaccounts stay enabled:false. Bitget live hard-cap default 10.",
   "subaccounts": [
     {
       "id": "A",
