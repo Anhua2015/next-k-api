@@ -1,6 +1,6 @@
 {
   "updated": "2026-07-28",
-  "note": "Active: A/B/C/D/K core + stable90 E/F/G + H/I. All enabled:false until live Bitget on.",
+  "note": "Active: A–D/K + E–I + J/L stable-quant append. All enabled:false until live Bitget on.",
   "subaccounts": [
     {
       "id": "A",
@@ -99,6 +99,15 @@
       "coins": null,
       "enabled": false,
       "env_prefix": "BITGET_SUB_K",
+      "scale": 1.0
+    },
+    {
+      "id": "L",
+      "label": "Bot L",
+      "bot_id": "bot_l",
+      "coins": null,
+      "enabled": false,
+      "env_prefix": "BITGET_SUB_L",
       "scale": 1.0
     }
   ]

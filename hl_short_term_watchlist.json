@@ -2,7 +2,7 @@
   "updated": "2026-07-28",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Return4+D+K + stable90 E–G + keep H/I (2026-07-28): E=27aef2 BTC, F=fd9760 mix, G=f27cd4 stocks; dropped b1169c/45855f/dc9bf1. paper_balance=1000U each. Not financial advice.",
+  "note": "A/B/C/D/K + stable E–G + H/I + new J/L (2026-07-28): J=920fa6 BTC/XRP/ZEC, L=991068 multi quant. paper 1000U each. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -138,6 +138,32 @@
       "ht_style": "day_trader",
       "tag": "日内",
       "style_tags": ["concentrated"]
+    },
+    {
+      "id": "bot_j",
+      "address": "0x920fa68300c8aa95c4563e0daf79a0b0e51f0cfe",
+      "priority": 11,
+      "paper_balance": 1000,
+      "style": "swing · BTC/XRP/ZEC",
+      "why": "full-net stable+quant 2026-07-28 · paper90≈+126% MDD≈20% · few coins",
+      "coins": null,
+      "watch": ["BTC/XRP/ZEC", "Bitget map"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x920fa68300c8aa95c4563e0daf79a0b0e51f0cfe",
+      "ht_style": "swing_trader",
+      "tag": "波段"
+    },
+    {
+      "id": "bot_l",
+      "address": "0x991068726c19aa2a799ee8636b2b5cf06bdf297d",
+      "priority": 12,
+      "paper_balance": 1000,
+      "style": "swing · multi quant",
+      "why": "full-net stable+quant 2026-07-28 · paper90≈+38% MDD≈13% trips63 · many xyz legs",
+      "coins": null,
+      "watch": ["multi legs", "xyz stocks"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x991068726c19aa2a799ee8636b2b5cf06bdf297d",
+      "ht_style": "swing_trader",
+      "tag": "波段"
     }
   ],
   "reject_for_now": [
