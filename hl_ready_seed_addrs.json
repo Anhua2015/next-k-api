@@ -1,16 +1,10 @@
 {
-  "note": "Force-include in desk candidate deep scan so online ready can match desk A–K. Updated 2026-07-24.",
+  "note": "Force-include desk seeds for deep scan. Active Return4 + D: A/B/C/D/K. Updated 2026-07-28.",
   "addrs": [
-    "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
-    "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
-    "0x8ae835143debfe89b50d8913114eafda33347a34",
-    "0x202c47f7c66e5d678db3e051deabc25478863022",
-    "0xa567027c7a7a5f3b2e2e58de823cef0c3d5e1e1f",
-    "0xfbab890b61dc2e912718295dcdf45f499650ce9d",
-    "0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
-    "0x6dbbefad3d24da625fa233c070678ab1938fcd38",
-    "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
-    "0x9e16d69bafe80636c5be57f6ded44f45a6ef625e",
+    "0x20bc9cd229dfd681740834d9b4f55641ce435da3",
+    "0xb315067ae6b8ae6dfafd052b630d95b72a91cc25",
+    "0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
+    "0xcb3ee3f1b22cdff8b6ca4839cd0784d34b85dea9",
     "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23"
   ]
 }

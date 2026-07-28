@@ -1,8 +1,8 @@
 {
-  "updated": "2026-07-27",
+  "updated": "2026-07-28",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Return4 (2026-07-27): A=BTC 20bc9c, B=majors b31506, C=majors+stocks d05d2e, K=AVAX keep. 90d paper rank · Bitget-ok · anti-spam. Per-bot hard halt OFF; desk peak DD −15% flatten. paper_balance=1000U each. Not financial advice.",
+  "note": "Return4 + D (2026-07-28): A=BTC 20bc9c, B=majors b31506, C=majors+stocks d05d2e, D=cb3ee3 user-add BTC, K=AVAX. paper_balance=1000U each. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -45,9 +45,23 @@
       "tag": "波段"
     },
     {
+      "id": "bot_d",
+      "address": "0xcb3ee3f1b22cdff8b6ca4839cd0784d34b85dea9",
+      "priority": 4,
+      "paper_balance": 1000,
+      "style": "swing · BTC",
+      "why": "user-add 2026-07-28 · AV≈22万 · BTC-led · open pos",
+      "coins": null,
+      "watch": ["BTC Bitget", "xyz:XYZ100"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xcb3ee3f1b22cdff8b6ca4839cd0784d34b85dea9",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": ["concentrated"]
+    },
+    {
       "id": "bot_k",
       "address": "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
-      "priority": 4,
+      "priority": 5,
       "paper_balance": 1000,
       "style": "day · AVAX",
       "why": "return#1 · keep K · paper90≈+3158% · AVAX concentrated",
