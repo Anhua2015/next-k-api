@@ -113,8 +113,9 @@ def paper_config() -> dict[str, Any]:
         "target_empty_av": target_empty_av(),
         "target_inactive_hours": target_inactive_hours(),
         "note": (
-            "Fill-delta market follow. Per-bot hard halt OFF by default "
-            "(set HL_DAILY_LOSS_PCT e.g. 0.25 to re-enable). "
+            "Fill-delta market follow. Per-bot hard stop OFF by default "
+            "(set HL_DAILY_LOSS_PCT e.g. 0.25 to re-enable): flatten only, "
+            "rebase anchor, keep following — no pause. "
             "Desk peak drawdown flatten ON at −15% "
             "(HL_PORTFOLIO_PEAK_DD_PCT; 0 disables). "
             "Desk soft/hard TP/SL vs anchor OFF by default "
@@ -1611,10 +1612,11 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                 _stamp_skipped_fills(bot, fresh, reason="no_snap", note_activity=False)
                 continue
 
+            # Flatten-only hard stop: never pause — still apply this fill batch
+            # (e.g. target flip after our stop) on the rebased equity.
             halt_rows = _maybe_risk_halt(bot, mids, cfg)
-            if halt_rows is not None:
+            if halt_rows:
                 logged.extend(halt_rows)
-                continue
 
             size_mult = _book_copy_scale(book, cfg)
             ratio = _copy_ratio(bot, cfg, size_mult=size_mult)
@@ -2246,9 +2248,18 @@ def _maybe_risk_halt(
 ) -> list[dict[str, Any]] | None:
     """Per-bot hard stop: −daily_loss_pct vs risk_anchor_equity (OFF when ≤0).
 
-    Halt until portfolio hard rebase OR bot_halt_cooldown_sec.
+    Flatten open legs, rebase the risk anchor to post-flat equity, and keep
+    following — no pause / risk_halted lockout.
     """
     if float(cfg.get("daily_loss_pct") or 0) <= 0:
+        # Clear any leftover pause from older builds so follow resumes.
+        if bot.get("risk_halted"):
+            _reset_bot_after_portfolio_rebase(bot)
+        return None
+
+    # Legacy pause flag: unlock immediately (flatten-only policy).
+    if bot.get("risk_halted") and not (bot.get("positions") or {}):
+        _reset_bot_after_portfolio_rebase(bot)
         return None
 
     _roll_day(bot, cfg)
@@ -2259,33 +2270,25 @@ def _maybe_risk_halt(
         bot["risk_anchor_equity"] = round(anchor, 4)
     equity_now = float(bot.get("equity") or sizing)
     loss_pct = 0.0 if anchor <= 0 else (anchor - equity_now) / anchor
-    if not (
-        bot.get("risk_halted")
-        or (cfg["daily_loss_pct"] > 0 and loss_pct >= cfg["daily_loss_pct"])
-    ):
+    if not (cfg["daily_loss_pct"] > 0 and loss_pct >= cfg["daily_loss_pct"]):
         return None
-
-    already = bot.get("risk_halted") and not (bot.get("positions") or {})
-    bot["risk_halted"] = True
-    if already:
-        return []
 
     rows = _flatten_bot_positions(
         bot,
         mids,
         action="risk_halt_close",
         risk_reason="bot_hard_stop",
-        keep_halted=True,
+        keep_halted=False,
     )
-    bot["risk_halted"] = True
-    bot["risk_halted_at"] = time.time()
+    _reset_bot_after_portfolio_rebase(bot)
     logger.warning(
-        "HL per-bot hard stop %s loss_pct=%.1f%% equity=%.2f risk_anchor=%.2f "
-        "(halt until portfolio rebase or cooldown)",
+        "HL per-bot hard stop %s loss_pct=%.1f%% equity=%.2f risk_anchor_was=%.2f "
+        "→ flatten + rebase anchor=%.2f (keep following)",
         bot.get("id"),
         loss_pct * 100.0,
         equity_now,
         anchor,
+        float(bot.get("risk_anchor_equity") or 0),
     )
     return rows
 
@@ -2387,9 +2390,8 @@ def _mirror_target_book(
     Disallowed holdings (watchlist coins filter) are always flattened, even when
     out of the current fill scope — otherwise allowlist changes never clear them.
     """
-    halt_rows = _maybe_risk_halt(bot, mids, cfg)
-    if halt_rows is not None:
-        return halt_rows
+    # Hard stop flattens then rebases; continue aligning so we can reopen.
+    halt_rows = _maybe_risk_halt(bot, mids, cfg) or []
 
     _recompute_bot(bot)
     target_av = float(snap.get("account_value") or 0)
@@ -2630,4 +2632,4 @@ def _mirror_target_book(
     bot["positions"] = new_positions
     bot["fills"] = fills[:300]
     _recompute_bot(bot)
-    return rows
+    return list(halt_rows) + rows
