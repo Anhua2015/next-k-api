@@ -1,6 +1,6 @@
 {
-  "updated": "2026-07-27",
-  "note": "Active bot_ids: bot_a BTC, bot_b majors, bot_c, bot_d cb3ee3 BTC, bot_k AVAX. Other subaccounts stay enabled:false.",
+  "updated": "2026-07-28",
+  "note": "Active bot_ids: A/B/C/D/K core + E–I quant-ish append. All enabled:false until live Bitget on.",
   "subaccounts": [
     {
       "id": "A",

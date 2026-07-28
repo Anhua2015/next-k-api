@@ -2,7 +2,7 @@
   "updated": "2026-07-28",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Return4 + D (2026-07-28): A=BTC 20bc9c, B=majors b31506, C=majors+stocks d05d2e, D=cb3ee3 user-add BTC, K=AVAX. paper_balance=1000U each. Not financial advice.",
+  "note": "Return4+D+K + quant-ish E–I (2026-07-28): keep A/B/C/D/K; append E=b1169c HYPE, F=45855f multi, G=dc9bf1 majors+stocks, H=7b10a7 xyz stocks, I=202c47 BTC. paper_balance=1000U each. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -71,6 +71,73 @@
       "ht_style": "day_trader",
       "tag": "日内",
       "style_tags": ["concentrated"]
+    },
+    {
+      "id": "bot_e",
+      "address": "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
+      "priority": 6,
+      "paper_balance": 1000,
+      "style": "day · HYPE/stocks",
+      "why": "user-add quant-ish 2026-07-28 · 7d WR93% MDD0.5% · HYPE-led",
+      "coins": null,
+      "watch": ["HYPE", "xyz stocks float"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
+      "ht_style": "day_trader",
+      "tag": "日内",
+      "style_tags": ["concentrated"]
+    },
+    {
+      "id": "bot_f",
+      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+      "priority": 7,
+      "paper_balance": 1000,
+      "style": "day · multi basket",
+      "why": "user-add quant-ish 2026-07-28 · 7d WR83% · high fill rate ~34/h",
+      "coins": null,
+      "watch": ["many legs", "Bitget map"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+      "ht_style": "day_trader",
+      "tag": "日内"
+    },
+    {
+      "id": "bot_g",
+      "address": "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
+      "priority": 8,
+      "paper_balance": 1000,
+      "style": "day · majors+stocks",
+      "why": "user-add quant-ish 2026-07-28 · 7d WR82% pnl~+2.4万 · watch SKHY uPnL",
+      "coins": null,
+      "watch": ["BTC/ETH", "xyz:SKHY"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
+      "ht_style": "day_trader",
+      "tag": "日内"
+    },
+    {
+      "id": "bot_h",
+      "address": "0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
+      "priority": 9,
+      "paper_balance": 1000,
+      "style": "day · xyz stocks",
+      "why": "user-add quant-ish 2026-07-28 · 7d WR81% pnl~+4.8万 · open stock DD large",
+      "coins": null,
+      "watch": ["xyz:SNDK/INTC", "large uPnL"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
+      "ht_style": "day_trader",
+      "tag": "日内"
+    },
+    {
+      "id": "bot_i",
+      "address": "0x202c47f7c66e5d678db3e051deabc25478863022",
+      "priority": 10,
+      "paper_balance": 1000,
+      "style": "day · BTC",
+      "why": "user-add quant-ish 2026-07-28 · 7d WR87% pure BTC · easiest mirror",
+      "coins": ["BTC"],
+      "watch": ["BTC Bitget", "40x"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x202c47f7c66e5d678db3e051deabc25478863022",
+      "ht_style": "day_trader",
+      "tag": "日内",
+      "style_tags": ["concentrated"]
     }
   ],
   "reject_for_now": [
@@ -103,24 +170,12 @@
       "reason": "Dropped 2026-07-27 HT7 — ex bot_a stocks; replaced by HT recommend set"
     },
     {
-      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
-      "reason": "Dropped 2026-07-27 HT7 — ex bot_b"
-    },
-    {
       "address": "0xb27d15293cfb8268ced50bcc0c8df98ed1f5f6b0",
       "reason": "Dropped 2026-07-27 HT7 — ex bot_c WLD"
     },
     {
-      "address": "0x202c47f7c66e5d678db3e051deabc25478863022",
-      "reason": "Dropped 2026-07-27 HT7 — ex bot_d BTC"
-    },
-    {
       "address": "0xc9c78160120cd6ecf3dea892e9ae5af4115bf5f8",
       "reason": "Dropped 2026-07-27 — ex bot_e ACE/alts spray; replaced by ETH b7e557"
-    },
-    {
-      "address": "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
-      "reason": "Dropped 2026-07-26 elite4 — ex bot_a; cut for 少而精"
     },
     {
       "address": "0x8ae835143debfe89b50d8913114eafda33347a34",
@@ -135,16 +190,8 @@
       "reason": "Dropped 2026-07-26 — ex bot_f BTC; 7d paper −11% and enlarged desk MDD"
     },
     {
-      "address": "0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
-      "reason": "Dropped 2026-07-26 elite4 — ex bot_g stocks; replaced by bb77"
-    },
-    {
       "address": "0x6dbbefad3d24da625fa233c070678ab1938fcd38",
       "reason": "Dropped 2026-07-26 elite4 — ex bot_h"
-    },
-    {
-      "address": "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
-      "reason": "Dropped 2026-07-26 elite4 — ex bot_i"
     },
     {
       "address": "0x9e16d69bafe80636c5be57f6ded44f45a6ef625e",

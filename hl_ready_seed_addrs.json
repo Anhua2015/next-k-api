@@ -1,10 +1,15 @@
-{
-  "note": "Force-include desk seeds for deep scan. Active Return4 + D: A/B/C/D/K. Updated 2026-07-28.",
+﻿{
+  "note": "Force-include desk seeds for deep scan. Active A/B/C/D/K + quant-ish E–I. Updated 2026-07-28.",
   "addrs": [
     "0x20bc9cd229dfd681740834d9b4f55641ce435da3",
     "0xb315067ae6b8ae6dfafd052b630d95b72a91cc25",
     "0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
     "0xcb3ee3f1b22cdff8b6ca4839cd0784d34b85dea9",
-    "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23"
+    "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
+    "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
+    "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+    "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
+    "0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
+    "0x202c47f7c66e5d678db3e051deabc25478863022"
   ]
 }
