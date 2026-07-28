@@ -1,6 +1,6 @@
 {
   "updated": "2026-07-28",
-  "note": "Active bot_ids: A/B/C/D/K core + E–I quant-ish append. All enabled:false until live Bitget on.",
+  "note": "Active: A/B/C/D/K core + stable90 E/F/G + H/I. All enabled:false until live Bitget on.",
   "subaccounts": [
     {
       "id": "A",

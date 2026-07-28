@@ -2,7 +2,7 @@
   "updated": "2026-07-28",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Return4+D+K + quant-ish E–I (2026-07-28): keep A/B/C/D/K; append E=b1169c HYPE, F=45855f multi, G=dc9bf1 majors+stocks, H=7b10a7 xyz stocks, I=202c47 BTC. paper_balance=1000U each. Not financial advice.",
+  "note": "Return4+D+K + stable90 E–G + keep H/I (2026-07-28): E=27aef2 BTC, F=fd9760 mix, G=f27cd4 stocks; dropped b1169c/45855f/dc9bf1. paper_balance=1000U each. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -74,43 +74,43 @@
     },
     {
       "id": "bot_e",
-      "address": "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
+      "address": "0x27aef25d774abc98ed55ec926c3e1461eca4184a",
       "priority": 6,
       "paper_balance": 1000,
-      "style": "day · HYPE/stocks",
-      "why": "user-add quant-ish 2026-07-28 · 7d WR93% MDD0.5% · HYPE-led",
-      "coins": null,
-      "watch": ["HYPE", "xyz stocks float"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
-      "ht_style": "day_trader",
-      "tag": "日内",
+      "style": "swing · BTC",
+      "why": "stable90 swap 2026-07-28 · paper90≈+52% MDD≈13% WR83% · pure BTC",
+      "coins": ["BTC"],
+      "watch": ["BTC Bitget", "low MDD"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x27aef25d774abc98ed55ec926c3e1461eca4184a",
+      "ht_style": "swing_trader",
+      "tag": "波段",
       "style_tags": ["concentrated"]
     },
     {
       "id": "bot_f",
-      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+      "address": "0xfd97600ac44b3c4e20ac1a5f23e3b18d10fa5912",
       "priority": 7,
       "paper_balance": 1000,
-      "style": "day · multi basket",
-      "why": "user-add quant-ish 2026-07-28 · 7d WR83% · high fill rate ~34/h",
+      "style": "swing · mix",
+      "why": "stable90 swap 2026-07-28 · paper90≈+42% MDD≈27% WR86% trips29",
       "coins": null,
-      "watch": ["many legs", "Bitget map"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x45855f715af1045a71d83e3ea16cbb5edf89549a",
-      "ht_style": "day_trader",
-      "tag": "日内"
+      "watch": ["BTC/HYPE", "Bitget map"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xfd97600ac44b3c4e20ac1a5f23e3b18d10fa5912",
+      "ht_style": "swing_trader",
+      "tag": "波段"
     },
     {
       "id": "bot_g",
-      "address": "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
+      "address": "0xf27cd4a3a17c2ab6cc7e0cd7f64470c9eab68586",
       "priority": 8,
       "paper_balance": 1000,
-      "style": "day · majors+stocks",
-      "why": "user-add quant-ish 2026-07-28 · 7d WR82% pnl~+2.4万 · watch SKHY uPnL",
+      "style": "swing · stocks",
+      "why": "stable90 swap 2026-07-28 · paper90≈+48% MDD≈30% WR85% · xyz sleeve",
       "coins": null,
-      "watch": ["BTC/ETH", "xyz:SKHY"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
-      "ht_style": "day_trader",
-      "tag": "日内"
+      "watch": ["xyz stocks", "MDD boundary"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xf27cd4a3a17c2ab6cc7e0cd7f64470c9eab68586",
+      "ht_style": "swing_trader",
+      "tag": "波段"
     },
     {
       "id": "bot_h",
@@ -142,16 +142,16 @@
   ],
   "reject_for_now": [
     {
-      "address": "0x27aef25d774abc98ed55ec926c3e1461eca4184a",
-      "reason": "Dropped 2026-07-27 Return4 — ex HT7 bot_a BTC; replaced by higher-paper 20bc9c"
+      "address": "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
+      "reason": "Dropped 2026-07-28 stable90 — ex bot_e; 7d WR93% but 90d net loss"
     },
     {
-      "address": "0xfd97600ac44b3c4e20ac1a5f23e3b18d10fa5912",
-      "reason": "Dropped 2026-07-27 Return4 — ex HT7 bot_b; weak paper vs return screen"
+      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+      "reason": "Dropped 2026-07-28 stable90 — ex bot_f; multi-leg high MDD path"
     },
     {
-      "address": "0xf27cd4a3a17c2ab6cc7e0cd7f64470c9eab68586",
-      "reason": "Dropped 2026-07-27 Return4 — ex HT7 bot_d"
+      "address": "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
+      "reason": "Dropped 2026-07-28 stable90 — ex bot_g; replaced by f27cd4"
     },
     {
       "address": "0x2cef0a7f84e722c77b271862da5fe2387028fa20",
