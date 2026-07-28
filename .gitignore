@@ -44,6 +44,9 @@ s6_signals_history.json
 
 # Runtime data files (auto-generated)
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 oi_radar_snapshot.json
 heat_history.json
 zct_vwap_signals_snapshot.json
