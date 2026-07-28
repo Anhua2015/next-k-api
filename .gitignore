@@ -55,6 +55,7 @@ hl_short_term_state.json
 hl_short_term_events.jsonl
 hl_short_term_board.json
 hl_paper_copy.json
+hl_consensus_paper.json
 
 zec_walk_1d.json
 zct_vwap_asset_pool.json
