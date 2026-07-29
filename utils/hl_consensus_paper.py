@@ -1,18 +1,15 @@
-"""Desk consensus paper sleeve — WS book + sticky edge opens.
+"""Desk consensus paper — Purffle-style rules, WS position book.
 
-Position votes come from an in-memory book:
-  - seeded / reconciled via REST clearinghouseState
-  - live-updated from watchlist userFills (WebSocket)
-Periodic ticks mostly read the cache (no N×REST). Fill ticks are cache-only.
-
-Anti-churn defaults: min lead≥2, confirm ticks, exit only on flip,
-min hold / cooldown, taker fee bps, full equity × leverage.
+Mirrors Chamanrajragu/purffle-copybot consensus logic:
+  long-only, ≥MIN_AGREE elites long → open, long_count < MIN_AGREE → exit,
+  hard-stop −10%, ~20% of cash, 0.1% fee/side.
+Difference: elite positions come from the desk WS book (+ REST seed/reconcile)
+instead of a 5-minute REST poll; execution marks use HL mid (paper).
 """
 from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import threading
 import time
@@ -80,42 +77,41 @@ def consensus_enabled() -> bool:
 
 
 def consensus_config() -> dict[str, Any]:
+    """Defaults match purffle_copytrade.py (WS book instead of 5m poll)."""
     coins_raw = (os.getenv("HL_CONSENSUS_COINS") or "").strip()
     allow = (
         {c.strip().upper() for c in coins_raw.split(",") if c.strip()}
         if coins_raw
         else None
     )
+    # Fee: Purffle SPOT_FEE=0.001 → 10 bps/side. Prefer FEE_RATE, else FEE_BPS.
+    fee_rate = _env_float("HL_CONSENSUS_FEE_RATE", -1.0)
+    if fee_rate < 0:
+        fee_rate = _env_float("HL_CONSENSUS_FEE_BPS", 10.0) / 10_000.0
     return {
         "enabled": consensus_enabled(),
+        "mode": "purffle_long_ws",
         "balance": _env_float("HL_CONSENSUS_BALANCE", 5000.0),
-        "min_agree": max(2, _env_int("HL_CONSENSUS_MIN_AGREE", 3)),
-        # Require long-short gap (e.g. 3/1 ok, 3/2 not) to cut 3↔2 churn.
-        "min_lead": max(1, _env_int("HL_CONSENSUS_MIN_LEAD", 2)),
-        # Full equity × leverage (default 全仓 2x).
-        "position_pct": min(1.0, max(0.05, _env_float("HL_CONSENSUS_POS_PCT", 1.0))),
-        "leverage": min(5.0, max(1.0, _env_float("HL_CONSENSUS_LEVERAGE", 2.0))),
-        "max_positions": max(1, _env_int("HL_CONSENSUS_MAX_POS", 1)),
+        "min_agree": max(2, _env_int("HL_CONSENSUS_MIN_AGREE", 2)),
+        "position_pct": min(0.5, max(0.05, _env_float("HL_CONSENSUS_POS_PCT", 0.20))),
+        "leverage": 1.0,
+        "max_positions": max(1, _env_int("HL_CONSENSUS_MAX_POS", 5)),
         "hard_stop_pct": max(0.02, _env_float("HL_CONSENSUS_HARD_STOP", 0.10)),
-        "min_vote_ntl": max(100.0, _env_float("HL_CONSENSUS_MIN_VOTE_NTL", 5_000.0)),
-        "min_our_ntl": max(10.0, _env_float("HL_CONSENSUS_MIN_NTL", 50.0)),
+        # Purffle counts any open long; keep a tiny floor to drop dust.
+        "min_vote_ntl": max(0.0, _env_float("HL_CONSENSUS_MIN_VOTE_NTL", 1.0)),
+        "min_our_ntl": max(5.0, _env_float("HL_CONSENSUS_MIN_NTL", 5.0)),
         "allow_xyz": _env_bool("HL_CONSENSUS_ALLOW_XYZ", False),
         "allow_coins": sorted(allow) if allow else None,
         "tick_sec": max(30.0, _env_float("HL_CONSENSUS_TICK_SEC", 90.0)),
         "fill_tick_sec": max(5.0, _env_float("HL_CONSENSUS_FILL_TICK_SEC", 15.0)),
         "reconcile_sec": max(60.0, _env_float("HL_CONSENSUS_RECONCILE_SEC", 600.0)),
-        "edge_open_only": _env_bool("HL_CONSENSUS_EDGE_OPEN", True),
-        "scale_by_agree": _env_bool("HL_CONSENSUS_SCALE_AGREE", False),
-        "confirm_ticks": max(1, _env_int("HL_CONSENSUS_CONFIRM_TICKS", 2)),
-        "exit_only_flip": _env_bool("HL_CONSENSUS_EXIT_ONLY_FLIP", True),
-        "min_hold_sec": max(0.0, _env_float("HL_CONSENSUS_MIN_HOLD_SEC", 1800.0)),
-        "max_hold_sec": max(0.0, _env_float("HL_CONSENSUS_MAX_HOLD_SEC", 14400.0)),
-        "cooldown_sec": max(0.0, _env_float("HL_CONSENSUS_COOLDOWN_SEC", 1800.0)),
-        # Per-side taker fee in bps (3.5 = 0.035%).
-        "fee_bps": max(0.0, _env_float("HL_CONSENSUS_FEE_BPS", 3.5)),
+        "fee_rate": max(0.0, fee_rate),
+        "fee_bps": round(max(0.0, fee_rate) * 10_000.0, 4),
+        "long_only": True,
         "pool": "watchlist",
         "venue": "hl_paper_mid",
         "book": "ws_cache+rest_reconcile",
+        "rules": "purffle_copybot",
     }
 
 
@@ -384,7 +380,7 @@ def _empty_ledger(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     bal = float(cfg["balance"])
     return {
         "updated_at": _now_iso(),
-        "mode": "desk_consensus_ws",
+        "mode": "purffle_long_ws",
         "config": cfg,
         "cash": round(bal, 4),
         "equity": round(bal, 4),
@@ -394,25 +390,13 @@ def _empty_ledger(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "positions": {},
         "fills": [],
         "signals": {},
-        "prev_signals": {},
-        "signal_streak": {},
-        "cooldowns": {},
         "fees_paid": 0.0,
-        "warmed": False,
         "elites": [],
         "last_tick_at": None,
         "last_tick_note": None,
         "last_tick_reason": None,
         "book": book_status(),
-        "stats": {
-            "opens": 0,
-            "closes": 0,
-            "stops": 0,
-            "edge_skips": 0,
-            "confirm_skips": 0,
-            "cooldown_skips": 0,
-            "hold_skips": 0,
-        },
+        "stats": {"opens": 0, "closes": 0, "stops": 0},
     }
 
 
@@ -480,6 +464,8 @@ def _mid(mids: dict[str, float], coin: str) -> float:
 
 
 def _mark_positions(data: dict[str, Any], mids: dict[str, float]) -> None:
+    """Purffle-style: equity = free cash + mark-to-mid holdings."""
+    holdings = 0.0
     unreal = 0.0
     for coin, pos in list((data.get("positions") or {}).items()):
         px = _mid(mids, coin) or float(pos.get("mark") or pos.get("entry") or 0)
@@ -487,14 +473,17 @@ def _mark_positions(data: dict[str, Any], mids: dict[str, float]) -> None:
             continue
         sz = float(pos.get("sz") or 0)
         entry = float(pos.get("entry") or px)
-        upnl = (px - entry) * sz
+        cost = float(pos.get("cost") or abs(sz) * entry)
+        mtm = abs(sz) * px
+        upnl = mtm - cost
         pos["mark"] = round(px, 8)
         pos["upnl"] = round(upnl, 4)
-        pos["ntl"] = round(abs(sz) * px, 4)
+        pos["ntl"] = round(mtm, 4)
+        holdings += mtm
         unreal += upnl
     cash = float(data.get("cash") or 0)
     data["unrealized_pnl"] = round(unreal, 4)
-    data["equity"] = round(cash + unreal, 4)
+    data["equity"] = round(cash + holdings, 4)
 
 
 def _append_fill(data: dict[str, Any], fill: dict[str, Any]) -> None:
@@ -504,56 +493,27 @@ def _append_fill(data: dict[str, Any], fill: dict[str, Any]) -> None:
         data["fills"] = fills[-500:]
 
 
-def _fee_for_ntl(ntl: float, fee_bps: float) -> float:
-    if ntl <= 0 or fee_bps <= 0:
-        return 0.0
-    return round(ntl * fee_bps / 10_000.0, 6)
-
-
-def _charge_fee(data: dict[str, Any], fee: float) -> None:
-    if fee <= 0:
-        return
-    data["cash"] = round(float(data.get("cash") or 0) - fee, 4)
-    data["fees_paid"] = round(float(data.get("fees_paid") or 0) + fee, 4)
-    data["realized_pnl"] = round(float(data.get("realized_pnl") or 0) - fee, 4)
-
-
-def _hold_sec(pos: dict[str, Any]) -> float:
-    raw = str(pos.get("opened_at") or "").strip()
-    if not raw:
-        return 1e18
-    try:
-        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
-    except ValueError:
-        return 1e18
-
-
 def _close_pos(
     data: dict[str, Any],
     coin: str,
     px: float,
     *,
     reason: str,
-    fee_bps: float = 0.0,
-    cooldown_sec: float = 0.0,
+    fee_rate: float = 0.0,
 ) -> None:
     pos = (data.get("positions") or {}).pop(coin, None)
     if not pos:
         return
-    sz = float(pos.get("sz") or 0)
-    entry = float(pos.get("entry") or px)
-    ntl = abs(sz) * px if px > 0 else float(pos.get("ntl") or 0)
-    pnl = (px - entry) * sz
-    fee = _fee_for_ntl(ntl, fee_bps)
-    data["cash"] = round(float(data.get("cash") or 0) + pnl, 4)
-    data["realized_pnl"] = round(float(data.get("realized_pnl") or 0) + pnl, 4)
-    _charge_fee(data, fee)
-    if cooldown_sec > 0:
-        cds = data.setdefault("cooldowns", {})
-        cds[coin] = time.time() + cooldown_sec
+    sz = abs(float(pos.get("sz") or 0))
+    cost = float(pos.get("cost") or 0)
+    if sz <= 0 or px <= 0:
+        return
+    proceeds = sz * px
+    fee = proceeds * fee_rate
+    realized = (proceeds - fee) - cost
+    data["cash"] = round(float(data.get("cash") or 0) + proceeds - fee, 4)
+    data["realized_pnl"] = round(float(data.get("realized_pnl") or 0) + realized, 4)
+    data["fees_paid"] = round(float(data.get("fees_paid") or 0) + fee, 4)
     stats = data.setdefault("stats", {})
     stats["closes"] = int(stats.get("closes") or 0) + 1
     if reason == "hard_stop":
@@ -564,10 +524,10 @@ def _close_pos(
             "id": str(uuid.uuid4())[:8],
             "ts": _now_iso(),
             "coin": coin,
-            "side": "sell" if sz > 0 else "buy",
-            "sz": round(abs(sz), 8),
+            "side": "sell",
+            "sz": round(sz, 8),
             "px": px,
-            "pnl": round(pnl - fee, 4),
+            "pnl": round(realized, 4),
             "fee": round(fee, 4),
             "reason": reason,
             "action": "close",
@@ -575,37 +535,44 @@ def _close_pos(
     )
 
 
-def _open_pos(
+def _open_long(
     data: dict[str, Any],
     coin: str,
-    side: str,
     px: float,
-    ntl: float,
+    spend: float,
     *,
     voters: list[str],
     agree: int,
-    weight: float,
-    fee_bps: float = 0.0,
-) -> None:
-    if px <= 0 or ntl <= 0:
-        return
-    fee = _fee_for_ntl(ntl, fee_bps)
-    signed = ntl / px if side == "long" else -(ntl / px)
+    fee_rate: float = 0.0,
+) -> bool:
+    """Purffle open: spend fraction of cash, fee from spend, long-only."""
+    if px <= 0 or spend <= 0:
+        return False
+    cash = float(data.get("cash") or 0)
+    if spend > cash:
+        spend = cash
+    if spend < float((data.get("config") or {}).get("min_our_ntl") or 5):
+        return False
+    fee = spend * fee_rate
+    qty = (spend - fee) / px
+    if qty <= 0:
+        return False
+    cost = spend - fee
+    data["cash"] = round(cash - spend, 4)
+    data["fees_paid"] = round(float(data.get("fees_paid") or 0) + fee, 4)
     data.setdefault("positions", {})[coin] = {
         "coin": coin,
-        "side": side,
-        "sz": round(signed, 8),
+        "side": "long",
+        "sz": round(qty, 8),
         "entry": px,
         "mark": px,
-        "ntl": round(ntl, 4),
+        "ntl": round(qty * px, 4),
+        "cost": round(cost, 4),
         "upnl": 0.0,
         "opened_at": _now_iso(),
         "voters": voters,
         "agree": agree,
-        "weight": round(weight, 3),
-        "leverage_ntl": round(ntl, 4),
     }
-    _charge_fee(data, fee)
     stats = data.setdefault("stats", {})
     stats["opens"] = int(stats.get("opens") or 0) + 1
     _append_fill(
@@ -614,20 +581,17 @@ def _open_pos(
             "id": str(uuid.uuid4())[:8],
             "ts": _now_iso(),
             "coin": coin,
-            "side": "buy" if side == "long" else "sell",
-            "sz": round(abs(signed), 8),
+            "side": "buy",
+            "sz": round(qty, 8),
             "px": px,
-            "pnl": round(-fee, 4),
+            "pnl": 0.0,
             "fee": round(fee, 4),
-            "reason": f"edge_{side}_{agree}",
+            "reason": f"copy_long_{agree}",
             "action": "open",
             "voters": voters,
         },
     )
-
-
-def _vote_weight(ntl: float, min_ntl: float) -> float:
-    return 1.0 + math.log10(max(ntl, min_ntl) / min_ntl)
+    return True
 
 
 def _scan_votes(
@@ -635,15 +599,13 @@ def _scan_votes(
     *,
     use_cache: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Build votes from WS book; seed missing wallets via REST."""
+    """Build long/short counts from WS book (Purffle aggregates longs)."""
     wallets = load_watchlist()
     elites: list[dict[str, Any]] = []
     votes: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
             "long": 0,
             "short": 0,
-            "long_w": 0.0,
-            "short_w": 0.0,
             "long_ids": [],
             "short_ids": [],
         }
@@ -688,9 +650,7 @@ def _scan_votes(
             if ntl < min_ntl:
                 continue
             side = "long" if szi > 0 else "short"
-            wgt = _vote_weight(ntl, min_ntl)
             votes[coin][side] += 1
-            votes[coin][f"{side}_w"] += wgt
             votes[coin][f"{side}_ids"].append(bid)
             pos_out.append(
                 {
@@ -698,7 +658,6 @@ def _scan_votes(
                     "side": side,
                     "szi": szi,
                     "ntl": round(ntl, 2),
-                    "weight": round(wgt, 3),
                     "uPnl": p.get("uPnl"),
                 }
             )
@@ -716,20 +675,6 @@ def _scan_votes(
             }
         )
     return elites, dict(votes)
-
-
-def _slim_signals(signals: dict[str, Any]) -> dict[str, Any]:
-    return {
-        c: {
-            "side": s.get("side"),
-            "agree": s.get("agree"),
-            "weight": s.get("weight"),
-            "confirmed": bool(s.get("confirmed")),
-            "streak": int(s.get("streak") or 0),
-            "lead": int(s.get("lead") or 0),
-        }
-        for c, s in signals.items()
-    }
 
 
 def tick_consensus(
@@ -751,7 +696,6 @@ def tick_consensus(
             data["retry_after_sec"] = round(wait, 1)
             return data
 
-    # Serialize ticks so concurrent fill/periodic paths cannot double-open.
     if not _tick_run_lock.acquire(blocking=False):
         data = load_consensus()
         data["tick_skipped"] = True
@@ -770,6 +714,7 @@ def _tick_consensus_body(
     reason: str,
     guard: MinIntervalGuard,
 ) -> dict[str, Any]:
+    """Purffle scan_and_mirror: long≥N open, long<N exit, hard-stop −10%."""
     cfg = consensus_config()
     with _lock:
         p = _path()
@@ -781,6 +726,7 @@ def _tick_consensus_body(
         else:
             data = _empty_ledger(cfg)
         data["config"] = cfg
+        data["mode"] = "purffle_long_ws"
 
     reconciled = 0
     if reason != "fill":
@@ -794,223 +740,84 @@ def _tick_consensus_body(
         mids = {}
 
     min_agree = int(cfg["min_agree"])
-    min_lead = int(cfg["min_lead"])
-    confirm_ticks = int(cfg["confirm_ticks"])
-    fee_bps = float(cfg["fee_bps"])
-    exit_only_flip = bool(cfg.get("exit_only_flip", True))
-    min_hold_sec = float(cfg["min_hold_sec"])
-    max_hold_sec = float(cfg["max_hold_sec"])
-    cooldown_sec = float(cfg["cooldown_sec"])
+    fee_rate = float(cfg["fee_rate"])
+    hard_stop = float(cfg["hard_stop_pct"])
+    pos_pct = float(cfg["position_pct"])
+    max_pos = int(cfg["max_positions"])
+    min_spend = float(cfg["min_our_ntl"])
 
-    streaks = dict(data.get("signal_streak") or {})
     signals: dict[str, Any] = {}
     for coin, v in votes.items():
         long_n = int(v["long"])
         short_n = int(v["short"])
-        long_w = float(v["long_w"])
-        short_w = float(v["short_w"])
-        lead_long = long_n - short_n
-        lead_short = short_n - long_n
-        if long_n >= min_agree and lead_long >= min_lead:
-            side, agree, weight, voters, lead = (
-                "long",
-                long_n,
-                long_w,
-                list(v["long_ids"]),
-                lead_long,
-            )
-        elif short_n >= min_agree and lead_short >= min_lead:
-            side, agree, weight, voters, lead = (
-                "short",
-                short_n,
-                short_w,
-                list(v["short_ids"]),
-                lead_short,
-            )
-        else:
-            side, agree, weight, voters, lead = (
-                None,
-                max(long_n, short_n),
-                max(long_w, short_w),
-                [],
-                max(lead_long, lead_short, 0),
-            )
-        prev_st = streaks.get(coin) or {}
-        if side and side == prev_st.get("side"):
-            streak_n = int(prev_st.get("n") or 0) + 1
-        elif side:
-            streak_n = 1
-        else:
-            streak_n = 0
-        streaks[coin] = {"side": side, "n": streak_n}
-        confirmed = bool(side) and streak_n >= confirm_ticks
+        voters = list(v["long_ids"])
+        side = "long" if long_n >= min_agree else None
         signals[coin] = {
             "long": long_n,
             "short": short_n,
-            "long_w": round(long_w, 3),
-            "short_w": round(short_w, 3),
             "side": side,
-            "agree": agree,
-            "lead": lead,
-            "weight": round(weight, 3),
-            "voters": voters,
-            "streak": streak_n,
-            "confirmed": confirmed,
+            "agree": long_n,
+            "voters": voters if side else [],
         }
-    data["signal_streak"] = streaks
 
-    prev = data.get("prev_signals") or {}
     data["elites"] = elites
     data["signals"] = signals
     data["book"] = book_status()
     _mark_positions(data, mids)
 
-    hold_skips = 0
+    # CLOSE: long_count < min_agree, or hard stop (Purffle order).
     for coin, pos in list((data.get("positions") or {}).items()):
         px = _mid(mids, coin) or float(pos.get("mark") or 0)
         if px <= 0:
             continue
         entry = float(pos.get("entry") or 0)
-        sz = float(pos.get("sz") or 0)
-        if entry <= 0 or sz == 0:
+        if entry <= 0:
             continue
-        held = _hold_sec(pos)
-        ret = (px - entry) / entry if sz > 0 else (entry - px) / entry
-        if ret <= -float(cfg["hard_stop_pct"]):
+        long_n = int((signals.get(coin) or {}).get("long") or 0)
+        ret = (px - entry) / entry
+        if long_n < min_agree:
             _close_pos(
                 data,
                 coin,
                 px,
-                reason="hard_stop",
-                fee_bps=fee_bps,
-                cooldown_sec=cooldown_sec,
+                reason=f"elites_exited_{long_n}/{min_agree}",
+                fee_rate=fee_rate,
             )
-            continue
-        if max_hold_sec > 0 and held >= max_hold_sec:
-            _close_pos(
-                data,
-                coin,
-                px,
-                reason="time_exit",
-                fee_bps=fee_bps,
-                cooldown_sec=cooldown_sec,
-            )
-            continue
-        sig = signals.get(coin) or {}
-        want = sig.get("side")
-        have = pos.get("side")
-        flipped = want is not None and want != have
-        lost = want is None
-        if flipped:
-            if min_hold_sec > 0 and held < min_hold_sec:
-                hold_skips += 1
-                continue
-            _close_pos(
-                data,
-                coin,
-                px,
-                reason="flip_exit",
-                fee_bps=fee_bps,
-                cooldown_sec=cooldown_sec,
-            )
-        elif lost and not exit_only_flip:
-            if min_hold_sec > 0 and held < min_hold_sec:
-                hold_skips += 1
-                continue
-            _close_pos(
-                data,
-                coin,
-                px,
-                reason="consensus_exit",
-                fee_bps=fee_bps,
-                cooldown_sec=cooldown_sec,
-            )
+        elif ret <= -hard_stop:
+            _close_pos(data, coin, px, reason="hard_stop", fee_rate=fee_rate)
 
-    warmed = bool(data.get("warmed"))
-    edge_only = bool(cfg.get("edge_open_only", True))
-    stats = data.setdefault("stats", {})
+    # OPEN: long_count >= min_agree and not already holding.
     opened = 0
-    skipped_edge = 0
-    skipped_confirm = 0
-    skipped_cd = 0
-
-    if not warmed:
-        data["warmed"] = True
-        data["prev_signals"] = _slim_signals(signals)
-        note_extra = "warmup_no_open"
-    else:
-        equity = float(data.get("equity") or data.get("cash") or 0)
-        pos_pct = float(cfg["position_pct"])
-        lev = float(cfg["leverage"])
-        max_pos = int(cfg["max_positions"])
-        min_ntl = float(cfg["min_our_ntl"])
+    ranked = sorted(
+        (
+            (coin, sig)
+            for coin, sig in signals.items()
+            if int(sig.get("long") or 0) >= min_agree
+            and coin not in (data.get("positions") or {})
+        ),
+        key=lambda x: -int(x[1].get("long") or 0),
+    )
+    for coin, sig in ranked:
         open_n = len(data.get("positions") or {})
-        scale_agree = bool(cfg.get("scale_by_agree", False))
-        now_ts = time.time()
-        cds = data.setdefault("cooldowns", {})
-
-        ranked = sorted(
-            (
-                (coin, sig)
-                for coin, sig in signals.items()
-                if sig.get("side") and coin not in (data.get("positions") or {})
-            ),
-            key=lambda x: (
-                -float(x[1].get("weight") or 0),
-                -int(x[1].get("agree") or 0),
-                -int(x[1].get("lead") or 0),
-            ),
-        )
-        for coin, sig in ranked:
-            if open_n >= max_pos:
-                break
-            want = sig.get("side")
-            if not sig.get("confirmed"):
-                skipped_confirm += 1
-                continue
-            cd_until = float(cds.get(coin) or 0)
-            if cd_until > now_ts:
-                skipped_cd += 1
-                continue
-            prev_row = prev.get(coin) or {}
-            prev_side = prev_row.get("side")
-            prev_confirmed = bool(prev_row.get("confirmed"))
-            if edge_only and prev_confirmed and prev_side == want:
-                skipped_edge += 1
-                continue
-            px = _mid(mids, coin)
-            if px <= 0:
-                continue
-            ntl = equity * pos_pct * lev
-            if scale_agree:
-                agree = int(sig.get("agree") or min_agree)
-                ntl *= min(1.5, agree / max(1, min_agree))
-            if ntl < min_ntl:
-                continue
-            _open_pos(
-                data,
-                coin,
-                str(want),
-                px,
-                ntl,
-                voters=list(sig.get("voters") or []),
-                agree=int(sig.get("agree") or 0),
-                weight=float(sig.get("weight") or 0),
-                fee_bps=fee_bps,
-            )
-            open_n += 1
+        if open_n >= max_pos:
+            break
+        cash = float(data.get("cash") or 0)
+        spend = cash * pos_pct
+        if spend < min_spend:
+            break
+        px = _mid(mids, coin)
+        if px <= 0:
+            continue
+        if _open_long(
+            data,
+            coin,
+            px,
+            spend,
+            voters=list(sig.get("voters") or []),
+            agree=int(sig.get("long") or 0),
+            fee_rate=fee_rate,
+        ):
             opened += 1
-        stats["edge_skips"] = int(stats.get("edge_skips") or 0) + skipped_edge
-        stats["confirm_skips"] = int(stats.get("confirm_skips") or 0) + skipped_confirm
-        stats["cooldown_skips"] = int(stats.get("cooldown_skips") or 0) + skipped_cd
-        stats["hold_skips"] = int(stats.get("hold_skips") or 0) + hold_skips
-        data["prev_signals"] = _slim_signals(signals)
-        note_extra = (
-            f"opened={opened} edge_skip={skipped_edge} "
-            f"confirm_skip={skipped_confirm} cd_skip={skipped_cd} "
-            f"hold_skip={hold_skips} recon={reconciled} "
-            f"lev={lev:g}x fee={fee_bps:g}bps"
-        )
 
     _mark_positions(data, mids)
     data["last_tick_at"] = _now_iso()
@@ -1019,9 +826,11 @@ def _tick_consensus_body(
     data["book"] = bs
     data["last_tick_note"] = (
         f"elites={sum(1 for e in elites if e.get('ok'))} "
-        f"signals={sum(1 for s in signals.values() if s.get('side'))} "
+        f"long_sigs={sum(1 for s in signals.values() if s.get('side'))} "
         f"pos={len(data.get('positions') or {})} "
-        f"book={bs.get('ws')}ws/{bs.get('rest')}rest {note_extra}"
+        f"book={bs.get('ws')}ws/{bs.get('rest')}rest "
+        f"opened={opened} recon={reconciled} "
+        f"fee={fee_rate * 100:.2f}% cash_pct={pos_pct * 100:.0f}"
     )
     data["tick_skipped"] = False
 
