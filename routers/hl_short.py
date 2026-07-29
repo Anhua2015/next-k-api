@@ -96,34 +96,6 @@ async def reset_paper_ledger():
     return await run_in_threadpool(reset_paper)
 
 
-@router.get("/consensus")
-async def get_consensus(
-    tick: bool = Query(False, description="true 时强制跑一轮共识扫描（受冷却）"),
-):
-    """Desk multi-wallet consensus paper sleeve (separate from fill-mirror)."""
-    from utils.hl_consensus_paper import load_consensus, tick_consensus
-
-    if tick:
-        return await run_in_threadpool(
-            lambda: tick_consensus(force=True, reason="manual")
-        )
-    return await run_in_threadpool(load_consensus)
-
-
-@router.post("/consensus/tick")
-async def post_consensus_tick():
-    from utils.hl_consensus_paper import tick_consensus
-
-    return await run_in_threadpool(lambda: tick_consensus(force=True, reason="manual"))
-
-
-@router.post("/consensus/reset")
-async def reset_consensus_ledger():
-    from utils.hl_consensus_paper import reset_consensus
-
-    return await run_in_threadpool(reset_consensus)
-
-
 @router.get("/copy/status")
 async def get_copy_status():
     from utils.hl_bitget_executor import status as bitget_live_status

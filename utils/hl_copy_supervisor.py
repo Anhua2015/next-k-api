@@ -83,12 +83,6 @@ class HlCopySupervisor:
             out["config"] = paper_config()
         except Exception as exc:
             out["paper_error"] = str(exc)
-        try:
-            from utils.hl_consensus_paper import status_snapshot
-
-            out["consensus"] = status_snapshot()
-        except Exception as exc:
-            out["consensus_error"] = str(exc)
         return out
 
     def should_start(self) -> bool:
@@ -159,12 +153,6 @@ class HlCopySupervisor:
                     await client.stop()
                 except Exception:
                     pass
-                try:
-                    from utils.hl_consensus_paper import drop_wallet_book
-
-                    drop_wallet_book(addr)
-                except Exception:
-                    pass
                 logger.info("HL WS unsubscribed %s", addr[:10])
 
         # Add new
@@ -181,19 +169,6 @@ class HlCopySupervisor:
                 if not isinstance(fills, list) or not fills:
                     return
                 is_snap = bool(data.get("isSnapshot"))
-                # Consensus book: snapshot → REST seed; live fills → WS apply
-                try:
-                    from utils.hl_consensus_paper import on_desk_fill
-
-                    await asyncio.to_thread(
-                        on_desk_fill,
-                        _addr,
-                        fills,
-                        bot_id=_wid,
-                        is_snapshot=is_snap,
-                    )
-                except Exception as exc:
-                    logger.debug("consensus on fill: %s", exc)
                 if is_snap:
                     with self._lock:
                         self._status["last_snapshot"] = True
@@ -239,12 +214,6 @@ class HlCopySupervisor:
             client.set_handler(addr, _handler)
             await client.start()
             self._clients[addr] = client
-            try:
-                from utils.hl_consensus_paper import seed_wallet_from_rest
-
-                await asyncio.to_thread(seed_wallet_from_rest, addr, wid)
-            except Exception as exc:
-                logger.debug("consensus seed %s: %s", wid, exc)
             logger.info("HL WS subscribed %s (%s)", wid, addr[:10])
 
         with self._lock:
@@ -310,14 +279,6 @@ class HlCopySupervisor:
                     await asyncio.to_thread(refresh_target_health)
                 except Exception as exc:
                     logger.debug("target health refresh: %s", exc)
-
-                try:
-                    from utils.hl_consensus_paper import consensus_enabled, tick_consensus
-
-                    if consensus_enabled():
-                        await asyncio.to_thread(lambda: tick_consensus(force=False))
-                except Exception as exc:
-                    logger.debug("consensus tick: %s", exc)
 
                 await self._sleep_interruptible(max(5.0, mark_every))
         except asyncio.CancelledError:

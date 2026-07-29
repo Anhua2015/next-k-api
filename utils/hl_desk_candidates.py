@@ -4,7 +4,7 @@ Builds `hl_desk_candidates.json` then splits into:
 
   ready  — day/swing · flat WR≥80% · trips 10–100 · wallet funds OK
   watch  — passed pool gates but not ready (quiet / style / thin WR…)
-  bound  — currently on desk A–J (reference only)
+  bound  — currently on desk seats (reference only)
   rejected — watchlist reject_for_now
 
 Funds gate = perp AV + Core spot USDC + HyperEVM USDC (not perp-only).
@@ -157,7 +157,7 @@ def save_candidates(data: dict[str, Any]) -> Path:
 
 
 def _desk_bound() -> dict[str, str]:
-    """address_lower → bot_id for current A–J seats."""
+    """address_lower → bot_id for current desk seats."""
     out: dict[str, str] = {}
     for w in load_watchlist():
         bid = str(w.get("id") or "").strip()
@@ -596,7 +596,7 @@ def build_candidate_pool(*, sleep_sec: float | None = None) -> dict[str, Any]:
         "note": (
             "Desk follow candidate pool. ready = day/swing · flat WR≥80% · "
             "trips 10–100 · wallet funds (perp+spot+evm); "
-            "watch = pool hit but not ready; bound = current A–J. "
+            "watch = pool hit but not ready; bound = current desk seats. "
             "Stocks OK if Bitget-mapped. Auto-rebind not enabled."
         ),
         "gates": {

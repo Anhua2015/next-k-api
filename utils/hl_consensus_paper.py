@@ -73,7 +73,7 @@ def _env_bool(key: str, default: bool) -> bool:
 
 
 def consensus_enabled() -> bool:
-    return _env_bool("HL_CONSENSUS_ENABLED", True)
+    return _env_bool("HL_CONSENSUS_ENABLED", False)
 
 
 def consensus_config() -> dict[str, Any]:

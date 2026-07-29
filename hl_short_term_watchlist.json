@@ -1,8 +1,8 @@
 {
-  "updated": "2026-07-28",
+  "updated": "2026-07-29",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "A/B/C/D/K + stable E–G + H/I + new J/L (2026-07-28): J=920fa6 BTC/XRP/ZEC, L=991068 multi quant. paper 1000U each. Not financial advice.",
+  "note": "2026-07-29: A already=20bc (LW A BTC); add M=868b (LW A BTC/SOL long-bias). No seat swap. paper 1000U each. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -10,9 +10,9 @@
       "priority": 1,
       "paper_balance": 1000,
       "style": "swing · BTC",
-      "why": "return#3 · pure BTC · paper90≈+2242% · MDD≈15% · WR63% trips30",
+      "why": "LW A#5 · pure BTC both-ways · month≈+$49万 · flat wait next open · demoted S→A persistence",
       "coins": ["BTC"],
-      "watch": ["BTC Bitget", "compound path"],
+      "watch": ["BTC open/flip", "spot dry powder"],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x20bc9cd229dfd681740834d9b4f55641ce435da3",
       "ht_style": "swing_trader",
       "tag": "波段",
@@ -164,6 +164,20 @@
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x991068726c19aa2a799ee8636b2b5cf06bdf297d",
       "ht_style": "swing_trader",
       "tag": "波段"
+    },
+    {
+      "id": "bot_m",
+      "address": "0x868b65a7a1e1ff70b74f005f1c5be5e652b2b9a0",
+      "priority": 13,
+      "paper_balance": 1000,
+      "style": "swing · BTC/SOL",
+      "why": "LW A#10 add 2026-07-29 · BTC/SOL long-bias · month≈+$13万 · flat guerrilla · demoted S→A persistence",
+      "coins": ["BTC", "SOL"],
+      "watch": ["BTC/SOL open long", "deposit then fire"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x868b65a7a1e1ff70b74f005f1c5be5e652b2b9a0",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": ["concentrated"]
     }
   ],
   "reject_for_now": [

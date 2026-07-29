@@ -1,5 +1,5 @@
 {
-  "note": "Desk seeds A/B/C/D/K/E\u2013I/J/L. Updated 2026-07-28.",
+  "note": "Desk seeds A–M. Added 868b as M 2026-07-29.",
   "addrs": [
     "0x20bc9cd229dfd681740834d9b4f55641ce435da3",
     "0xb315067ae6b8ae6dfafd052b630d95b72a91cc25",
@@ -12,6 +12,7 @@
     "0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
     "0x202c47f7c66e5d678db3e051deabc25478863022",
     "0x920fa68300c8aa95c4563e0daf79a0b0e51f0cfe",
-    "0x991068726c19aa2a799ee8636b2b5cf06bdf297d"
+    "0x991068726c19aa2a799ee8636b2b5cf06bdf297d",
+    "0x868b65a7a1e1ff70b74f005f1c5be5e652b2b9a0"
   ]
 }
