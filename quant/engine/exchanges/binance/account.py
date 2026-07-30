@@ -142,7 +142,32 @@ def set_symbol_leverage(symbol: str, leverage: int) -> None:
         msg = str(exc)
         if "-4028" in msg:
             return
+        # Sub-accounts often capped at 5x (-4421); fall back and retry.
+        if "-4421" in msg and lev > 5:
+            try:
+                _signed_post("/fapi/v1/leverage", {"symbol": sym, "leverage": 5})
+                logger.info("[vnpy] leverage %s -> 5x (subaccount cap; wanted %sx)", sym, lev)
+                return
+            except RuntimeError as exc2:
+                if "-4028" in str(exc2):
+                    return
+                raise
         raise
+
+
+def fetch_usdt_available() -> float:
+    """USDT-M wallet availableBalance (cross/isolated wallet free)."""
+    rows = _signed_get("/fapi/v2/balance", {})
+    if not isinstance(rows, list):
+        return 0.0
+    for row in rows:
+        if str(row.get("asset") or "").upper() != "USDT":
+            continue
+        try:
+            return max(0.0, float(row.get("availableBalance") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
 
 
 def set_symbol_margin_isolated(symbol: str) -> None:

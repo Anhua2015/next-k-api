@@ -55,6 +55,22 @@ def scale() -> float:
         return 1.0
 
 
+def max_leverage() -> int:
+    """Binance sub-accounts are often capped at 5x; default clamp for live O."""
+    try:
+        return max(1, int(float(os.getenv("HL_BINANCE_MAX_LEVERAGE", "5") or 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def margin_buffer() -> float:
+    """Use this fraction of available USDT when sizing opens (headroom for fees)."""
+    try:
+        return min(1.0, max(0.1, float(os.getenv("HL_BINANCE_MARGIN_BUFFER", "0.9") or 0.9)))
+    except (TypeError, ValueError):
+        return 0.9
+
+
 def min_notional() -> float:
     try:
         return max(0.0, float(os.getenv("HL_BINANCE_MIN_NOTIONAL", "5") or 5))
@@ -141,6 +157,8 @@ def status() -> dict[str, Any]:
         "live_ready": ready,
         "live_ready_reason": reason,
         "scale": scale(),
+        "max_leverage": max_leverage(),
+        "margin_buffer": margin_buffer(),
         "min_notional": min_notional(),
         "debounce_ms": debounce_ms(),
         "allow_coins": sorted(allow_coins()) if allow_coins() is not None else None,
@@ -260,7 +278,67 @@ def _paper_leverage(bot_id: str | None, symbol: str) -> int | None:
             continue
         if lev > 0:
             best = lev if best is None else max(best, lev)
-    return best
+    if best is None:
+        return None
+    return min(best, max_leverage())
+
+
+def _clamp_qty_to_margin(
+    *,
+    symbol: str,
+    qty: float,
+    leverage: int | None,
+    reduce_only: bool,
+    bot_id: str | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Shrink open size so notional/lev fits available USDT (subaccount 5x reality)."""
+    info: dict[str, Any] = {}
+    if reduce_only or qty <= 0:
+        return qty, info
+    lev = max(1, int(leverage or max_leverage()))
+    lev = min(lev, max_leverage())
+    mid = _paper_mark(bot_id, symbol)
+    if mid <= 0:
+        try:
+            from binance_fapi import fetch_mark_price
+
+            px = fetch_mark_price(symbol)
+            mid = float(px) if px else 0.0
+        except Exception:
+            mid = 0.0
+    if mid <= 0:
+        return qty, info
+    try:
+        from quant.engine.exchanges.binance.account import fetch_usdt_available
+
+        avail = float(fetch_usdt_available())
+    except Exception as exc:
+        info["margin_check"] = f"avail_failed:{exc}"
+        return qty, info
+    info["available_usdt"] = round(avail, 4)
+    info["leverage_used"] = lev
+    budget = avail * margin_buffer() * lev
+    info["max_notional"] = round(budget, 4)
+    if budget < min_notional():
+        info["clamped"] = True
+        info["clamp_reason"] = "insufficient_margin"
+        return 0.0, info
+    max_qty = budget / mid
+    if qty > max_qty + 1e-16:
+        info["clamped"] = True
+        info["size_raw"] = qty
+        info["size_clamped"] = max_qty
+        logger.warning(
+            "HL→Binance clamp %s qty %.6f→%.6f (avail=%.2f USDT lev=%sx mid=%.2f)",
+            symbol,
+            qty,
+            max_qty,
+            avail,
+            lev,
+            mid,
+        )
+        return max_qty, info
+    return qty, info
 
 
 def _paper_mark(bot_id: str | None, symbol: str) -> float:
@@ -389,9 +467,18 @@ def _place_one(
             from quant.engine.exchanges.binance.account import (
                 fetch_signed_position,
                 place_market_order,
+                round_qty,
             )
 
             qty = float(rounded)
+            lev_raw = meta.get("leverage")
+            try:
+                lev_i = int(float(lev_raw)) if lev_raw is not None else max_leverage()
+            except (TypeError, ValueError):
+                lev_i = max_leverage()
+            lev_i = min(max(1, lev_i), max_leverage())
+            payload["leverage"] = lev_i
+
             if reduce_only:
                 have = float(fetch_signed_position(symbol))
                 if abs(have) < 1e-12:
@@ -417,13 +504,33 @@ def _place_one(
                     payload["reason"] = "size_rounds_to_zero"
                     _append_ledger(payload)
                     return payload
+            else:
+                qty, clamp_info = _clamp_qty_to_margin(
+                    symbol=symbol,
+                    qty=qty,
+                    leverage=lev_i,
+                    reduce_only=False,
+                    bot_id=str(meta.get("bot_id") or "") or None,
+                )
+                payload.update({k: v for k, v in clamp_info.items() if k != "size_clamped"})
+                try:
+                    qty = round_qty(symbol, qty)
+                except Exception:
+                    pass
+                if qty <= 0:
+                    payload["status"] = "skipped"
+                    payload["reason"] = clamp_info.get("clamp_reason") or "insufficient_margin"
+                    payload["size"] = 0
+                    _append_ledger(payload)
+                    return payload
+
             result = place_market_order(
                 symbol=symbol,
                 side=side,
                 size=qty,
                 client_oid=client_oid,
                 reduce_only=reduce_only,
-                leverage=meta.get("leverage"),
+                leverage=lev_i if not reduce_only else None,
             )
             payload["size"] = qty
             payload["status"] = "deduped" if result.get("deduped") else "sent"
