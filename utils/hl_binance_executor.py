@@ -272,12 +272,10 @@ def _desired_from_target_book(
     route_coins: set[str] | frozenset[str] | None = None,
     route_scale: float = 1.0,
 ) -> dict[str, float]:
-    """Size so *margin / equity* matches the target, not raw coin size.
+    """Size by equity ratio (copy exposure). Margin headroom is handled later
+    by scaling the *whole* book uniformly — not per-coin leverage shrink.
 
-    Target may run 20–29x; Binance sub is capped (default 5x). Matching coin
-    size would over-consume our margin. Instead:
-
-        our_sz = target_sz × (our_eq / target_av) × (our_lev / their_lev) × scale
+        our_sz = target_sz × (our_eq / target_av) × scale
     """
     try:
         av = float(bot.get("target_av") or 0)
@@ -292,8 +290,7 @@ def _desired_from_target_book(
         eq = 0.0
     if av <= 1e-9 or eq <= 0:
         return {}
-    our_lev = float(max_leverage())
-    equity_ratio = (eq / av) * float(route_scale or 1.0)
+    ratio = (eq / av) * float(route_scale or 1.0)
     net: dict[str, float] = {}
     tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
     for coin, tp in tpos.items():
@@ -303,42 +300,59 @@ def _desired_from_target_book(
         if not sym:
             continue
         try:
-            tsz = float(tp.get("sz") or 0)
+            sz = float(tp.get("sz") or 0) * ratio
         except (TypeError, ValueError):
             continue
-        if abs(tsz) < 1e-16:
-            continue
-        try:
-            their_lev = float(tp.get("leverage") or 0)
-        except (TypeError, ValueError):
-            their_lev = 0.0
-        if their_lev <= 0:
-            # Fall back to cached lev map / assume our cap (no extra shrink).
-            lev_map = bot.get("target_lev_by_coin") if isinstance(bot.get("target_lev_by_coin"), dict) else {}
-            raw = lev_map.get(str(coin).upper()) or lev_map.get(str(coin))
-            try:
-                their_lev = float(raw or 0)
-            except (TypeError, ValueError):
-                their_lev = 0.0
-        if their_lev <= 0:
-            their_lev = our_lev
-        # Match margin%: shrink coin size when we cannot use their higher lev.
-        lev_ratio = our_lev / their_lev
-        sz = tsz * equity_ratio * lev_ratio
         if abs(sz) < 1e-16:
             continue
         net[sym] = net.get(sym, 0.0) + sz
-        logger.info(
-            "HL→Binance size %s target_sz=%.6f eq_ratio=%.6g our_lev=%s their_lev=%s "
-            "→ our_sz=%.6f (margin-matched)",
-            sym,
-            tsz,
-            equity_ratio,
-            int(our_lev),
-            their_lev,
-            sz,
-        )
     return net
+
+
+def _scale_book_to_margin(
+    desired: dict[str, float],
+    *,
+    bot_id: str,
+) -> dict[str, float]:
+    """If target book margin exceeds equity×buffer, shrink all sizes by the same factor."""
+    if not desired:
+        return desired
+    try:
+        from quant.engine.exchanges.binance.account import fetch_account_equity
+
+        eq = float(fetch_account_equity().get("equity") or 0)
+    except Exception as exc:
+        logger.warning("binance equity for book margin scale failed: %s", exc)
+        return desired
+    if eq <= 0:
+        return desired
+    budget = eq * margin_buffer()
+    need = 0.0
+    for sym, sz in desired.items():
+        try:
+            qty = abs(float(sz))
+        except (TypeError, ValueError):
+            continue
+        if qty < 1e-16:
+            continue
+        mid = _paper_mark(bot_id, sym)
+        if mid <= 0:
+            continue
+        lev = _paper_leverage(bot_id, sym) or max_leverage()
+        lev = min(max(1, int(lev)), max_leverage())
+        need += qty * mid / float(lev)
+    if need <= budget + 1e-9:
+        return desired
+    factor = budget / need
+    logger.warning(
+        "HL→Binance book margin scale ×%.4f (need=%.2f USDT budget=%.2f eq=%.2f bot=%s)",
+        factor,
+        need,
+        budget,
+        eq,
+        bot_id,
+    )
+    return {sym: float(sz) * factor for sym, sz in desired.items()}
 
 
 def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
@@ -939,6 +953,9 @@ def sync_from_paper(rows: list[dict[str, Any]] | None = None) -> list[dict[str, 
         # Never fall back to main BINANCE_* when sub keys are missing.
         ctx = binance_creds(creds) if creds.ok() else nullcontext()
         with ctx:
+            # Scale whole book under creds context (equity/marks need sub keys).
+            desired = _scale_book_to_margin(desired, bot_id=route.bot_id)
+
             open_pos: dict[str, float] = {}
             scanned_open = False
             if creds.ok():
