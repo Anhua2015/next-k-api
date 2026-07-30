@@ -2,7 +2,7 @@
   "updated": "2026-07-30",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "2026-07-30: replace I with f206 swing (paper90≈+61% MDD≈15%). O=Bitget twin of K. Binance off. Not financial advice.",
+  "note": "2026-07-30: AM sleeve bot_am_a/e/c = gentle anti-martingale twins of A/E/C (paper-only). Original A/E/C stay 1x. O=Bitget twin of K. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -206,6 +206,57 @@
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "ht_style": "day_trader",
       "tag": "日内"
+    },
+    {
+      "id": "bot_am_a",
+      "address": "0x20bc9cd229dfd681740834d9b4f55641ce435da3",
+      "priority": 101,
+      "paper_balance": 1000,
+      "section": "anti_martingale",
+      "anti_martingale": "gentle",
+      "mirror_of": "bot_a",
+      "style": "swing · BTC · AM",
+      "why": "AM twin of A · gentle anti-martingale (+0.5 cap2) paper-only · original A stays 1x",
+      "coins": ["BTC"],
+      "watch": ["AM sleeve", "same addr as A"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x20bc9cd229dfd681740834d9b4f55641ce435da3",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": ["concentrated", "anti_martingale"]
+    },
+    {
+      "id": "bot_am_e",
+      "address": "0x27aef25d774abc98ed55ec926c3e1461eca4184a",
+      "priority": 102,
+      "paper_balance": 1000,
+      "section": "anti_martingale",
+      "anti_martingale": "gentle",
+      "mirror_of": "bot_e",
+      "style": "swing · BTC · AM",
+      "why": "AM twin of E · gentle anti-martingale (+0.5 cap2) paper-only · original E stays 1x",
+      "coins": ["BTC"],
+      "watch": ["AM sleeve", "same addr as E"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x27aef25d774abc98ed55ec926c3e1461eca4184a",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": ["concentrated", "anti_martingale"]
+    },
+    {
+      "id": "bot_am_c",
+      "address": "0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
+      "priority": 103,
+      "paper_balance": 1000,
+      "section": "anti_martingale",
+      "anti_martingale": "gentle",
+      "mirror_of": "bot_c",
+      "style": "swing · majors+stocks · AM",
+      "why": "AM twin of C · gentle anti-martingale (+0.5 cap2) paper-only · original C stays 1x",
+      "coins": null,
+      "watch": ["AM sleeve", "same addr as C"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": ["anti_martingale"]
     }
   ],
   "reject_for_now": [
