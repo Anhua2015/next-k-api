@@ -665,6 +665,12 @@ def refresh_marks(*, force: bool = False) -> dict[str, Any]:
             maybe_execute_rows_async(halt_logged)
         except Exception:
             logger.exception("HL Bitget live hook failed (mark halt)")
+        try:
+            from utils.hl_binance_executor import maybe_execute_rows_async as bn_exec
+
+            bn_exec(halt_logged)
+        except Exception:
+            logger.exception("HL Binance live hook failed (mark halt)")
     return out
 
 
@@ -1706,6 +1712,12 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
             maybe_execute_rows_async(logged)
         except Exception:
             logger.exception("HL Bitget live hook failed")
+        try:
+            from utils.hl_binance_executor import maybe_execute_rows_async as bn_exec
+
+            bn_exec(logged)
+        except Exception:
+            logger.exception("HL Binance live hook failed")
     return logged
 
 

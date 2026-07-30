@@ -98,10 +98,16 @@ async def reset_paper_ledger():
 
 @router.get("/copy/status")
 async def get_copy_status():
+    from utils.hl_binance_executor import status as binance_live_status
     from utils.hl_bitget_executor import status as bitget_live_status
     from utils.hl_copy_supervisor import hl_copy_supervisor
 
-    return {"ok": True, **hl_copy_supervisor.status, "bitget_live": bitget_live_status()}
+    return {
+        "ok": True,
+        **hl_copy_supervisor.status,
+        "bitget_live": bitget_live_status(),
+        "binance_live": binance_live_status(),
+    }
 
 
 @router.get("/live/status")
@@ -110,6 +116,14 @@ async def get_hl_bitget_live_status():
     from utils.hl_bitget_executor import status as bitget_live_status
 
     return {"ok": True, **bitget_live_status()}
+
+
+@router.get("/live/binance/status")
+async def get_hl_binance_live_status():
+    """HL → Binance executor flags (vnpy Binance USDT-M REST, same BINANCE_API_* as ORB)."""
+    from utils.hl_binance_executor import status as binance_live_status
+
+    return {"ok": True, **binance_live_status()}
 
 
 _candidates_lock = threading.Lock()

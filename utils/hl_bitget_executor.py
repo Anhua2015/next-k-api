@@ -9,7 +9,7 @@ MODE=delta: per-row intents (single bot / single account only).
 Default dry-run. Live: HL_BITGET_LIVE=1, DRY_RUN=0, plus enabled subaccounts
 with credentials (sub mode) or ALLOW_COINS+BOT_IDS (net/delta).
 
-Burst fills: HL_BITGET_DEBOUNCE_MS (default 1000) coalesces paper→Bitget
+Burst fills: HL_BITGET_DEBOUNCE_MS (default 10000) coalesces paper→Bitget
 syncs so one HL fill storm becomes one position align.
 """
 
@@ -83,7 +83,7 @@ def min_notional() -> float:
 def debounce_ms() -> float:
     """Wait this many ms after the last paper fill before Bitget sync (0 = off)."""
     try:
-        return max(0.0, float(os.getenv("HL_BITGET_DEBOUNCE_MS", "1000") or 1000))
+        return max(0.0, float(os.getenv("HL_BITGET_DEBOUNCE_MS", "10000") or 10000))
     except (TypeError, ValueError):
         return 1000.0
 
@@ -1080,7 +1080,7 @@ def _flush_debounced(gen: int) -> None:
 
 
 def maybe_execute_rows_async(rows: list[dict[str, Any]]) -> None:
-    """Queue Bitget sync after paper fills. Default: debounce burst fills (~1s)."""
+    """Queue Bitget sync after paper fills. Default: debounce burst fills (~10s)."""
     if not rows or not live_enabled():
         return
 

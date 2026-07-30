@@ -1,6 +1,6 @@
 {
-  "updated": "2026-07-28",
-  "note": "Active: A–D/K + E–I + J/L stable-quant append. All enabled:false until live Bitget on.",
+  "updated": "2026-07-30",
+  "note": "Bitget subs kept for later. O is Binance-only (see hl_binance_subaccounts.json). All Bitget enabled:false until live on.",
   "subaccounts": [
     {
       "id": "A",
@@ -109,6 +109,25 @@
       "enabled": false,
       "env_prefix": "BITGET_SUB_L",
       "scale": 1.0
+    },
+    {
+      "id": "N",
+      "label": "Bot N",
+      "bot_id": "bot_n",
+      "coins": ["BTC", "ETH", "HYPE", "STRK"],
+      "enabled": false,
+      "env_prefix": "BITGET_SUB_N",
+      "scale": 1.0
+    },
+    {
+      "id": "O",
+      "label": "Bot O · live K twin (Binance)",
+      "bot_id": "bot_o",
+      "coins": null,
+      "enabled": false,
+      "env_prefix": "BITGET_SUB_O",
+      "scale": 1.0,
+      "note": "O routes to Binance via HL_BINANCE_*; no coin filter; Bitget seat kept disabled"
     }
   ]
 }

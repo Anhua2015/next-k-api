@@ -1,0 +1,15 @@
+{
+  "updated": "2026-07-30",
+  "note": "Binance sub-account routes. O=bot_o live twin of K, paper 100U → size = target_sz * (our_eq/target_av) * scale. Secrets: {env_prefix}_API_KEY/_API_SECRET.",
+  "subaccounts": [
+    {
+      "id": "O",
+      "label": "Bot O · Binance live (K twin)",
+      "bot_id": "bot_o",
+      "coins": null,
+      "enabled": true,
+      "env_prefix": "BINANCE_SUB_O",
+      "scale": 1.0
+    }
+  ]
+}

@@ -2,7 +2,7 @@
   "updated": "2026-07-29",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "2026-07-29: A already=20bc (LW A BTC); add M=868b (LW A BTC/SOL long-bias). No seat swap. paper 1000U each. Not financial advice.",
+  "note": "2026-07-30: add O=a7405 (same addr as K) for Bitget live; K stays paper-only. N=45855. paper 1000U each. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -178,16 +178,40 @@
       "ht_style": "swing_trader",
       "tag": "波段",
       "style_tags": ["concentrated"]
+    },
+    {
+      "id": "bot_n",
+      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+      "priority": 14,
+      "paper_balance": 1000,
+      "style": "day · multi long",
+      "why": "stable WR add 2026-07-29 · fillWR≈74% PF≈9.4 · week/month/all>0 · whitelist majors only",
+      "coins": ["BTC", "ETH", "HYPE", "STRK"],
+      "watch": ["STRK/HYPE", "ignore xyz/alts"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+      "ht_style": "day_trader",
+      "tag": "日内"
+    },
+    {
+      "id": "bot_o",
+      "address": "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
+      "priority": 15,
+      "paper_balance": 100,
+      "style": "day · binance live",
+      "why": "2026-07-30 Binance live twin of K · same addr a7405 · paper 100U (HL_PAPER_BALANCE_BOT_O) · ratio=eq/target_av",
+      "coins": null,
+      "watch": ["Binance mirror", "100U sizing", "debounce 10s"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
+      "ht_style": "day_trader",
+      "tag": "日内",
+      "live": true,
+      "venue": "binance"
     }
   ],
   "reject_for_now": [
     {
       "address": "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
       "reason": "Dropped 2026-07-28 stable90 — ex bot_e; 7d WR93% but 90d net loss"
-    },
-    {
-      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
-      "reason": "Dropped 2026-07-28 stable90 — ex bot_f; multi-leg high MDD path"
     },
     {
       "address": "0xdc9bf10e6b88f0657d02179ca338e0ffe9ecc564",
