@@ -272,7 +272,13 @@ def _desired_from_target_book(
     route_coins: set[str] | frozenset[str] | None = None,
     route_scale: float = 1.0,
 ) -> dict[str, float]:
-    """Size Binance book from HL target positions × (our_equity / target_av)."""
+    """Size so *margin / equity* matches the target, not raw coin size.
+
+    Target may run 20–29x; Binance sub is capped (default 5x). Matching coin
+    size would over-consume our margin. Instead:
+
+        our_sz = target_sz × (our_eq / target_av) × (our_lev / their_lev) × scale
+    """
     try:
         av = float(bot.get("target_av") or 0)
     except (TypeError, ValueError):
@@ -286,7 +292,8 @@ def _desired_from_target_book(
         eq = 0.0
     if av <= 1e-9 or eq <= 0:
         return {}
-    ratio = (eq / av) * float(route_scale or 1.0)
+    our_lev = float(max_leverage())
+    equity_ratio = (eq / av) * float(route_scale or 1.0)
     net: dict[str, float] = {}
     tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
     for coin, tp in tpos.items():
@@ -296,12 +303,41 @@ def _desired_from_target_book(
         if not sym:
             continue
         try:
-            sz = float(tp.get("sz") or 0) * ratio
+            tsz = float(tp.get("sz") or 0)
         except (TypeError, ValueError):
             continue
+        if abs(tsz) < 1e-16:
+            continue
+        try:
+            their_lev = float(tp.get("leverage") or 0)
+        except (TypeError, ValueError):
+            their_lev = 0.0
+        if their_lev <= 0:
+            # Fall back to cached lev map / assume our cap (no extra shrink).
+            lev_map = bot.get("target_lev_by_coin") if isinstance(bot.get("target_lev_by_coin"), dict) else {}
+            raw = lev_map.get(str(coin).upper()) or lev_map.get(str(coin))
+            try:
+                their_lev = float(raw or 0)
+            except (TypeError, ValueError):
+                their_lev = 0.0
+        if their_lev <= 0:
+            their_lev = our_lev
+        # Match margin%: shrink coin size when we cannot use their higher lev.
+        lev_ratio = our_lev / their_lev
+        sz = tsz * equity_ratio * lev_ratio
         if abs(sz) < 1e-16:
             continue
         net[sym] = net.get(sym, 0.0) + sz
+        logger.info(
+            "HL→Binance size %s target_sz=%.6f eq_ratio=%.6g our_lev=%s their_lev=%s "
+            "→ our_sz=%.6f (margin-matched)",
+            sym,
+            tsz,
+            equity_ratio,
+            int(our_lev),
+            their_lev,
+            sz,
+        )
     return net
 
 
