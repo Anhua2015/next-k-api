@@ -1,6 +1,8 @@
 """Hyperliquid paper copy — immediate fill-delta market follow (no snapshot seed).
 
-One bot per watchlist address (default 1000U; override via watchlist paper_balance):
+One bot per watchlist seat (default 1000U; override via watchlist paper_balance).
+Multiple seats may share one HL address (e.g. K paper + O live twin); target
+health / WS fills are keyed by address and applied to every matching bot.
   our_delta = fill.sz × (bot_equity / target_AV)
   trade/entry at fill.px (market), not target average entry
   hard cap: |notional| ≤ equity × leverage_cap
@@ -1053,7 +1055,11 @@ def _compute_target_health(bot: dict[str, Any]) -> dict[str, Any]:
 
 
 def refresh_target_health(*, force: bool = False) -> dict[str, Any]:
-    """Poll target clearinghouse + recent fill age; tag empty/inactive bots."""
+    """Poll target clearinghouse + recent fill age; tag empty/inactive bots.
+
+    Bots that share an address (e.g. K paper + O live twin) fetch HL once and
+    reuse the same perp/spot/EVM snapshot so UI labels stay consistent.
+    """
     if not paper_enabled():
         return load_paper()
     if not force:
@@ -1072,45 +1078,52 @@ def refresh_target_health(*, force: bool = False) -> dict[str, Any]:
         except Exception:
             mids = dict(_mids_cache)
         cfg = paper_config()
+
+        by_addr: dict[str, list[dict[str, Any]]] = {}
         for bot in (book.get("bots") or {}).values():
+            if not isinstance(bot, dict):
+                continue
             addr = str(bot.get("address") or "").strip()
             if not addr:
                 continue
-            if bot.get("target_watched_at") is None:
-                bot["target_watched_at"] = now
+            by_addr.setdefault(addr.lower(), []).append(bot)
+
+        for addr_l, bots in by_addr.items():
+            addr = str(bots[0].get("address") or addr_l).strip()
+            for bot in bots:
+                if bot.get("target_watched_at") is None:
+                    bot["target_watched_at"] = now
 
             snap = None
-            # Refresh perp AV + same-wallet spot USDC
+            spot = None
+            evm: float | None = None
+            seeded_last: float | None = None
+            label = ",".join(str(b.get("id") or "") for b in bots) or addr[:10]
+
             try:
                 snap = hl_snapshot_positions(addr)
-                _cache_target_meta(bot, snap)
             except Exception as exc:
-                logger.warning("target health AV %s: %s", bot.get("id"), exc)
+                logger.warning("target health AV %s: %s", label, exc)
             try:
                 spot = hl_snapshot_spot(addr, fill_limit=20)
-                _apply_spot_snapshot(bot, spot)
             except Exception as exc:
-                logger.warning("target health spot %s: %s", bot.get("id"), exc)
+                logger.warning("target health spot %s: %s", label, exc)
                 try:
-                    bot["target_spot_usdc"] = round(hl_snapshot_spot_usdc(addr), 4)
-                    bot["target_spot_at"] = now
+                    spot = {
+                        "usdc": hl_snapshot_spot_usdc(addr),
+                        "balances": [],
+                        "recent_fills": [],
+                    }
                 except Exception as exc2:
-                    logger.warning("target health spot usdc %s: %s", bot.get("id"), exc2)
-
-            # HyperEVM USDC (same address) — monitor only
+                    logger.warning("target health spot usdc %s: %s", label, exc2)
             try:
                 evm = hl_snapshot_hyperevm_usdc(addr)
-                if evm is None:
-                    bot["target_evm_usdc"] = None
-                else:
-                    bot["target_evm_usdc"] = round(float(evm), 4)
-                bot["target_evm_at"] = now
             except Exception as exc:
-                logger.warning("target health evm %s: %s", bot.get("id"), exc)
-                bot["target_evm_usdc"] = None
+                logger.warning("target health evm %s: %s", label, exc)
+                evm = None
 
-            # Seed last-fill from recent HL *perp* fills if we have never seen one on WS
-            if bot.get("target_last_fill_at") is None:
+            # Seed last-fill once per address if no twin has seen a WS fill yet.
+            if all(b.get("target_last_fill_at") is None for b in bots):
                 try:
                     fills = http_json({"type": "userFills", "user": addr})
                     if isinstance(fills, list) and fills:
@@ -1123,41 +1136,66 @@ def refresh_target_health(*, force: bool = False) -> dict[str, Any]:
                             ft = _fill_time_epoch(f.get("time"))
                             if ft is not None and (latest is None or ft > latest):
                                 latest = ft
-                        if latest is not None:
-                            bot["target_last_fill_at"] = latest
+                        seeded_last = latest
                 except Exception as exc:
-                    logger.debug("target health fills %s: %s", bot.get("id"), exc)
+                    logger.debug("target health fills %s: %s", label, exc)
 
-            prev = (bot.get("target_health") or {}).get("status") if isinstance(bot.get("target_health"), dict) else None
-            health = _compute_target_health(bot)
-            bot["target_health"] = health
-            # Target flat on perps → close zombie paper (even if AV still funded)
-            if _should_flatten_paper(
-                bot,
-                snap,
-                ratio=_copy_ratio(bot, cfg) if (bot.get("positions") or {}) else 1.0,
-            ):
-                closed = _mirror_target_book(
-                    bot, _empty_book_snap(bot, snap), mids, cfg
+            # Unify last-fill across twins (max of existing + seed).
+            last_fill = seeded_last
+            for bot in bots:
+                try:
+                    cur = float(bot["target_last_fill_at"]) if bot.get("target_last_fill_at") is not None else None
+                except (TypeError, ValueError):
+                    cur = None
+                if cur is not None and (last_fill is None or cur > last_fill):
+                    last_fill = cur
+
+            for bot in bots:
+                if snap is not None:
+                    _cache_target_meta(bot, snap)
+                if spot is not None:
+                    _apply_spot_snapshot(bot, spot)
+                if evm is None:
+                    bot["target_evm_usdc"] = None
+                else:
+                    bot["target_evm_usdc"] = round(float(evm), 4)
+                bot["target_evm_at"] = now
+                if last_fill is not None:
+                    bot["target_last_fill_at"] = last_fill
+
+                prev = (
+                    (bot.get("target_health") or {}).get("status")
+                    if isinstance(bot.get("target_health"), dict)
+                    else None
                 )
-                if closed:
-                    logger.warning(
-                        "HL target flat flatten %s: closed %s paper rows",
-                        bot.get("id"),
-                        len(closed),
+                health = _compute_target_health(bot)
+                bot["target_health"] = health
+                if _should_flatten_paper(
+                    bot,
+                    snap,
+                    ratio=_copy_ratio(bot, cfg) if (bot.get("positions") or {}) else 1.0,
+                ):
+                    closed = _mirror_target_book(
+                        bot, _empty_book_snap(bot, snap), mids, cfg
                     )
-            if not health.get("ok"):
-                alerts.append(f"{bot.get('id')}:{health.get('status')}")
-                if prev != health.get("status"):
-                    logger.warning(
-                        "HL target health %s → %s av=%s quiet_h=%s",
-                        bot.get("id"),
-                        health.get("status"),
-                        health.get("target_av"),
-                        health.get("quiet_hours"),
-                    )
-            elif prev and prev != "ok":
-                logger.info("HL target health %s recovered → ok", bot.get("id"))
+                    if closed:
+                        logger.warning(
+                            "HL target flat flatten %s: closed %s paper rows",
+                            bot.get("id"),
+                            len(closed),
+                        )
+                if not health.get("ok"):
+                    alerts.append(f"{bot.get('id')}:{health.get('status')}")
+                    if prev != health.get("status"):
+                        logger.warning(
+                            "HL target health %s → %s av=%s quiet_h=%s",
+                            bot.get("id"),
+                            health.get("status"),
+                            health.get("target_av"),
+                            health.get("quiet_hours"),
+                        )
+                elif prev and prev != "ok":
+                    logger.info("HL target health %s recovered → ok", bot.get("id"))
 
         book["target_alerts"] = alerts
         save_paper(book)
