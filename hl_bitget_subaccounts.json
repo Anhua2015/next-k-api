@@ -1,6 +1,6 @@
 {
   "updated": "2026-07-30",
-  "note": "Bitget subs kept for later. O is Binance-only (see hl_binance_subaccounts.json). All Bitget enabled:false until live on.",
+  "note": "O=Bitget live twin of K. Other seats enabled:false until turned on. Binance desk live off.",
   "subaccounts": [
     {
       "id": "A",
@@ -121,13 +121,13 @@
     },
     {
       "id": "O",
-      "label": "Bot O · live K twin (Binance)",
+      "label": "Bot O · Bitget live (K twin)",
       "bot_id": "bot_o",
       "coins": null,
-      "enabled": false,
+      "enabled": true,
       "env_prefix": "BITGET_SUB_O",
       "scale": 1.0,
-      "note": "O routes to Binance via HL_BINANCE_*; no coin filter; Bitget seat kept disabled"
+      "note": "paper book → Bitget sub; set HL_BITGET_LIVE=1 + BITGET_SUB_O_* keys"
     }
   ]
 }

@@ -1,13 +1,13 @@
 {
   "updated": "2026-07-30",
-  "note": "Binance sub-account routes. O=bot_o live twin of K, paper 100U → size = target_sz * (our_eq/target_av) * scale. Secrets: {env_prefix}_API_KEY/_API_SECRET.",
+  "note": "Binance routes retired for desk live (sub 5x cap). Keep file for possible later use; all enabled:false. Prefer Bitget (hl_bitget_subaccounts.json).",
   "subaccounts": [
     {
       "id": "O",
-      "label": "Bot O · Binance live (K twin)",
+      "label": "Bot O · Binance (disabled)",
       "bot_id": "bot_o",
       "coins": null,
-      "enabled": true,
+      "enabled": false,
       "env_prefix": "BINANCE_SUB_O",
       "scale": 1.0
     }

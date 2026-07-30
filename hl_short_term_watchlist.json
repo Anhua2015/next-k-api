@@ -2,7 +2,7 @@
   "updated": "2026-07-29",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "2026-07-30: add O=a7405 (same addr as K) for Bitget live; K stays paper-only. N=45855. paper 1000U each. Not financial advice.",
+  "note": "2026-07-30: O=a7405 Bitget live twin of K (paper→sub); Binance off. K paper-only. N=45855. paper 1000U. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -196,13 +196,13 @@
       "id": "bot_o",
       "address": "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "priority": 15,
-      "paper": false,
+      "paper_balance": 1000,
       "live": true,
-      "venue": "binance",
-      "style": "day · binance live-only",
-      "why": "2026-07-30 Binance live twin of K · no paper book · size = binance_equity/target_av · show real USDT",
+      "venue": "bitget",
+      "style": "day · bitget live",
+      "why": "2026-07-30 Bitget live twin of K · paper book drives Bitget sub O · Binance dropped (5x cap)",
       "coins": null,
-      "watch": ["Binance live-only", "real USDT equity", "debounce 10s"],
+      "watch": ["Bitget sub O", "same addr as K", "paper→live"],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "ht_style": "day_trader",
       "tag": "日内"
