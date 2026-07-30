@@ -87,15 +87,15 @@ async def get_paper(mark: bool = Query(False, description="true 时尝试刷新�
     Bitget paper→sub seats keep the paper book as-is.
     """
     from utils.hl_binance_executor import overlay_live_bots
-    from utils.hl_paper_copy import load_paper, refresh_marks
+    from utils.hl_paper_copy import load_paper, refresh_marks, slim_paper_for_api
 
     def _run():
         book = refresh_marks(force=False) if mark else load_paper()
         try:
-            return overlay_live_bots(book)
+            book = overlay_live_bots(book)
         except Exception:
             logger.exception("live overlay failed")
-            return book
+        return slim_paper_for_api(book)
 
     return await run_in_threadpool(_run)
 

@@ -721,6 +721,45 @@ def _aggregate(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def slim_paper_for_api(
+    data: dict[str, Any],
+    *,
+    per_bot_fills: int = 48,
+    agg_fills: int = 100,
+) -> dict[str, Any]:
+    """Trim fill history for HTTP responses — disk keeps full book, UI only needs recent rows.
+
+    Large multi-bot ledgers were ~0.9MB / 10–15s and caused intermittent
+    「连接失败」on the mirror desk when the browser or edge timed out.
+    """
+    bots_in = data.get("bots") if isinstance(data.get("bots"), dict) else {}
+    bots_out: dict[str, Any] = {}
+    for bid, bot in bots_in.items():
+        if not isinstance(bot, dict):
+            continue
+        b = dict(bot)
+        fills = b.get("fills")
+        if isinstance(fills, list) and len(fills) > per_bot_fills:
+            b["fills"] = fills[:per_bot_fills]
+        th = b.get("target_health")
+        if isinstance(th, dict):
+            th2 = dict(th)
+            bal = th2.get("target_spot_balances")
+            if isinstance(bal, list) and len(bal) > 8:
+                th2["target_spot_balances"] = bal[:8]
+            sf = th2.get("target_spot_fills")
+            if isinstance(sf, list) and len(sf) > 8:
+                th2["target_spot_fills"] = sf[:8]
+            b["target_health"] = th2
+        bots_out[str(bid)] = b
+    out = dict(data)
+    out["bots"] = bots_out
+    top = out.get("fills")
+    if isinstance(top, list) and len(top) > agg_fills:
+        out["fills"] = top[:agg_fills]
+    return out
+
+
 def load_paper() -> dict[str, Any]:
     path = _path()
     if not path.exists():
