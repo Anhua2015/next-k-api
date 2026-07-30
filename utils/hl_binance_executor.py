@@ -356,7 +356,10 @@ def _scale_book_to_margin(
 
 
 def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
-    """Mutate API response: fill live-only seats with Binance wallet/positions."""
+    """Mutate API response: fill Binance live-only seats with wallet/positions.
+
+    Bitget paper→sub seats keep their paper book — do not overlay.
+    """
     from utils.hl_paper_copy import is_live_only_bot
     from utils.hl_binance_subaccounts import enabled_routes, routes_for_bot
 
@@ -376,6 +379,9 @@ def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
 
     for bot in bots.values():
         if not is_live_only_bot(bot):
+            continue
+        venue = str(bot.get("venue") or "").strip().lower()
+        if venue and venue != "binance":
             continue
         bid = str(bot.get("id") or "")
         routes = routes_for_bot(bid) or [r for r in enabled_routes() if r.bot_id == bid]

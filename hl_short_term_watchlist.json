@@ -197,6 +197,7 @@
       "address": "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "priority": 15,
       "paper_balance": 1000,
+      "paper": true,
       "live": true,
       "venue": "bitget",
       "style": "day · bitget live",

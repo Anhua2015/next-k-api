@@ -226,15 +226,21 @@ def _seen_fill_key(existing: list, kind: str, value: str) -> bool:
 
 
 def is_live_only_bot(bot: dict[str, Any] | None) -> bool:
-    """True for seats that mirror on exchange only (no paper PnL book)."""
+    """True for seats that mirror on exchange only (no paper PnL book).
+
+    Bitget desk seats are paper→sub (not live-only). Binance live-only is opt-in
+    via paper:false / live_only / mode=live_only. Explicit paper:true always wins.
+    """
     if not isinstance(bot, dict):
+        return False
+    if bot.get("paper") is True:
         return False
     if bot.get("live_only") is True:
         return True
     if bot.get("paper") is False:
         return True
     venue = str(bot.get("venue") or "").strip().lower()
-    if venue in ("binance", "bitget") and bot.get("live") is True and bot.get("paper") is False:
+    if venue == "binance" and bot.get("live") is True and bot.get("paper") is not True:
         return True
     return False
 
@@ -381,15 +387,19 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             elif ht in ("swing_trader", "swing", "波段") or ht.startswith("swing"):
                 tag = "波段"
         bots[bid]["tag"] = tag or None
-        # Live-only seats (e.g. bot_o Binance): no paper ledger.
+        # Live-only: no paper ledger (Binance-style). Bitget live = paper→sub.
         live_flag = bool(w.get("live"))
         paper_flag = w.get("paper")
         venue = str(w.get("venue") or "").strip().lower() or None
+        mode = str(w.get("mode") or "").strip().lower()
         live_only = (
             paper_flag is False
-            or str(w.get("mode") or "").strip().lower() in ("live", "live_only")
-            or (live_flag and venue in ("binance", "bitget") and paper_flag is not True)
+            or mode == "live_only"
+            or (live_flag and venue == "binance" and paper_flag is not True)
         )
+        # Explicit paper:true always wins (paper→exchange twin).
+        if paper_flag is True:
+            live_only = False
         bots[bid]["live"] = live_flag
         bots[bid]["venue"] = venue
         bots[bid]["live_only"] = bool(live_only)
@@ -403,6 +413,29 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             bots[bid]["paper_balance"] = 0.0
             bots[bid]["paper_cleared_for_live"] = True
             membership_changed = True
+        elif not live_only and bots[bid].get("paper_cleared_for_live"):
+            # Leaving live-only (e.g. O Binance→Bitget): re-seed paper book.
+            init = _bot_initial_balance(w, cfg)
+            keep_keys = (
+                "allow_coins",
+                "tag",
+                "ht_style",
+                "style_tags",
+                "live",
+                "venue",
+                "address",
+            )
+            kept = {k: bots[bid].get(k) for k in keep_keys}
+            bots[bid].update(_empty_bot(w, init))
+            bots[bid]["paper_balance"] = init
+            bots[bid].pop("paper_cleared_for_live", None)
+            bots[bid]["live_only"] = False
+            bots[bid]["paper"] = True
+            for k, v in kept.items():
+                if v is not None:
+                    bots[bid][k] = v
+            membership_changed = True
+            logger.info("restored paper book for %s after leaving live-only (%.0fU)", bid, init)
         if tag == "日内" or ht in ("day_trader", "day") or ht.startswith("day"):
             bots[bid]["ht_style"] = "day_trader"
         elif tag == "波段" or ht in ("swing_trader", "swing") or ht.startswith("swing"):

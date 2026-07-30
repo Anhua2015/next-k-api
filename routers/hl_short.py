@@ -83,7 +83,8 @@ async def get_board(
 async def get_paper(mark: bool = Query(False, description="true 时尝试刷新浮盈（有冷却）")):
     """Simulated ledger. Default: cached book only; mark=true is rate-limited.
 
-    Live-only seats (e.g. bot_o) are overlaid with Binance wallet/positions.
+    Binance live-only seats are overlaid with exchange wallet/positions.
+    Bitget paper→sub seats keep the paper book as-is.
     """
     from utils.hl_binance_executor import overlay_live_bots
     from utils.hl_paper_copy import load_paper, refresh_marks
