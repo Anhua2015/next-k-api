@@ -196,16 +196,16 @@
       "id": "bot_o",
       "address": "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "priority": 15,
-      "paper_balance": 100,
-      "style": "day · binance live",
-      "why": "2026-07-30 Binance live twin of K · same addr a7405 · paper 100U (HL_PAPER_BALANCE_BOT_O) · ratio=eq/target_av",
+      "paper": false,
+      "live": true,
+      "venue": "binance",
+      "style": "day · binance live-only",
+      "why": "2026-07-30 Binance live twin of K · no paper book · size = binance_equity/target_av · show real USDT",
       "coins": null,
-      "watch": ["Binance mirror", "100U sizing", "debounce 10s"],
+      "watch": ["Binance live-only", "real USDT equity", "debounce 10s"],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "ht_style": "day_trader",
-      "tag": "日内",
-      "live": true,
-      "venue": "binance"
+      "tag": "日内"
     }
   ],
   "reject_for_now": [

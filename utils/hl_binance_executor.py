@@ -244,9 +244,13 @@ def compute_bot_desired(
     route_coins: set[str] | frozenset[str] | None = None,
     route_scale: float = 1.0,
 ) -> dict[str, float]:
+    from utils.hl_paper_copy import is_live_only_bot
+
     bot = _load_bot(bot_id)
-    net: dict[str, float] = {}
     sc = scale() * float(route_scale or 1.0)
+    if is_live_only_bot(bot):
+        return _desired_from_target_book(bot, route_coins=route_coins, route_scale=sc)
+    net: dict[str, float] = {}
     for pos in (bot.get("positions") or {}).values():
         coin = str(pos.get("coin") or "")
         sym = hl_coin_to_binance(coin, route_coins=route_coins)
@@ -262,11 +266,175 @@ def compute_bot_desired(
     return net
 
 
+def _desired_from_target_book(
+    bot: dict[str, Any],
+    *,
+    route_coins: set[str] | frozenset[str] | None = None,
+    route_scale: float = 1.0,
+) -> dict[str, float]:
+    """Size Binance book from HL target positions × (our_equity / target_av)."""
+    try:
+        av = float(bot.get("target_av") or 0)
+    except (TypeError, ValueError):
+        av = 0.0
+    try:
+        from quant.engine.exchanges.binance.account import fetch_account_equity
+
+        eq = float(fetch_account_equity().get("equity") or 0)
+    except Exception as exc:
+        logger.warning("binance equity for live sizing failed: %s", exc)
+        eq = 0.0
+    if av <= 1e-9 or eq <= 0:
+        return {}
+    ratio = (eq / av) * float(route_scale or 1.0)
+    net: dict[str, float] = {}
+    tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+    for coin, tp in tpos.items():
+        if not isinstance(tp, dict):
+            continue
+        sym = hl_coin_to_binance(str(coin), route_coins=route_coins)
+        if not sym:
+            continue
+        try:
+            sz = float(tp.get("sz") or 0) * ratio
+        except (TypeError, ValueError):
+            continue
+        if abs(sz) < 1e-16:
+            continue
+        net[sym] = net.get(sym, 0.0) + sz
+    return net
+
+
+def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
+    """Mutate API response: fill live-only seats with Binance wallet/positions."""
+    from utils.hl_paper_copy import is_live_only_bot
+    from utils.hl_binance_subaccounts import enabled_routes, routes_for_bot
+
+    bots = book.get("bots") if isinstance(book.get("bots"), dict) else {}
+    if not bots:
+        return book
+    try:
+        from quant.engine.exchanges.binance.account import (
+            binance_creds,
+            fetch_account_equity,
+            fetch_position_risk_rows,
+            load_creds_from_env,
+        )
+    except Exception as exc:
+        logger.warning("binance overlay import failed: %s", exc)
+        return book
+
+    for bot in bots.values():
+        if not is_live_only_bot(bot):
+            continue
+        bid = str(bot.get("id") or "")
+        routes = routes_for_bot(bid) or [r for r in enabled_routes() if r.bot_id == bid]
+        if not routes:
+            # Still show seat as live even if route disabled — try first matching env.
+            from utils.hl_binance_subaccounts import parse_routes
+
+            routes = [r for r in parse_routes() if r.bot_id == bid][:1]
+        if not routes:
+            bot["live_error"] = "no_binance_route"
+            continue
+        route = routes[0]
+        creds = load_creds_from_env(route.env_prefix)
+        if not creds.ok():
+            bot["live_error"] = "credentials_missing"
+            bot["equity"] = None
+            bot["balance"] = None
+            continue
+        try:
+            with binance_creds(creds):
+                eq = fetch_account_equity()
+                rows = fetch_position_risk_rows()
+            bot["live_error"] = None
+            bot["equity"] = eq.get("equity")
+            bot["balance"] = eq.get("wallet")
+            bot["u_pnl"] = eq.get("upnl")
+            bot["live_available"] = eq.get("available")
+            bot["paper_balance"] = eq.get("wallet")
+            bot["realized_pnl"] = None
+            positions: dict[str, Any] = {}
+            for row in rows:
+                try:
+                    amt = float(row.get("positionAmt") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(amt) < 1e-12:
+                    continue
+                sym = str(row.get("symbol") or "").upper()
+                coin = sym[:-4] if sym.endswith("USDT") else sym
+                try:
+                    entry = float(row.get("entryPrice") or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                try:
+                    mark = float(row.get("markPrice") or 0)
+                except (TypeError, ValueError):
+                    mark = entry
+                try:
+                    upnl = float(row.get("unRealizedProfit") or 0)
+                except (TypeError, ValueError):
+                    upnl = 0.0
+                try:
+                    lev = float(row.get("leverage") or 0) or None
+                except (TypeError, ValueError):
+                    lev = None
+                notional = abs(amt) * mark if mark > 0 else 0.0
+                positions[f"{bid}:{coin}"] = {
+                    "coin": coin,
+                    "sz": amt,
+                    "entry_px": entry,
+                    "mark_px": mark,
+                    "u_pnl": upnl,
+                    "leverage": lev,
+                    "notional": notional,
+                    "source": bid,
+                    "venue": "binance",
+                    "live": True,
+                }
+            bot["positions"] = positions
+            bot["live_at"] = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:
+            logger.warning("binance overlay %s failed: %s", bid, exc)
+            bot["live_error"] = str(exc)
+    # Recompute desk totals including live equity for UI.
+    desk_eq = 0.0
+    desk_bal = 0.0
+    for bot in bots.values():
+        try:
+            desk_eq += float(bot.get("equity") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            desk_bal += float(bot.get("balance") or 0)
+        except (TypeError, ValueError):
+            pass
+    book["equity"] = round(desk_eq, 4)
+    book["balance"] = round(desk_bal, 4)
+    book["portfolio_equity"] = round(desk_eq, 4)
+    return book
+
+
 def _paper_leverage(bot_id: str | None, symbol: str) -> int | None:
     if not bot_id:
         return None
     bot = _load_bot(bot_id)
     best: int | None = None
+    # Live-only: leverage from cached HL target book.
+    tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+    for coin, tp in tpos.items():
+        if hl_coin_to_binance(str(coin)) != symbol:
+            continue
+        if not isinstance(tp, dict):
+            continue
+        try:
+            lev = int(float(tp.get("leverage") or 0))
+        except (TypeError, ValueError):
+            continue
+        if lev > 0:
+            best = lev if best is None else max(best, lev)
     for pos in (bot.get("positions") or {}).values():
         coin = str(pos.get("coin") or "")
         sym = hl_coin_to_binance(coin)

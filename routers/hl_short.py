@@ -81,12 +81,22 @@ async def get_board(
 
 @router.get("/paper")
 async def get_paper(mark: bool = Query(False, description="true 时尝试刷新浮盈（有冷却）")):
-    """Simulated ledger. Default: cached book only; mark=true is rate-limited."""
+    """Simulated ledger. Default: cached book only; mark=true is rate-limited.
+
+    Live-only seats (e.g. bot_o) are overlaid with Binance wallet/positions.
+    """
+    from utils.hl_binance_executor import overlay_live_bots
     from utils.hl_paper_copy import load_paper, refresh_marks
 
-    if mark:
-        return await run_in_threadpool(lambda: refresh_marks(force=False))
-    return await run_in_threadpool(load_paper)
+    def _run():
+        book = refresh_marks(force=False) if mark else load_paper()
+        try:
+            return overlay_live_bots(book)
+        except Exception:
+            logger.exception("live overlay failed")
+            return book
+
+    return await run_in_threadpool(_run)
 
 
 @router.post("/paper/reset")

@@ -170,6 +170,36 @@ def fetch_usdt_available() -> float:
     return 0.0
 
 
+def fetch_account_equity() -> Dict[str, float]:
+    """USDT-M account equity snapshot for live desk display / sizing."""
+    data = _signed_get("/fapi/v2/account", {})
+    if not isinstance(data, dict):
+        return {"equity": 0.0, "wallet": 0.0, "upnl": 0.0, "available": 0.0}
+    try:
+        wallet = float(data.get("totalWalletBalance") or 0)
+    except (TypeError, ValueError):
+        wallet = 0.0
+    try:
+        upnl = float(data.get("totalUnrealizedProfit") or 0)
+    except (TypeError, ValueError):
+        upnl = 0.0
+    try:
+        avail = float(data.get("availableBalance") or 0)
+    except (TypeError, ValueError):
+        avail = 0.0
+    return {
+        "equity": round(wallet + upnl, 6),
+        "wallet": round(wallet, 6),
+        "upnl": round(upnl, 6),
+        "available": round(avail, 6),
+    }
+
+
+def fetch_position_risk_rows() -> List[Dict[str, Any]]:
+    rows = _signed_get("/fapi/v2/positionRisk", {})
+    return rows if isinstance(rows, list) else []
+
+
 def set_symbol_margin_isolated(symbol: str) -> None:
     sym = norm_symbol(symbol)
     try:

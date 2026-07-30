@@ -225,6 +225,20 @@ def _seen_fill_key(existing: list, kind: str, value: str) -> bool:
     return False
 
 
+def is_live_only_bot(bot: dict[str, Any] | None) -> bool:
+    """True for seats that mirror on exchange only (no paper PnL book)."""
+    if not isinstance(bot, dict):
+        return False
+    if bot.get("live_only") is True:
+        return True
+    if bot.get("paper") is False:
+        return True
+    venue = str(bot.get("venue") or "").strip().lower()
+    if venue in ("binance", "bitget") and bot.get("live") is True and bot.get("paper") is False:
+        return True
+    return False
+
+
 def _empty_bot(wallet: dict[str, Any], balance: float) -> dict[str, Any]:
     return {
         "id": wallet.get("id") or str(wallet.get("address") or "")[:10],
@@ -367,6 +381,28 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             elif ht in ("swing_trader", "swing", "波段") or ht.startswith("swing"):
                 tag = "波段"
         bots[bid]["tag"] = tag or None
+        # Live-only seats (e.g. bot_o Binance): no paper ledger.
+        live_flag = bool(w.get("live"))
+        paper_flag = w.get("paper")
+        venue = str(w.get("venue") or "").strip().lower() or None
+        live_only = (
+            paper_flag is False
+            or str(w.get("mode") or "").strip().lower() in ("live", "live_only")
+            or (live_flag and venue in ("binance", "bitget") and paper_flag is not True)
+        )
+        bots[bid]["live"] = live_flag
+        bots[bid]["venue"] = venue
+        bots[bid]["live_only"] = bool(live_only)
+        bots[bid]["paper"] = False if live_only else True
+        if live_only and not bots[bid].get("paper_cleared_for_live"):
+            bots[bid]["positions"] = {}
+            bots[bid]["fills"] = []
+            bots[bid]["balance"] = 0.0
+            bots[bid]["equity"] = 0.0
+            bots[bid]["realized_pnl"] = 0.0
+            bots[bid]["paper_balance"] = 0.0
+            bots[bid]["paper_cleared_for_live"] = True
+            membership_changed = True
         if tag == "日内" or ht in ("day_trader", "day") or ht.startswith("day"):
             bots[bid]["ht_style"] = "day_trader"
         elif tag == "波段" or ht in ("swing_trader", "swing") or ht.startswith("swing"):
@@ -430,12 +466,21 @@ def _aggregate(data: dict[str, Any]) -> dict[str, Any]:
             h = bot["target_health"]
             if not h.get("ok"):
                 alerts.append(f"{bot.get('id')}:{h.get('status')}")
-        balance += float(bot.get("balance") or 0)
-        equity += float(bot.get("equity") or 0)
-        realized += float(bot.get("realized_pnl") or 0)
-        for k, p in (bot.get("positions") or {}).items():
-            positions[k] = p
-        fills.extend(bot.get("fills") or [])
+        # Live-only seats do not contribute paper desk equity (real $ comes from overlay).
+        if not is_live_only_bot(bot):
+            balance += float(bot.get("balance") or 0)
+            equity += float(bot.get("equity") or 0)
+            realized += float(bot.get("realized_pnl") or 0)
+            for k, p in (bot.get("positions") or {}).items():
+                positions[k] = p
+            fills.extend(bot.get("fills") or [])
+        else:
+            # Keep signal/live_sync rows for the fills strip.
+            fills.extend(
+                f
+                for f in (bot.get("fills") or [])
+                if isinstance(f, dict) and f.get("action") == "live_sync"
+            )
     fills.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
     data["balance"] = round(balance, 4)
     data["equity"] = round(equity, 4)
@@ -503,6 +548,19 @@ def load_paper() -> dict[str, Any]:
 
 def save_paper(data: dict[str, Any]) -> None:
     data = _ensure_bots(data)
+    # Never persist Binance overlay onto disk for live-only seats.
+    for bot in (data.get("bots") or {}).values():
+        if not isinstance(bot, dict) or not is_live_only_bot(bot):
+            continue
+        bot["positions"] = {}
+        bot["balance"] = 0.0
+        bot["equity"] = 0.0
+        bot["realized_pnl"] = 0.0
+        for k in ("u_pnl", "live_available", "live_error", "live_at", "paper_balance"):
+            if k == "paper_balance":
+                bot[k] = 0.0
+            else:
+                bot.pop(k, None)
     data = _aggregate(data)
     data["updated_at"] = _now()
     path = _path()
@@ -532,7 +590,7 @@ def reset_paper() -> dict[str, Any]:
 
 
 def reset_paper_bot(bot_id: str) -> dict[str, Any]:
-    """Reset one seat to initial paper_balance; clear positions/fills/halts."""
+    """Reset one seat. Live-only → clear signals + flatten exchange; paper → wipe ledger."""
     bid = str(bot_id or "").strip()
     if not bid:
         raise ValueError("bot_id required")
@@ -542,24 +600,41 @@ def reset_paper_bot(bot_id: str) -> dict[str, Any]:
         bot = bots.get(bid)
         if not isinstance(bot, dict):
             raise LookupError(f"unknown bot: {bid}")
-        cfg = paper_config()
-        wallets = {str(w.get("id") or "")[:32]: w for w in load_watchlist()}
-        w = wallets.get(bid) or {
-            "id": bid,
-            "address": bot.get("address"),
-            "paper_balance": bot.get("paper_balance"),
-        }
-        bal = _bot_initial_balance(w, cfg)
-        keep_allow = bot.get("allow_coins")
-        bot.update(_empty_bot({**bot, **w, "id": bid}, bal))
-        bot["paper_balance"] = bal
-        bot.pop("risk_halted_at", None)
-        if keep_allow is not None:
-            bot["allow_coins"] = keep_allow
-        save_paper(data)
-        out = load_paper()
+        if is_live_only_bot(bot):
+            bot["positions"] = {}
+            bot["fills"] = []
+            bot["balance"] = 0.0
+            bot["equity"] = 0.0
+            bot["realized_pnl"] = 0.0
+            bot["target_positions"] = {}
+            bot.pop("risk_halted_at", None)
+            bot["risk_halted"] = False
+            save_paper(data)
+            out = load_paper()
+        else:
+            cfg = paper_config()
+            wallets = {str(w.get("id") or "")[:32]: w for w in load_watchlist()}
+            w = wallets.get(bid) or {
+                "id": bid,
+                "address": bot.get("address"),
+                "paper_balance": bot.get("paper_balance"),
+            }
+            bal = _bot_initial_balance(w, cfg)
+            keep_allow = bot.get("allow_coins")
+            bot.update(_empty_bot({**bot, **w, "id": bid}, bal))
+            bot["paper_balance"] = bal
+            bot.pop("risk_halted_at", None)
+            if keep_allow is not None:
+                bot["allow_coins"] = keep_allow
+            save_paper(data)
+            out = load_paper()
     _sync_live_after_paper_reset([bid])
-    return out
+    try:
+        from utils.hl_binance_executor import overlay_live_bots
+
+        return overlay_live_bots(out)
+    except Exception:
+        return out
 
 
 def _sync_live_after_paper_reset(bot_ids: list[str]) -> None:
@@ -692,6 +767,8 @@ def refresh_marks(*, force: bool = False) -> dict[str, Any]:
         data = load_paper()
         cfg = paper_config()
         for bot in (data.get("bots") or {}).values():
+            if is_live_only_bot(bot):
+                continue
             _roll_day(bot, cfg)
             for pos in (bot.get("positions") or {}).values():
                 coin = str(pos.get("coin") or "")
@@ -916,6 +993,7 @@ def _cache_target_meta(bot: dict[str, Any], snap: dict[str, Any] | None) -> None
     bot["target_av"] = av
     bot["target_av_at"] = time.time()
     lev_map: dict[str, float] = {}
+    target_pos: dict[str, dict[str, float]] = {}
     for p in snap.get("positions") or []:
         if not isinstance(p, dict):
             continue
@@ -926,7 +1004,26 @@ def _cache_target_meta(bot: dict[str, Any], snap: dict[str, Any] | None) -> None
             if p.get("lev") is not None:
                 lev_map[c] = float(p["lev"])
         except (TypeError, ValueError):
+            pass
+        try:
+            szi = float(p.get("szi") or 0)
+        except (TypeError, ValueError):
             continue
+        if abs(szi) < 1e-16:
+            continue
+        row: dict[str, float] = {"sz": szi}
+        try:
+            if p.get("entryPx") is not None:
+                row["entry_px"] = float(p["entryPx"])
+        except (TypeError, ValueError):
+            pass
+        try:
+            if p.get("lev") is not None:
+                row["leverage"] = float(p["lev"])
+        except (TypeError, ValueError):
+            pass
+        target_pos[c] = row
+    bot["target_positions"] = target_pos
     if lev_map:
         prev = bot.get("target_lev_by_coin")
         if isinstance(prev, dict):
@@ -1719,6 +1816,45 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     "HL follow skip %s: no target_av (cannot size)", bot.get("id")
                 )
                 _stamp_skipped_fills(bot, fresh, reason="no_snap", note_activity=False)
+                continue
+
+            # Live-only seat: update target meta + trigger exchange sync; no paper book.
+            if is_live_only_bot(bot):
+                for item in fresh:
+                    note_target_fill(bot, item.get("fill_time"))
+                    coin = item.get("coin")
+                    lev = _lev_for_coin(bot, str(coin or ""), cfg)
+                    tid = item.get("tid")
+                    logged.append(
+                        {
+                            "id": str(uuid.uuid4())[:8],
+                            "action": "live_sync",
+                            "source": bot.get("id"),
+                            "bot_id": bot.get("id"),
+                            "coin": coin,
+                            "px": item.get("px"),
+                            "leverage": lev,
+                            "target_tid": tid,
+                            "target_tids": [tid] if tid else [],
+                            "target_delta": item.get("target_delta"),
+                            "fill_time": item.get("fill_time"),
+                            "ts": _now(),
+                            "live_only": True,
+                        }
+                    )
+                    logger.info(
+                        "HL live-sync bot=%s coin=%s tdelta=%s px=%s lev=%s av=%s",
+                        bot.get("id"),
+                        coin,
+                        item.get("target_delta"),
+                        item.get("px"),
+                        lev,
+                        bot.get("target_av"),
+                    )
+                    row = logged[-1]
+                    fills = list(bot.get("fills") or [])
+                    fills.insert(0, row)
+                    bot["fills"] = fills[:80]
                 continue
 
             # Flatten-only hard stop: never pause — still apply this fill batch
