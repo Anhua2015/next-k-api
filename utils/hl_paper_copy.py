@@ -2057,6 +2057,14 @@ def _apply_market_fill(
         else:
             new_sz = min(0.0, raw_new)
 
+    # Dust residual after pct-reduce → flatten (untradeable / bad for live sync)
+    if (
+        abs(old_sz) > 1e-16
+        and abs(new_sz) > 1e-16
+        and abs(new_sz) * float(px or 0) < float(cfg.get("min_notional") or 0)
+    ):
+        new_sz = 0.0
+
     # Dust open
     if abs(old_sz) < 1e-16 and abs(new_sz) * px < cfg["min_notional"]:
         return []
@@ -2231,6 +2239,7 @@ def _reconcile_flat_target_coins(
             "id": str(uuid.uuid4())[:8],
             "action": "close",
             "source": bot.get("id"),
+            "bot_id": bot.get("id"),
             "coin": coin,
             "px": px,
             "our_sz": abs(our_sz),
@@ -2240,6 +2249,7 @@ def _reconcile_flat_target_coins(
             "pos": close_pos,
             "reason": "reconcile_target_flat",
             "target_address": bot.get("address"),
+            "leverage": pos.get("leverage") or _lev_for_coin(bot, coin, cfg),
             "ts": _now(),
         }
         rows.append(row)
@@ -2409,8 +2419,18 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                         bot, fresh, reason="flattened_empty_target", note_activity=True
                     )
                 else:
+                    # Still close coins the leader already exited (pct path needs ratio
+                    # only for opens; leftovers must not stick when AV/ratio is 0).
+                    rec_rows = _reconcile_flat_target_coins(bot, snap, mids, cfg)
+                    if rec_rows:
+                        logged.extend(rec_rows)
+                        logger.warning(
+                            "HL ratio=0 per-coin reconcile %s: closed %s",
+                            bot.get("id"),
+                            len(rec_rows),
+                        )
                     logger.warning(
-                        "HL follow skip %s: ratio=0 equity=%s av=%s snap_flat=%s",
+                        "HL follow skip opens %s: ratio=0 equity=%s av=%s snap_flat=%s",
                         bot.get("id"),
                         bot.get("equity"),
                         bot.get("target_av"),
@@ -2421,7 +2441,27 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     )
                 continue
 
-            for item in fresh:
+            # Chronological fills + reconstruct leader size before this batch so
+            # percentage reduces work when startPosition is missing mid-burst.
+            def _ft_key(it: dict[str, Any]) -> tuple[float, str]:
+                return (_fill_time_epoch(it.get("fill_time")) or 0.0, str(it.get("tid") or ""))
+
+            fresh_sorted = sorted(fresh, key=_ft_key)
+            batch_delta: dict[str, float] = {}
+            for it in fresh_sorted:
+                c = str(it.get("coin") or "")
+                try:
+                    batch_delta[c] = batch_delta.get(c, 0.0) + float(it.get("target_delta") or 0)
+                except (TypeError, ValueError):
+                    continue
+            leader_pos: dict[str, float] = {}
+            if snap is not None:
+                for c, dlt in batch_delta.items():
+                    post = _target_coin_szi(snap, c)
+                    if post is not None:
+                        leader_pos[c] = float(post) - float(dlt)
+
+            for item in fresh_sorted:
                 coin = item["coin"]
                 lev = _lev_for_coin(bot, coin, cfg)
                 fill_ts = item.get("fill_time")
@@ -2435,9 +2475,12 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                         lag_ms = int(max(0.0, (recv_at - ft) * 1000))
                 except (TypeError, ValueError):
                     lag_ms = None
+                start_pos = item.get("start_position")
+                if start_pos is None and coin in leader_pos:
+                    start_pos = leader_pos[coin]
                 logger.info(
                     "HL market-follow bot=%s coin=%s tdelta=%s px=%s ratio=%.6g lev=%s "
-                    "av=%s equity=%s fill_time=%s lag_ms=%s",
+                    "av=%s equity=%s fill_time=%s lag_ms=%s startPos=%s",
                     bot.get("id"),
                     coin,
                     item["target_delta"],
@@ -2448,6 +2491,7 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     bot.get("equity"),
                     fill_ts,
                     lag_ms,
+                    start_pos,
                 )
                 rows = _apply_market_fill(
                     bot,
@@ -2462,10 +2506,20 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     fill_time=fill_ts,
                     fill_dir=item.get("dir"),
                     target_snap=snap,
-                    start_position=item.get("start_position"),
+                    start_position=start_pos,
                 )
                 note_target_fill(bot, fill_ts)
                 logged.extend(rows)
+                # Advance chained leader size for the next fill on this coin.
+                try:
+                    if start_pos is not None:
+                        leader_pos[coin] = float(start_pos) + float(item["target_delta"])
+                    elif coin in leader_pos:
+                        leader_pos[coin] = float(leader_pos[coin]) + float(
+                            item["target_delta"]
+                        )
+                except (TypeError, ValueError):
+                    pass
                 # keep existing list in sync for multi-fill dedupe in same event
                 existing = list(bot.get("fills") or [])
 
