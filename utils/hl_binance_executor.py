@@ -699,7 +699,9 @@ def _flush_debounced(gen: int) -> None:
         maybe_execute_rows(batch)
 
 
-def maybe_execute_rows_async(rows: list[dict[str, Any]]) -> None:
+def maybe_execute_rows_async(
+    rows: list[dict[str, Any]], *, immediate: bool = False
+) -> None:
     if not rows or not live_enabled():
         return
     try:
@@ -713,7 +715,7 @@ def maybe_execute_rows_async(rows: list[dict[str, Any]]) -> None:
     if not any(str(r.get("source") or r.get("bot_id") or "") in bots for r in rows):
         return
 
-    ms = debounce_ms()
+    ms = 0.0 if immediate else debounce_ms()
     if ms <= 0:
 
         def _run() -> None:

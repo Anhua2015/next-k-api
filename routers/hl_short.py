@@ -96,6 +96,24 @@ async def reset_paper_ledger():
     return await run_in_threadpool(reset_paper)
 
 
+@router.post("/paper/reset/{bot_id}")
+async def reset_paper_bot_ledger(bot_id: str):
+    """Reset a single paper seat (positions/fills → initial balance)."""
+    from fastapi import HTTPException
+
+    from utils.hl_paper_copy import reset_paper_bot
+
+    bid = str(bot_id or "").strip()
+    if not bid:
+        raise HTTPException(status_code=400, detail="bot_id required")
+    try:
+        return await run_in_threadpool(reset_paper_bot, bid)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/copy/status")
 async def get_copy_status():
     from utils.hl_binance_executor import status as binance_live_status

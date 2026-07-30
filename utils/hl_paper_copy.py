@@ -513,14 +513,79 @@ def reset_paper() -> dict[str, Any]:
         data = _ensure_bots({"bots": {}})
         cfg = paper_config()
         wallets = {str(w.get("id") or "")[:32]: w for w in load_watchlist()}
+        reset_ids: list[str] = []
         for bot in data["bots"].values():
             bid = str(bot.get("id") or "")
             w = wallets.get(bid) or {"id": bid}
             bal = _bot_initial_balance(w, cfg)
             bot.update(_empty_bot(bot, bal))
             bot["paper_balance"] = bal
+            bot.pop("risk_halted_at", None)
+            if bid:
+                reset_ids.append(bid)
         save_paper(data)
-        return load_paper()
+        out = load_paper()
+    _sync_live_after_paper_reset(reset_ids)
+    return out
+
+
+def reset_paper_bot(bot_id: str) -> dict[str, Any]:
+    """Reset one seat to initial paper_balance; clear positions/fills/halts."""
+    bid = str(bot_id or "").strip()
+    if not bid:
+        raise ValueError("bot_id required")
+    with _lock:
+        data = load_paper()
+        bots = data.get("bots") or {}
+        bot = bots.get(bid)
+        if not isinstance(bot, dict):
+            raise LookupError(f"unknown bot: {bid}")
+        cfg = paper_config()
+        wallets = {str(w.get("id") or "")[:32]: w for w in load_watchlist()}
+        w = wallets.get(bid) or {
+            "id": bid,
+            "address": bot.get("address"),
+            "paper_balance": bot.get("paper_balance"),
+        }
+        bal = _bot_initial_balance(w, cfg)
+        keep_allow = bot.get("allow_coins")
+        bot.update(_empty_bot({**bot, **w, "id": bid}, bal))
+        bot["paper_balance"] = bal
+        bot.pop("risk_halted_at", None)
+        if keep_allow is not None:
+            bot["allow_coins"] = keep_allow
+        save_paper(data)
+        out = load_paper()
+    _sync_live_after_paper_reset([bid])
+    return out
+
+
+def _sync_live_after_paper_reset(bot_ids: list[str]) -> None:
+    """Immediately align live venues to flat/reset paper (skip fill debounce)."""
+    rows = [
+        {
+            "id": f"reset-{bid}",
+            "source": bid,
+            "bot_id": bid,
+            "action": "reset",
+        }
+        for bid in bot_ids
+        if str(bid or "").strip()
+    ]
+    if not rows:
+        return
+    try:
+        from utils.hl_bitget_executor import maybe_execute_rows_async
+
+        maybe_execute_rows_async(rows, immediate=True)
+    except Exception:
+        logger.exception("paper reset bitget sync bots=%s", [r["source"] for r in rows])
+    try:
+        from utils.hl_binance_executor import maybe_execute_rows_async as bn_exec
+
+        bn_exec(rows, immediate=True)
+    except Exception:
+        logger.exception("paper reset binance sync bots=%s", [r["source"] for r in rows])
 
 
 def fetch_all_mids(*, force: bool = False) -> dict[str, float]:

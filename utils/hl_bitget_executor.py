@@ -617,6 +617,11 @@ def apply_mirror_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return []
 
     mode = exec_mode()
+    # Paper seat reset has no fill delta — always position-sync to flatten.
+    if any(str(r.get("action") or "").lower() == "reset" for r in rows):
+        if mode == "sub":
+            return sync_subaccounts_from_paper(rows)
+        return sync_net_from_paper(rows)
     if mode == "sub":
         return sync_subaccounts_from_paper(rows)
     if mode == "net":
@@ -988,8 +993,9 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
                 symbols.add(sym)
 
         with bitget_creds(creds if creds.ok() else None):
-            if not symbols and (not touched_bots or route.bot_id in touched_bots):
-                # Risk-halt / full flat: discover open Bitget positions and flatten
+            # Always merge open book for this route so paper-flat / reset can flatten
+            # leftovers even when other coins still have desired size.
+            if creds.ok() and (not touched_bots or route.bot_id in touched_bots):
                 try:
                     from quant.engine.exchanges.bitget.account import fetch_all_signed_positions
 
@@ -1002,7 +1008,7 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
                             continue
                         symbols.add(sym)
                 except Exception as exc:
-                    logger.warning("sub flatten discover failed [%s]: %s", route.id, exc)
+                    logger.warning("sub open-pos scan failed [%s]: %s", route.id, exc)
 
             if not symbols:
                 continue
@@ -1033,6 +1039,17 @@ def sync_net_from_paper(rows: list[dict[str, Any]] | None = None) -> list[dict[s
         if sym:
             coins.add(sym)
     coins.update(net.keys())
+    # Paper flat / reset: still discover open main-account positions to flatten.
+    if not coins:
+        try:
+            from quant.engine.exchanges.bitget.account import fetch_all_signed_positions
+
+            for sym, sz in fetch_all_signed_positions().items():
+                if abs(sz) < 1e-12:
+                    continue
+                coins.add(sym)
+        except Exception as exc:
+            logger.warning("net open-pos scan failed: %s", exc)
 
     out: list[dict[str, Any]] = []
     for sym in sorted(coins):
@@ -1079,12 +1096,17 @@ def _flush_debounced(gen: int) -> None:
         maybe_execute_rows(batch)
 
 
-def maybe_execute_rows_async(rows: list[dict[str, Any]]) -> None:
-    """Queue Bitget sync after paper fills. Default: debounce burst fills (~10s)."""
+def maybe_execute_rows_async(
+    rows: list[dict[str, Any]], *, immediate: bool = False
+) -> None:
+    """Queue Bitget sync after paper fills. Default: debounce burst fills (~10s).
+
+    immediate=True bypasses debounce (paper reset / risk flatten).
+    """
     if not rows or not live_enabled():
         return
 
-    ms = debounce_ms()
+    ms = 0.0 if immediate else debounce_ms()
     if ms <= 0:
         def _run() -> None:
             with _bg_lock:
