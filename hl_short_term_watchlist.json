@@ -1,8 +1,8 @@
 {
-  "updated": "2026-07-29",
+  "updated": "2026-07-30",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "2026-07-30: O=a7405 Bitget live twin of K (paper→sub); Binance off. K paper-only. N=45855. paper 1000U. Not financial advice.",
+  "note": "2026-07-30: replace I with f206 swing (paper90≈+61% MDD≈15%). O=Bitget twin of K. Binance off. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -127,17 +127,16 @@
     },
     {
       "id": "bot_i",
-      "address": "0x202c47f7c66e5d678db3e051deabc25478863022",
+      "address": "0xf2060700d2f18e5727205652a181fcf970e4a5ce",
       "priority": 10,
       "paper_balance": 1000,
-      "style": "day · BTC",
-      "why": "user-add quant-ish 2026-07-28 · 7d WR87% pure BTC · easiest mirror",
-      "coins": ["BTC"],
-      "watch": ["BTC Bitget", "40x"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x202c47f7c66e5d678db3e051deabc25478863022",
-      "ht_style": "day_trader",
-      "tag": "日内",
-      "style_tags": ["concentrated"]
+      "style": "swing · majors + soft RWA",
+      "why": "crypto dig 2026-07-30 · replace weak I · paper90≈+61% MDD≈15% · WR63% swing · note: BRENTOIL not on Bitget",
+      "coins": null,
+      "watch": ["BTC/HYPE/SOL", "AAPL/SP500", "oil unmapped"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xf2060700d2f18e5727205652a181fcf970e4a5ce",
+      "ht_style": "swing_trader",
+      "tag": "波段"
     },
     {
       "id": "bot_j",
@@ -269,6 +268,10 @@
     {
       "address": "0xa7aae418ee1714642f46b577c5b6f6c8bcb561dc",
       "reason": "Dropped 2026-07-24 rescreen v2 — trips13 + Bitget map 26% (ex bot_h)"
+    },
+    {
+      "address": "0x202c47f7c66e5d678db3e051deabc25478863022",
+      "reason": "Dropped 2026-07-30 — ex bot_i; short-window WR cherry-pick, recent 3d paper −4%, full-book WR56% MDD157%"
     },
     {
       "address": "0x212abcf1a07986aedb244fc4c6f5fe037913a8c6",
