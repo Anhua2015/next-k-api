@@ -1088,6 +1088,7 @@ def _parse_live_fill(fill: dict) -> dict[str, Any] | None:
         "tid": tid or None,
         "fill_time": fill_time,
         "side": "buy" if signed > 0 else "sell",
+        "dir": str(fill.get("dir") or "").strip(),
         "raw": fill,
     }
 
@@ -1556,6 +1557,45 @@ def _target_snap_flat(snap: dict[str, Any] | None) -> bool:
     return True
 
 
+def _target_coin_szi(snap: dict[str, Any] | None, coin: str) -> float | None:
+    """Signed target size for coin from a clearinghouse snap, or None if unknown."""
+    if not snap or not coin:
+        return None
+    want = str(coin).strip().upper()
+    found = False
+    total = 0.0
+    for p in snap.get("positions") or []:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("coin") or "").strip().upper() != want:
+            continue
+        found = True
+        try:
+            total += float(p.get("szi") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total if found else (0.0 if snap.get("positions") is not None else None)
+
+
+def _target_had_prior_inventory(
+    snap: dict[str, Any] | None,
+    coin: str,
+    target_delta: float,
+) -> bool | None:
+    """Infer whether target already had this coin before the fill (snap is post-fill).
+
+    Returns True/False when snap is usable, None when unknown.
+    """
+    post = _target_coin_szi(snap, coin)
+    if post is None:
+        return None
+    try:
+        pre = float(post) - float(target_delta)
+    except (TypeError, ValueError):
+        return None
+    return abs(pre) > 1e-9
+
+
 def _stamp_skipped_fills(
     bot: dict[str, Any],
     fresh: list[dict[str, Any]],
@@ -1780,8 +1820,15 @@ def _apply_market_fill(
     lev: int,
     trigger_tid: str | None = None,
     fill_time: Any = None,
+    fill_dir: str | None = None,
+    target_snap: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Apply one proportional fill at market px; enforce equity×lev notional cap."""
+    """Apply one proportional fill at market px; enforce equity×lev notional cap.
+
+    Live-safe rules:
+    - Local flat + target already had inventory / HL Add* → skip (no orphan open).
+    - Reduce never crosses through zero into the opposite side on the same fill.
+    """
     allow = _bot_allow_coins(bot)
     if not _coin_allowed(coin, allow):
         return []
@@ -1796,11 +1843,60 @@ def _apply_market_fill(
     old_sz = float(old.get("sz") or 0) if isinstance(old, dict) else 0.0
     raw_new = old_sz + our_delta
     mark = _mid_for_coin(mids, coin) or px
+    dir_l = str(fill_dir or "").strip().lower()
+    is_add_dir = "add" in dir_l
+    is_open_dir = "open" in dir_l and "close" not in dir_l
 
     # Increasing exposure (incl. open / add / flip-to-new-side) must respect margin
     increasing = abs(raw_new) > abs(old_sz) + 1e-12 or (
         abs(old_sz) < 1e-16 and abs(raw_new) > 1e-16
     )
+
+    # Orphan add: we are flat, but leader is only adding to an existing book.
+    # Following that delta would open a stub that live cannot close with their full exit.
+    if abs(old_sz) < 1e-16 and increasing:
+        had_prior = _target_had_prior_inventory(target_snap, coin, target_delta)
+        orphan = is_add_dir or (had_prior is True) or (
+            had_prior is None and not is_open_dir and bool(dir_l)
+            and ("close" in dir_l or "add" in dir_l)
+        )
+        # No dir + unknown snap → still skip when post-size clearly exceeds this fill
+        if not orphan and had_prior is None and not dir_l:
+            post = _target_coin_szi(target_snap, coin)
+            if post is not None and abs(post) > abs(float(target_delta)) + 1e-9:
+                orphan = True
+        if orphan:
+            row = {
+                "id": str(uuid.uuid4())[:8],
+                "action": "signal",
+                "skipped": True,
+                "reason": "orphan_add",
+                "skip_reason": "orphan_add",
+                "source": bot.get("id"),
+                "coin": coin,
+                "px": px,
+                "our_sz": 0,
+                "target_delta": target_delta,
+                "copy_ratio": round(ratio, 10),
+                "leverage": lev,
+                "dir": fill_dir,
+                "target_tid": trigger_tid,
+                "fill_time": fill_time,
+                "ts": _now(),
+            }
+            fills = list(bot.get("fills") or [])
+            fills.insert(0, row)
+            bot["fills"] = fills[:300]
+            logger.info(
+                "HL skip orphan_add bot=%s coin=%s tdelta=%s dir=%s had_prior=%s",
+                bot.get("id"),
+                coin,
+                target_delta,
+                fill_dir,
+                had_prior,
+            )
+            return []
+
     # Whole-bot ceiling minus other coins; this leg may use the remainder only.
     total_cap = _max_notional(bot, lev, cfg)
     used_others = _gross_notional(bot, exclude_key=key)
@@ -1809,9 +1905,13 @@ def _apply_market_fill(
         increasing or (old_sz * raw_new < 0)
     ) else float(px or mark or 0)
 
-    if old_sz * raw_new < 0:
-        # Flip: close old fully, open opposite clipped to cap
-        new_sz = _clip_sz_to_notional(raw_new, margin_px, max_n)
+    if abs(old_sz) > 1e-16 and old_sz * raw_new < 0:
+        # Would cross zero. Live-safe default: flatten only on this fill.
+        # True opposite open arrives as its own fill while we are flat (and not orphan).
+        if is_open_dir:
+            new_sz = _clip_sz_to_notional(raw_new, margin_px, max_n)
+        else:
+            new_sz = 0.0
     elif increasing:
         new_sz = _clip_sz_to_notional(raw_new, margin_px, max_n)
         if abs(new_sz - old_sz) < 1e-12:
@@ -1838,7 +1938,13 @@ def _apply_market_fill(
             bot["fills"] = fills[:300]
             return []
     else:
-        new_sz = raw_new
+        # Reduce: clamp to flat — never overshoot into the other side.
+        if old_sz > 0:
+            new_sz = max(0.0, raw_new)
+        elif old_sz < 0:
+            new_sz = min(0.0, raw_new)
+        else:
+            new_sz = 0.0
 
     # Dust open
     if abs(old_sz) < 1e-16 and abs(new_sz) * px < cfg["min_notional"]:
@@ -1880,7 +1986,7 @@ def _apply_market_fill(
             out["realized_pnl"] = realized
         return out
 
-    # Flatten then reopen on flip
+    # Flatten then reopen on flip (only when is_open_dir allowed new_sz opposite)
     if old and abs(old_sz) > 1e-16 and old_sz * new_sz < 0:
         pnl = _realize(bot, old, px, abs(old_sz))
         close_side = "sell" if old_sz > 0 else "buy"
@@ -2167,6 +2273,8 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     lev=lev,
                     trigger_tid=item.get("tid"),
                     fill_time=fill_ts,
+                    fill_dir=item.get("dir"),
+                    target_snap=snap,
                 )
                 note_target_fill(bot, fill_ts)
                 logged.extend(rows)
