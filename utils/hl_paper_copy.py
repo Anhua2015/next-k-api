@@ -1,7 +1,7 @@
 """Hyperliquid paper copy — fill-follow with Mirror-style reduce + reconcile.
 
 One bot per watchlist seat (default 1000U; override via watchlist paper_balance).
-Multiple seats may share one HL address (e.g. K paper + O live twin); target
+Multiple seats may share one HL address (e.g. former K paper + O live twin); target
 health / WS fills are keyed by address and applied to every matching bot.
 
 Sizing:
@@ -9,10 +9,19 @@ Sizing:
   flat-entry burst: coalesce same-sign clips only when leader pre≈0 (true new entry)
   orphan add (local flat, leader already had inventory): skip — no silent stub from Add
     HL often labels mid-book adds as Open*; trust startPosition / had_prior over dir text
-  twin seats (mirror_of): after fills, Copy-Current sync to sibling paper × equity ratio
+  copy_current (watchlist, default off): on orphan, open full leader coin × ratio once
+    (Dextrabot/Legend Copy Current — never open the Add delta alone)
+  twin seats (mirror_of + live): after fills, Copy-Current sync to sibling paper × equity
   dust open: skip with reason dust_open (never silent)
   reduce: scale our size by leader remaining fraction (startPosition→post), not raw δ×ratio
   reconcile: leader flat on a coin → close our leg (Bitget syncs paper)
+
+Live seats (venue bitget / live:true) — shared rules for every desk seat going live:
+  1) Default = trade-copy from subscribe time (orphan skips mid-book).
+  2) Mid-book entry only via copy_current:true (full leader leg × equity/AV).
+  3) Paper book drives Bitget sub; keep paper_balance near real sub equity.
+  4) Seat removed from watchlist → paper pruned + exchange flatten attempted.
+  5) Deploy starts flat (WS snapshots ignored); never silent Copy Current.
 
 WS snapshots are ignored so deploy starts flat. Mark refresh updates uPnL and
 optionally runs the per-bot hard-stop (OFF unless HL_DAILY_LOSS_PCT>0).
@@ -52,6 +61,40 @@ _mark_guard = MinIntervalGuard("HL_PAPER_MARK_COOLDOWN_SEC", 10.0)
 _mids_ttl_sec = float(os.getenv("HL_MIDS_CACHE_SEC", "30") or 30)
 _av_ttl_sec = float(os.getenv("HL_TARGET_AV_TTL_SEC", "30") or 30)
 _health_guard = MinIntervalGuard("HL_TARGET_HEALTH_SEC", 300.0)
+# Bots pruned from watchlist — flatten live venues outside the paper lock.
+_pending_live_flatten: list[str] = []
+
+
+def _truthy_flag(raw: Any) -> bool:
+    if raw is True:
+        return True
+    if raw is False or raw is None:
+        return False
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _bot_copy_current(bot: dict[str, Any] | None) -> bool:
+    """Watchlist copy_current — explicit mid-book entry (Dextrabot Copy Current)."""
+    if not isinstance(bot, dict):
+        return False
+    return _truthy_flag(bot.get("copy_current"))
+
+
+def _queue_live_flatten(bot_ids: list[str] | set[str]) -> None:
+    for bid in bot_ids:
+        s = str(bid or "").strip()
+        if s and s not in _pending_live_flatten:
+            _pending_live_flatten.append(s)
+
+
+def flush_pending_live_flatten() -> list[str]:
+    """Run outside paper locks: Bitget/Binance sync flat for retired seats."""
+    global _pending_live_flatten
+    ids = list(_pending_live_flatten)
+    _pending_live_flatten = []
+    if ids:
+        _sync_live_after_paper_reset(ids)
+    return ids
 
 
 def _data_dir() -> Path:
@@ -535,6 +578,8 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
         bots[bid]["venue"] = venue
         bots[bid]["live_only"] = bool(live_only)
         bots[bid]["paper"] = False if live_only else True
+        # Explicit mid-book entry (default off — Legend/Dextrabot default).
+        bots[bid]["copy_current"] = _truthy_flag(w.get("copy_current"))
         if live_only and not bots[bid].get("paper_cleared_for_live"):
             bots[bid]["positions"] = {}
             bots[bid]["fills"] = []
@@ -604,6 +649,10 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
 
         # Drop bots removed from the watchlist (old dig ids clutter the desk)
     if want_ids:
+        removed = sorted(set(bots.keys()) - want_ids)
+        if removed:
+            _queue_live_flatten(removed)
+            logger.info("paper prune retired seats %s → live flatten queued", removed)
         bots = {k: v for k, v in bots.items() if k in want_ids}
 
     after_ids = set(bots.keys())
@@ -2463,6 +2512,62 @@ def _apply_market_fill(
                 orphan = True
         if is_open_dir and had_prior is True:
             orphan = True
+        if orphan and _bot_copy_current(bot):
+            # Dextrabot Copy Current: enter full leader leg × ratio, not Add stub.
+            leader_sz = (
+                post_sz
+                if post_sz is not None
+                else _target_coin_szi(target_snap, coin)
+            )
+            if leader_sz is not None and abs(float(leader_sz)) > 1e-16:
+                total_cap = _max_notional(bot, lev, cfg)
+                used_others = _gross_notional(bot, exclude_key=key)
+                max_n = max(0.0, total_cap - used_others)
+                margin_px = _margin_px_for_clip(px, mark, float(leader_sz) * float(ratio))
+                new_sz = _clip_sz_to_notional(
+                    float(leader_sz) * float(ratio), margin_px, max_n
+                )
+                if abs(new_sz) * float(px or 0) >= float(cfg.get("min_notional") or 0):
+                    # Reuse normal open path by jumping to apply with forced size.
+                    our_delta = new_sz - old_sz
+                    raw_new = new_sz
+                    increasing = True
+                    decreasing = False
+                    orphan = False
+                    fill_dir = fill_dir or "Copy Current"
+                    logger.info(
+                        "HL copy_current bot=%s coin=%s leader=%s our=%s ratio=%.6g",
+                        bot.get("id"),
+                        coin,
+                        leader_sz,
+                        new_sz,
+                        ratio,
+                    )
+                else:
+                    row = {
+                        "id": str(uuid.uuid4())[:8],
+                        "action": "signal",
+                        "skipped": True,
+                        "reason": "copy_current_dust",
+                        "skip_reason": "copy_current_dust",
+                        "source": bot.get("id"),
+                        "coin": coin,
+                        "px": px,
+                        "our_sz": abs(new_sz),
+                        "target_delta": tdelta,
+                        "leader_sz": leader_sz,
+                        "copy_ratio": round(ratio, 10),
+                        "leverage": lev,
+                        "dir": fill_dir,
+                        "target_tid": trigger_tid,
+                        "fill_time": fill_time,
+                        "ts": _now(),
+                    }
+                    fills = list(bot.get("fills") or [])
+                    fills.insert(0, row)
+                    bot["fills"] = fills[:300]
+                    return []
+            # fall through to orphan skip if no leader size
         if orphan:
             row = {
                 "id": str(uuid.uuid4())[:8],
@@ -3125,6 +3230,8 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
         if port_rows:
             logged.extend(port_rows)
         save_paper(book)
+
+    flush_pending_live_flatten()
 
     if logged:
         try:

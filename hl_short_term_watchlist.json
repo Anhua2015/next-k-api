@@ -2,7 +2,7 @@
   "updated": "2026-07-30",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "2026-07-31: AM sleeve bot_am_a/e/c = gentle anti-martingale twins of A/E/C (paper-only). Original A/E/C stay 1x. bot_o retired. Not financial advice.",
+  "note": "2026-07-31: Live policy for all seats — default trade-copy (orphan skips mid-book); set copy_current:true only for explicit full-leg entry. AM sleeve paper-only. bot_o retired. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",

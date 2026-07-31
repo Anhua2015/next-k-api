@@ -90,7 +90,10 @@ async def get_paper(mark: bool = Query(False, description="true 时尝试刷新�
     from utils.hl_paper_copy import load_paper, refresh_marks, slim_paper_for_api
 
     def _run():
+        from utils.hl_paper_copy import flush_pending_live_flatten
+
         book = refresh_marks(force=False) if mark else load_paper()
+        flush_pending_live_flatten()
         try:
             book = overlay_live_bots(book)
         except Exception:

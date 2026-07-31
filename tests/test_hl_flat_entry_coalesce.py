@@ -379,5 +379,69 @@ class FlatEntryCoalesceTests(unittest.TestCase):
         )
 
 
+    def test_copy_current_opens_full_leader_leg(self):
+        cfg = dict(pc.paper_config())
+        cfg["min_notional"] = 10.0
+        bot = {
+            "id": "bot_k",
+            "balance": 1000.0,
+            "equity": 1000.0,
+            "paper_balance": 1000.0,
+            "target_av": 20000.0,
+            "copy_current": True,
+            "positions": {},
+            "fills": [],
+            "realized_pnl": 0.0,
+        }
+        ratio = 1000.0 / 20000.0
+        rows = pc._apply_market_fill(
+            bot,
+            coin="BTC",
+            target_delta=-0.5,
+            px=64000.0,
+            cfg=cfg,
+            mids={"BTC": 64000.0},
+            ratio=ratio,
+            lev=20,
+            trigger_tid="cc1",
+            fill_dir="Open Short",
+            start_position=-10.0,
+        )
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["action"], "open")
+        pos = bot["positions"]["bot_k:BTC"]
+        # Full leader post -10.5 × ratio would be -0.525; equity×lev may clip.
+        self.assertLess(float(pos["sz"]), -0.3)
+        self.assertGreater(abs(float(pos["sz"])), abs(-0.5 * ratio))  # not Add stub
+
+    def test_orphan_without_copy_current_still_skips(self):
+        cfg = dict(pc.paper_config())
+        cfg["min_notional"] = 10.0
+        bot = {
+            "id": "bot_k",
+            "balance": 1000.0,
+            "equity": 1000.0,
+            "copy_current": False,
+            "target_av": 20000.0,
+            "positions": {},
+            "fills": [],
+            "realized_pnl": 0.0,
+        }
+        rows = pc._apply_market_fill(
+            bot,
+            coin="BTC",
+            target_delta=-0.5,
+            px=64000.0,
+            cfg=cfg,
+            mids={"BTC": 64000.0},
+            ratio=1000.0 / 20000.0,
+            lev=20,
+            fill_dir="Open Short",
+            start_position=-10.0,
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(bot["fills"][0].get("reason"), "orphan_add")
+
+
 if __name__ == "__main__":
     unittest.main()
