@@ -2042,6 +2042,9 @@ def _sync_paper_to_mirror_sibling(
 
     Follower_sz = sibling_sz × (our_equity / sibling_equity). Used for O←K so a
     late/flat twin does not open a stub from mid-book Add clips.
+
+    Caps legs against a running gross-notional budget (same pass), and never
+    force-closes a twin-held coin just because the scaled leg is under min_notional.
     """
     twin_id = str(bot.get("mirror_of") or "").strip()
     if not twin_id:
@@ -2060,7 +2063,12 @@ def _sync_paper_to_mirror_sibling(
     ratio = our_eq / twin_eq
     allow = _bot_allow_coins(bot)
     old = dict(bot.get("positions") or {})
-    desired: dict[str, dict[str, Any]] = {}
+    min_n = float(cfg.get("min_notional") or 0)
+
+    # Phase 1: raw wants + dust keys (twin still holds; do not treat as twin-flat).
+    raw: list[dict[str, Any]] = []
+    dust_keys: set[str] = set()
+    twin_keys: set[str] = set()
     for pos in (twin.get("positions") or {}).values():
         if not isinstance(pos, dict):
             continue
@@ -2073,24 +2081,91 @@ def _sync_paper_to_mirror_sibling(
             continue
         if abs(t_sz) < 1e-16:
             continue
-        want = t_sz * ratio
-        mid = _mid_for_coin(mids, coin) or float(pos.get("mark_px") or pos.get("entry_px") or 0)
-        if abs(want) * float(mid or 0) < float(cfg.get("min_notional") or 0):
-            continue
-        lev = int(pos.get("leverage") or _lev_for_coin(bot, coin, cfg) or 1)
         key = f"{bot.get('id')}:{coin}"
+        twin_keys.add(key)
+        want = t_sz * ratio
+        mid = _mid_for_coin(mids, coin) or float(
+            pos.get("mark_px") or pos.get("entry_px") or 0
+        )
+        if abs(want) * float(mid or 0) < min_n:
+            dust_keys.add(key)
+            continue
+        try:
+            lev = int(pos.get("leverage") or _lev_for_coin(bot, coin, cfg) or 1)
+        except (TypeError, ValueError):
+            lev = int(_lev_for_coin(bot, coin, cfg) or 1)
+        raw.append(
+            {
+                "key": key,
+                "coin": coin,
+                "sz": want,
+                "mid": float(mid or 0),
+                "lev": max(1, lev),
+                "entry_px": float(pos.get("entry_px") or mid or 0),
+                "twin_sz": t_sz,
+            }
+        )
+
+    # Phase 2: clip each leg against remaining gross budget (include same-pass reserved).
+    raw.sort(key=lambda x: abs(float(x["sz"])) * float(x["mid"]), reverse=True)
+    desired: dict[str, dict[str, Any]] = {}
+    reserved = 0.0
+    # Notionals we will keep (dust twin legs already on our book).
+    for dk in dust_keys:
+        op = old.get(dk)
+        if isinstance(op, dict):
+            reserved += _pos_notional(op)
+
+    rows: list[dict[str, Any]] = []
+    fills = list(bot.get("fills") or [])
+
+    for item in raw:
+        key = str(item["key"])
+        coin = str(item["coin"])
+        mid = float(item["mid"] or 0)
+        lev = int(item["lev"])
+        want = float(item["sz"])
         total_cap = _max_notional(bot, lev, cfg)
-        used_others = _gross_notional(bot, exclude_key=key)
-        max_n = max(0.0, total_cap - used_others)
-        want = _clip_sz_to_notional(want, float(mid or 0), max_n)
-        if abs(want) < 1e-16:
+        # `reserved` already includes kept dust legs + previously accepted desired.
+        max_n = max(0.0, total_cap - reserved)
+        clipped = _clip_sz_to_notional(want, mid, max_n)
+        if abs(clipped) * mid < min_n:
+            dust_keys.add(key)
+            fills.insert(
+                0,
+                {
+                    "id": str(uuid.uuid4())[:8],
+                    "action": "signal",
+                    "skipped": True,
+                    "reason": "twin_dust",
+                    "skip_reason": "twin_dust",
+                    "source": bot.get("id"),
+                    "coin": coin,
+                    "px": mid,
+                    "our_sz": abs(clipped),
+                    "target_sz": item.get("twin_sz"),
+                    "copy_ratio": round(ratio, 10),
+                    "twin_of": twin_id,
+                    "min_notional": min_n,
+                    "ts": _now(),
+                },
+            )
+            rows.append(fills[0])
+            logger.info(
+                "HL twin_dust bot=%s←%s coin=%s want=%s mid=%s",
+                bot.get("id"),
+                twin_id,
+                coin,
+                want,
+                mid,
+            )
             continue
         desired[key] = {
             "key": key,
             "source": bot.get("id"),
             "coin": coin,
-            "sz": want,
-            "entry_px": float(pos.get("entry_px") or mid or 0),
+            "sz": clipped,
+            "entry_px": float(item["entry_px"] or mid),
             "copy_ratio": round(ratio, 10),
             "leverage": lev,
             "target_address": bot.get("address"),
@@ -2099,13 +2174,42 @@ def _sync_paper_to_mirror_sibling(
             "u_pnl": 0.0,
             "mark_px": mid or None,
         }
+        reserved += abs(clipped) * mid
 
-    rows: list[dict[str, Any]] = []
-    fills = list(bot.get("fills") or [])
     new_positions: dict[str, dict[str, Any]] = {}
 
+    # Preserve dust twin legs we already hold; log skip if twin has dust and we are flat.
+    for key in dust_keys:
+        op = old.get(key)
+        coin = key.split(":", 1)[-1] if ":" in key else key
+        mid = _mid_for_coin(mids, coin)
+        if isinstance(op, dict) and abs(float(op.get("sz") or 0)) > 1e-16:
+            if mid:
+                _mark_one(op, mid)
+            new_positions[key] = op
+            continue
+        fills.insert(
+            0,
+            {
+                "id": str(uuid.uuid4())[:8],
+                "action": "signal",
+                "skipped": True,
+                "reason": "twin_dust",
+                "skip_reason": "twin_dust",
+                "source": bot.get("id"),
+                "coin": coin,
+                "px": mid,
+                "our_sz": 0,
+                "copy_ratio": round(ratio, 10),
+                "twin_of": twin_id,
+                "min_notional": min_n,
+                "ts": _now(),
+            },
+        )
+        rows.append(fills[0])
+
     for key, pos in old.items():
-        if key in desired:
+        if key in desired or key in dust_keys:
             continue
         coin = str(pos.get("coin") or "").upper()
         mid = _mid_for_coin(mids, coin) or float(pos.get("mark_px") or pos.get("entry_px") or 0)
@@ -2144,8 +2248,7 @@ def _sync_paper_to_mirror_sibling(
         new_sz = float(want.get("sz") or 0)
         old_pos = old.get(key)
         old_sz = float(old_pos.get("sz") or 0) if isinstance(old_pos, dict) else 0.0
-        if abs(new_sz - old_sz) * float(mid or 0) < float(cfg.get("min_notional") or 0) * 0.5:
-            # Already close enough — keep.
+        if abs(new_sz - old_sz) * float(mid or 0) < min_n * 0.5:
             if isinstance(old_pos, dict) and abs(old_sz) > 1e-16:
                 _mark_one(old_pos, mid)
                 new_positions[key] = old_pos
@@ -2229,7 +2332,7 @@ def _sync_paper_to_mirror_sibling(
             pos["twin_of"] = twin_id
         _mark_one(pos, mid)
         new_positions[key] = pos
-        row = {
+        row: dict[str, Any] = {
             "id": str(uuid.uuid4())[:8],
             "action": action,
             "reason": "twin_copy_current",
@@ -2242,11 +2345,14 @@ def _sync_paper_to_mirror_sibling(
             "pos": pos_side,
             "copy_ratio": round(ratio, 10),
             "twin_of": twin_id,
-            "twin_sz": float((twin.get("positions") or {}).get(f"{twin_id}:{coin}", {}).get("sz") or 0)
-            if isinstance((twin.get("positions") or {}).get(f"{twin_id}:{coin}"), dict)
-            else None,
             "ts": _now(),
         }
+        tpos = (twin.get("positions") or {}).get(f"{twin_id}:{coin}")
+        if isinstance(tpos, dict):
+            try:
+                row["twin_sz"] = float(tpos.get("sz") or 0)
+            except (TypeError, ValueError):
+                pass
         rows.append(row)
         fills.insert(0, row)
         logger.info(
@@ -2259,7 +2365,7 @@ def _sync_paper_to_mirror_sibling(
             ratio,
         )
 
-    if not rows:
+    if not rows and set(new_positions.keys()) == set(old.keys()):
         return []
 
     bot["positions"] = new_positions

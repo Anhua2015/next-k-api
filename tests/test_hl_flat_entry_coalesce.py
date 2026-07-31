@@ -273,6 +273,111 @@ class FlatEntryCoalesceTests(unittest.TestCase):
         self.assertGreater(abs(float(pos["sz"])), 0.01)
         self.assertLessEqual(abs(float(pos["sz"])), 0.05 + 1e-9)
 
+    def test_twin_multi_leg_respects_shared_notional_cap(self):
+        cfg = dict(pc.paper_config())
+        cfg["min_notional"] = 10.0
+        book = {
+            "bots": {
+                "bot_k": {
+                    "id": "bot_k",
+                    "balance": 1000.0,
+                    "equity": 4000.0,
+                    "positions": {
+                        "bot_k:BTC": {
+                            "key": "bot_k:BTC",
+                            "coin": "BTC",
+                            "sz": -2.0,
+                            "entry_px": 64000.0,
+                            "leverage": 20,
+                            "mark_px": 64000.0,
+                        },
+                        "bot_k:ETH": {
+                            "key": "bot_k:ETH",
+                            "coin": "ETH",
+                            "sz": -40.0,
+                            "entry_px": 3000.0,
+                            "leverage": 20,
+                            "mark_px": 3000.0,
+                        },
+                    },
+                    "fills": [],
+                    "realized_pnl": 0.0,
+                },
+                "bot_o": {
+                    "id": "bot_o",
+                    "balance": 100.0,
+                    "equity": 100.0,
+                    "paper_balance": 100.0,
+                    "live": True,
+                    "mirror_of": "bot_k",
+                    "positions": {},
+                    "fills": [],
+                    "realized_pnl": 0.0,
+                },
+            }
+        }
+        pc._sync_paper_to_mirror_sibling(
+            book, book["bots"]["bot_o"], {"BTC": 64000.0, "ETH": 3000.0}, cfg
+        )
+        gross = 0.0
+        for pos in (book["bots"]["bot_o"].get("positions") or {}).values():
+            gross += abs(float(pos["sz"])) * float(
+                pos.get("mark_px") or pos.get("entry_px") or 0
+            )
+        self.assertLessEqual(gross, 2000.0 * 1.001)
+
+    def test_twin_dust_does_not_force_close_existing(self):
+        cfg = dict(pc.paper_config())
+        cfg["min_notional"] = 50.0
+        book = {
+            "bots": {
+                "bot_k": {
+                    "id": "bot_k",
+                    "balance": 1000.0,
+                    "equity": 10000.0,
+                    "positions": {
+                        "bot_k:BTC": {
+                            "key": "bot_k:BTC",
+                            "coin": "BTC",
+                            "sz": -0.01,
+                            "entry_px": 64000.0,
+                            "leverage": 20,
+                            "mark_px": 64000.0,
+                        }
+                    },
+                    "fills": [],
+                    "realized_pnl": 0.0,
+                },
+                "bot_o": {
+                    "id": "bot_o",
+                    "balance": 100.0,
+                    "equity": 100.0,
+                    "live": True,
+                    "mirror_of": "bot_k",
+                    "positions": {
+                        "bot_o:BTC": {
+                            "key": "bot_o:BTC",
+                            "coin": "BTC",
+                            "sz": -0.001,
+                            "entry_px": 64000.0,
+                            "leverage": 20,
+                            "mark_px": 64000.0,
+                        }
+                    },
+                    "fills": [],
+                    "realized_pnl": 0.0,
+                },
+            }
+        }
+        # O want = 100/10000*-0.01 = -0.0001 → notional ~6.4 < min 50 → dust
+        rows = pc._sync_paper_to_mirror_sibling(
+            book, book["bots"]["bot_o"], {"BTC": 64000.0}, cfg
+        )
+        self.assertIn("bot_o:BTC", book["bots"]["bot_o"]["positions"])
+        self.assertTrue(
+            any(r.get("reason") == "twin_dust" for r in rows) or len(rows) == 0
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
