@@ -2,7 +2,7 @@
   "updated": "2026-07-30",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "2026-07-30: AM sleeve bot_am_a/e/c = gentle anti-martingale twins of A/E/C (paper-only). Original A/E/C stay 1x. O=Bitget twin of K. Not financial advice.",
+  "note": "2026-07-31: AM sleeve bot_am_a/e/c = gentle anti-martingale twins of A/E/C (paper-only). Original A/E/C stay 1x. bot_o retired. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -188,23 +188,6 @@
       "coins": ["BTC", "ETH", "HYPE", "STRK"],
       "watch": ["STRK/HYPE", "ignore xyz/alts"],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x45855f715af1045a71d83e3ea16cbb5edf89549a",
-      "ht_style": "day_trader",
-      "tag": "日内"
-    },
-    {
-      "id": "bot_o",
-      "address": "0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
-      "priority": 15,
-      "paper_balance": 1000,
-      "paper": true,
-      "live": true,
-      "venue": "bitget",
-      "mirror_of": "bot_k",
-      "style": "day · bitget live",
-      "why": "2026-07-31 Bitget live twin of K · Copy-Current sync to K paper×equity · orphan stubs blocked",
-      "coins": null,
-      "watch": ["Bitget sub O", "mirror_of bot_k", "paper→live"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "ht_style": "day_trader",
       "tag": "日内"
     },

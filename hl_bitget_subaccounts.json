@@ -1,6 +1,6 @@
 {
   "updated": "2026-07-30",
-  "note": "O=Bitget live twin of K. Other seats enabled:false until turned on. Binance desk live off.",
+  "note": "bot_o Bitget twin retired 2026-07-31. No enabled live subs. Binance desk live off.",
   "subaccounts": [
     {
       "id": "A",
@@ -118,16 +118,6 @@
       "enabled": false,
       "env_prefix": "BITGET_SUB_N",
       "scale": 1.0
-    },
-    {
-      "id": "O",
-      "label": "Bot O · Bitget live (K twin)",
-      "bot_id": "bot_o",
-      "coins": null,
-      "enabled": true,
-      "env_prefix": "BITGET_SUB_O",
-      "scale": 1.0,
-      "note": "paper book → Bitget sub; set HL_BITGET_LIVE=1 + BITGET_SUB_O_* keys"
     }
   ]
 }
