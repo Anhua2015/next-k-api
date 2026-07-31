@@ -170,7 +170,8 @@ class FlatEntryCoalesceTests(unittest.TestCase):
         self.assertAlmostEqual(out[1]["target_delta"], -3.01)
         self.assertEqual(out[1]["extra_tids"], ["o1", "o2", "o3"])
 
-    def test_open_dir_not_orphan_when_had_prior(self):
+    def test_open_dir_with_prior_is_orphan(self):
+        """HL Open Short + startPos≠0 must NOT stub-open (K加空 / O开空 bug)."""
         cfg = dict(pc.paper_config())
         cfg["min_notional"] = 10.0
         bot = {
@@ -197,8 +198,80 @@ class FlatEntryCoalesceTests(unittest.TestCase):
             fill_dir="Open Short",
             start_position=-2.0,  # leader already short
         )
+        self.assertEqual(rows, [])
+        self.assertEqual(bot.get("positions") or {}, {})
+        self.assertEqual(bot["fills"][0].get("reason"), "orphan_add")
+
+    def test_coalesce_skips_when_leader_had_prior(self):
+        bot = {"id": "bot_o", "positions": {}}
+        items = [
+            {
+                "coin": "BTC",
+                "target_delta": -0.05,
+                "px": 64000.0,
+                "tid": "a1",
+                "dir": "Open Short",
+                "start_position": -11.0,
+            },
+            {
+                "coin": "BTC",
+                "target_delta": -1.0,
+                "px": 64000.0,
+                "tid": "a2",
+                "dir": "Open Short",
+                "start_position": -11.05,
+            },
+        ]
+        out = pc._coalesce_flat_entry_fills(bot, items)
+        self.assertEqual(len(out), 2)
+        self.assertNotIn("coalesced_n", out[0])
+
+    def test_twin_copy_current_scales_to_sibling(self):
+        cfg = dict(pc.paper_config())
+        cfg["min_notional"] = 10.0
+        book = {
+            "bots": {
+                "bot_k": {
+                    "id": "bot_k",
+                    "balance": 1000.0,
+                    "equity": 4000.0,
+                    "positions": {
+                        "bot_k:BTC": {
+                            "key": "bot_k:BTC",
+                            "coin": "BTC",
+                            "sz": -2.0,
+                            "entry_px": 64000.0,
+                            "leverage": 20,
+                            "mark_px": 64000.0,
+                        }
+                    },
+                    "fills": [],
+                    "realized_pnl": 0.0,
+                },
+                "bot_o": {
+                    "id": "bot_o",
+                    "balance": 100.0,
+                    "equity": 100.0,
+                    "paper_balance": 100.0,
+                    "live": True,
+                    "mirror_of": "bot_k",
+                    "positions": {},
+                    "fills": [],
+                    "realized_pnl": 0.0,
+                },
+            }
+        }
+        rows = pc._sync_paper_to_mirror_sibling(
+            book, book["bots"]["bot_o"], {"BTC": 64000.0}, cfg
+        )
         self.assertTrue(rows)
         self.assertEqual(rows[0]["action"], "open")
+        self.assertEqual(rows[0]["reason"], "twin_copy_current")
+        pos = book["bots"]["bot_o"]["positions"]["bot_o:BTC"]
+        # Raw ratio 100/4000 * -2.0 = -0.05, but equity×lev notional cap clips.
+        self.assertLess(float(pos["sz"]), 0)
+        self.assertGreater(abs(float(pos["sz"])), 0.01)
+        self.assertLessEqual(abs(float(pos["sz"])), 0.05 + 1e-9)
 
 
 if __name__ == "__main__":

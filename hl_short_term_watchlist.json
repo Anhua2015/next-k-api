@@ -199,10 +199,11 @@
       "paper": true,
       "live": true,
       "venue": "bitget",
+      "mirror_of": "bot_k",
       "style": "day · bitget live",
-      "why": "2026-07-30 Bitget live twin of K · paper book drives Bitget sub O · Binance dropped (5x cap)",
+      "why": "2026-07-31 Bitget live twin of K · Copy-Current sync to K paper×equity · orphan stubs blocked",
       "coins": null,
-      "watch": ["Bitget sub O", "same addr as K", "paper→live"],
+      "watch": ["Bitget sub O", "mirror_of bot_k", "paper→live"],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "ht_style": "day_trader",
       "tag": "日内"

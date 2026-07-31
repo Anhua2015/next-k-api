@@ -6,9 +6,10 @@ health / WS fills are keyed by address and applied to every matching bot.
 
 Sizing:
   open/add: our_delta = fill.sz × (bot_equity / target_AV) at fill.px
-  flat-entry burst: coalesce same-sign clips so a dust-sized first fill cannot abort the open
-  orphan add (local flat, leader already had inventory): skip — no silent Copy Current
-    (explicit HL Open* never orphan-skips)
+  flat-entry burst: coalesce same-sign clips only when leader pre≈0 (true new entry)
+  orphan add (local flat, leader already had inventory): skip — no silent stub from Add
+    HL often labels mid-book adds as Open*; trust startPosition / had_prior over dir text
+  twin seats (mirror_of): after fills, Copy-Current sync to sibling paper × equity ratio
   dust open: skip with reason dust_open (never silent)
   reduce: scale our size by leader remaining fraction (startPosition→post), not raw δ×ratio
   reconcile: leader flat on a coin → close our leg (Bitget syncs paper)
@@ -1967,6 +1968,17 @@ def _coalesce_flat_entry_fills(
             i += 1
             continue
 
+        # Leader already in inventory → do not fuse Add clips into a fake open.
+        try:
+            sp0 = item.get("start_position")
+            if sp0 is not None and abs(float(sp0)) > 1e-9:
+                out.append(item)
+                sim_sz[coin] = _sim_sz_after_fill(old_sz, td0, item.get("dir"))
+                i += 1
+                continue
+        except (TypeError, ValueError):
+            pass
+
         j = i + 1
         total_td = td0
         abs_td = abs(td0)
@@ -2020,6 +2032,242 @@ def _coalesce_flat_entry_fills(
     return out
 
 
+def _sync_paper_to_mirror_sibling(
+    book: dict[str, Any],
+    bot: dict[str, Any],
+    mids: dict[str, float],
+    cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Dextrabot Copy-Current: align live twin paper to sibling × equity ratio.
+
+    Follower_sz = sibling_sz × (our_equity / sibling_equity). Used for O←K so a
+    late/flat twin does not open a stub from mid-book Add clips.
+    """
+    twin_id = str(bot.get("mirror_of") or "").strip()
+    if not twin_id:
+        return []
+    twin = (book.get("bots") or {}).get(twin_id)
+    if not isinstance(twin, dict):
+        return []
+
+    _recompute_bot(bot)
+    _recompute_bot(twin)
+    our_eq = float(bot.get("equity") or bot.get("balance") or 0)
+    twin_eq = float(twin.get("equity") or twin.get("balance") or 0)
+    if our_eq <= 1e-9 or twin_eq <= 1e-9:
+        return []
+
+    ratio = our_eq / twin_eq
+    allow = _bot_allow_coins(bot)
+    old = dict(bot.get("positions") or {})
+    desired: dict[str, dict[str, Any]] = {}
+    for pos in (twin.get("positions") or {}).values():
+        if not isinstance(pos, dict):
+            continue
+        coin = str(pos.get("coin") or "").upper()
+        if not coin or not _coin_allowed(coin, allow):
+            continue
+        try:
+            t_sz = float(pos.get("sz") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(t_sz) < 1e-16:
+            continue
+        want = t_sz * ratio
+        mid = _mid_for_coin(mids, coin) or float(pos.get("mark_px") or pos.get("entry_px") or 0)
+        if abs(want) * float(mid or 0) < float(cfg.get("min_notional") or 0):
+            continue
+        lev = int(pos.get("leverage") or _lev_for_coin(bot, coin, cfg) or 1)
+        key = f"{bot.get('id')}:{coin}"
+        total_cap = _max_notional(bot, lev, cfg)
+        used_others = _gross_notional(bot, exclude_key=key)
+        max_n = max(0.0, total_cap - used_others)
+        want = _clip_sz_to_notional(want, float(mid or 0), max_n)
+        if abs(want) < 1e-16:
+            continue
+        desired[key] = {
+            "key": key,
+            "source": bot.get("id"),
+            "coin": coin,
+            "sz": want,
+            "entry_px": float(pos.get("entry_px") or mid or 0),
+            "copy_ratio": round(ratio, 10),
+            "leverage": lev,
+            "target_address": bot.get("address"),
+            "twin_of": twin_id,
+            "opened_at": (old.get(key) or {}).get("opened_at") or _now(),
+            "u_pnl": 0.0,
+            "mark_px": mid or None,
+        }
+
+    rows: list[dict[str, Any]] = []
+    fills = list(bot.get("fills") or [])
+    new_positions: dict[str, dict[str, Any]] = {}
+
+    for key, pos in old.items():
+        if key in desired:
+            continue
+        coin = str(pos.get("coin") or "").upper()
+        mid = _mid_for_coin(mids, coin) or float(pos.get("mark_px") or pos.get("entry_px") or 0)
+        try:
+            old_sz = float(pos.get("sz") or 0)
+        except (TypeError, ValueError):
+            old_sz = 0.0
+        if abs(old_sz) < 1e-16:
+            continue
+        pnl = _realize(bot, pos, float(mid or 0), abs(old_sz))
+        side = "buy" if old_sz < 0 else "sell"
+        pos_side = "short" if old_sz < 0 else "long"
+        row = {
+            "id": str(uuid.uuid4())[:8],
+            "action": "close",
+            "reason": "twin_copy_current",
+            "source": bot.get("id"),
+            "coin": coin,
+            "px": mid,
+            "our_sz": abs(old_sz),
+            "notional": abs(old_sz) * float(mid or 0),
+            "realized_pnl": pnl,
+            "side": side,
+            "pos": pos_side,
+            "twin_of": twin_id,
+            "ts": _now(),
+        }
+        rows.append(row)
+        fills.insert(0, row)
+
+    for key, want in desired.items():
+        coin = str(want.get("coin") or "")
+        mid = float(want.get("mark_px") or 0) or _mid_for_coin(mids, coin) or float(
+            want.get("entry_px") or 0
+        )
+        new_sz = float(want.get("sz") or 0)
+        old_pos = old.get(key)
+        old_sz = float(old_pos.get("sz") or 0) if isinstance(old_pos, dict) else 0.0
+        if abs(new_sz - old_sz) * float(mid or 0) < float(cfg.get("min_notional") or 0) * 0.5:
+            # Already close enough — keep.
+            if isinstance(old_pos, dict) and abs(old_sz) > 1e-16:
+                _mark_one(old_pos, mid)
+                new_positions[key] = old_pos
+            elif abs(new_sz) > 1e-16:
+                want["mark_px"] = mid
+                _mark_one(want, mid)
+                new_positions[key] = want
+            continue
+
+        if abs(old_sz) > 1e-16 and old_sz * new_sz < 0:
+            pnl = _realize(bot, old_pos, mid, abs(old_sz))
+            rows.append(
+                {
+                    "id": str(uuid.uuid4())[:8],
+                    "action": "close",
+                    "reason": "twin_copy_current",
+                    "source": bot.get("id"),
+                    "coin": coin,
+                    "px": mid,
+                    "our_sz": abs(old_sz),
+                    "realized_pnl": pnl,
+                    "pos": "long" if old_sz > 0 else "short",
+                    "twin_of": twin_id,
+                    "ts": _now(),
+                }
+            )
+            fills.insert(0, rows[-1])
+            old_sz = 0.0
+            old_pos = None
+
+        if abs(new_sz) < 1e-16:
+            if abs(old_sz) > 1e-16 and isinstance(old_pos, dict):
+                pnl = _realize(bot, old_pos, mid, abs(old_sz))
+                rows.append(
+                    {
+                        "id": str(uuid.uuid4())[:8],
+                        "action": "close",
+                        "reason": "twin_copy_current",
+                        "source": bot.get("id"),
+                        "coin": coin,
+                        "px": mid,
+                        "our_sz": abs(old_sz),
+                        "realized_pnl": pnl,
+                        "pos": "long" if old_sz > 0 else "short",
+                        "twin_of": twin_id,
+                        "ts": _now(),
+                    }
+                )
+                fills.insert(0, rows[-1])
+            continue
+
+        delta = new_sz - old_sz
+        if abs(old_sz) < 1e-16:
+            action = "open"
+            qty = abs(new_sz)
+        elif abs(new_sz) + 1e-12 < abs(old_sz):
+            action = "reduce"
+            qty = abs(old_sz) - abs(new_sz)
+            if isinstance(old_pos, dict):
+                _realize(bot, old_pos, mid, qty)
+        else:
+            action = "increase"
+            qty = abs(new_sz) - abs(old_sz)
+
+        side = "buy" if delta > 0 else "sell"
+        pos_side = "long" if new_sz > 0 else "short"
+        if action == "open" or not isinstance(old_pos, dict):
+            pos = dict(want)
+            pos["sz"] = new_sz
+            pos["entry_px"] = mid
+            pos["opened_at"] = _now()
+        else:
+            pos = dict(old_pos)
+            if action == "increase":
+                old_entry = float(pos.get("entry_px") or mid)
+                old_abs = abs(old_sz)
+                pos["entry_px"] = (old_entry * old_abs + mid * qty) / (old_abs + qty)
+            pos["sz"] = new_sz
+            pos["leverage"] = want.get("leverage")
+            pos["copy_ratio"] = want.get("copy_ratio")
+            pos["twin_of"] = twin_id
+        _mark_one(pos, mid)
+        new_positions[key] = pos
+        row = {
+            "id": str(uuid.uuid4())[:8],
+            "action": action,
+            "reason": "twin_copy_current",
+            "source": bot.get("id"),
+            "coin": coin,
+            "px": mid,
+            "our_sz": qty,
+            "notional": qty * float(mid or 0),
+            "side": side,
+            "pos": pos_side,
+            "copy_ratio": round(ratio, 10),
+            "twin_of": twin_id,
+            "twin_sz": float((twin.get("positions") or {}).get(f"{twin_id}:{coin}", {}).get("sz") or 0)
+            if isinstance((twin.get("positions") or {}).get(f"{twin_id}:{coin}"), dict)
+            else None,
+            "ts": _now(),
+        }
+        rows.append(row)
+        fills.insert(0, row)
+        logger.info(
+            "HL twin_copy_current bot=%s←%s coin=%s action=%s our=%s ratio=%.6g",
+            bot.get("id"),
+            twin_id,
+            coin,
+            action,
+            new_sz,
+            ratio,
+        )
+
+    if not rows:
+        return []
+
+    bot["positions"] = new_positions
+    bot["fills"] = fills[:300]
+    _recompute_bot(bot)
+    return rows
+
+
 def _apply_market_fill(
     bot: dict[str, Any],
     *,
@@ -2039,9 +2287,9 @@ def _apply_market_fill(
 ) -> list[dict[str, Any]]:
     """Apply one proportional fill at market px; enforce equity×lev notional cap.
 
-    Live-safe rules (CEX / Dextrabot Mirror style):
-    - Local flat + target already had inventory / HL Add* → skip (no orphan open).
-    - Explicit HL Open* never orphan-skips.
+    Live-safe rules (Dextrabot/Legend defaults):
+    - Local flat + leader already had inventory → orphan skip (no stub from Add).
+    - HL dir text is unreliable (Open Short with startPos≠0 is still an add).
     - Reduces scale our size by leader remaining fraction (not raw fill×ratio).
     - Never cross through zero into the opposite side on the same fill.
     """
@@ -2089,9 +2337,9 @@ def _apply_market_fill(
             abs(old_sz) > 1e-16 and abs(raw_new) < 1e-16
         )
 
-    # Orphan add: we are flat, but leader is only adding to an existing book.
-    # Explicit Open Long/Short is never an orphan — HL already labeled a new entry.
-    if abs(old_sz) < 1e-16 and increasing and not is_open_dir:
+    # Orphan add: flat locally but leader already had inventory.
+    # Trust startPosition / had_prior over HL Open* labels.
+    if abs(old_sz) < 1e-16 and increasing:
         had_prior = (
             abs(pre_sz) > 1e-9
             if pre_sz is not None
@@ -2099,6 +2347,7 @@ def _apply_market_fill(
         )
         orphan = bool(is_add_dir) or (had_prior is True) or (
             had_prior is None
+            and not is_open_dir
             and bool(dir_l)
             and ("close" in dir_l or "add" in dir_l)
         )
@@ -2106,6 +2355,8 @@ def _apply_market_fill(
             post = post_sz if post_sz is not None else _target_coin_szi(target_snap, coin)
             if post is not None and abs(post) > abs(tdelta) + 1e-9:
                 orphan = True
+        if is_open_dir and had_prior is True:
+            orphan = True
         if orphan:
             row = {
                 "id": str(uuid.uuid4())[:8],
@@ -2500,10 +2751,21 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
         except Exception:
             mids = dict(_mids_cache)
 
-        for bot in (book.get("bots") or {}).values():
-            if str(bot.get("address") or "").lower() != addr:
-                continue
+        bots_for_addr = [
+            b
+            for b in (book.get("bots") or {}).values()
+            if str(b.get("address") or "").lower() == addr
+        ]
+        # Parents before mirror_of twins so Copy Current sees updated sibling book.
+        bots_for_addr.sort(
+            key=lambda b: (
+                1 if b.get("mirror_of") else 0,
+                int(b.get("priority") or 0),
+                str(b.get("id") or ""),
+            )
+        )
 
+        for bot in bots_for_addr:
             if spot_rows:
                 _merge_target_spot_fills(bot, spot_rows)
 
@@ -2519,6 +2781,12 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     continue
                 fresh.append(item)
             if not fresh:
+                # Still allow twin sync when sibling moved and we had no fresh fills.
+                if bot.get("mirror_of") and bot.get("live") is True:
+                    twin_rows = _sync_paper_to_mirror_sibling(book, bot, mids, cfg)
+                    if twin_rows:
+                        logged.extend(twin_rows)
+                        bot["fills"] = (bot.get("fills") or [])[:300]
                 continue
 
             if snap is not None:
@@ -2639,6 +2907,23 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     if post is not None:
                         leader_pos[c] = float(post) - float(dlt)
 
+            # Stamp chained startPosition onto each clip before coalesce so
+            # mid-book adds (HL "Open Short" with prior) are not fused into opens.
+            chain = dict(leader_pos)
+            for item in fresh_sorted:
+                c = str(item.get("coin") or "")
+                if item.get("start_position") is None and c in chain:
+                    item["start_position"] = chain[c]
+                try:
+                    td = float(item.get("target_delta") or 0)
+                    sp = item.get("start_position")
+                    if sp is not None:
+                        chain[c] = float(sp) + td
+                    elif c in chain:
+                        chain[c] = float(chain[c]) + td
+                except (TypeError, ValueError):
+                    pass
+
             # Flatten tiny first-clip → orphan cascade on small seats (K vs O).
             fresh_sorted = _coalesce_flat_entry_fills(bot, fresh_sorted)
 
@@ -2721,6 +3006,13 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                 rec_rows = _reconcile_flat_target_coins(bot, snap, mids, cfg)
                 if rec_rows:
                     logged.extend(rec_rows)
+
+            # Live twin (e.g. O←K): Dextrabot-style Copy Current to sibling paper.
+            # AM paper sleeves also set mirror_of — only live seats sync.
+            if bot.get("mirror_of") and bot.get("live") is True:
+                twin_rows = _sync_paper_to_mirror_sibling(book, bot, mids, cfg)
+                if twin_rows:
+                    logged.extend(twin_rows)
 
             bot["fills"] = (bot.get("fills") or [])[:300]
         port_rows = _maybe_portfolio_risk(book, mids, cfg)
