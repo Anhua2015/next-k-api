@@ -6,7 +6,10 @@ health / WS fills are keyed by address and applied to every matching bot.
 
 Sizing:
   open/add: our_delta = fill.sz × (bot_equity / target_AV) at fill.px
+  flat-entry burst: coalesce same-sign clips so a dust-sized first fill cannot abort the open
   orphan add (local flat, leader already had inventory): skip — no silent Copy Current
+    (explicit HL Open* never orphan-skips)
+  dust open: skip with reason dust_open (never silent)
   reduce: scale our size by leader remaining fraction (startPosition→post), not raw δ×ratio
   reconcile: leader flat on a coin → close our leg (Bitget syncs paper)
 
@@ -1881,6 +1884,142 @@ def _enforce_notional_caps(
     _recompute_bot(bot)
 
 
+def _merge_tids(
+    trigger_tid: str | None, extra_tids: list[str] | None = None
+) -> list[str]:
+    out: list[str] = []
+    if trigger_tid is not None and str(trigger_tid).strip():
+        out.append(str(trigger_tid))
+    for t in extra_tids or []:
+        s = str(t or "").strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _sim_sz_after_fill(old_sz: float, tdelta: float, fill_dir: str | None) -> float:
+    """Advance a coarse local-size sim used only by flat-entry coalesce.
+
+    Close* → treat as flat so a later reopen burst in the same WS batch can
+    coalesce. Partial reduces without Close stay non-flat (no merge).
+    """
+    dir_l = str(fill_dir or "").strip().lower()
+    is_close = "close" in dir_l and "open" not in dir_l
+    is_open = "open" in dir_l and "close" not in dir_l
+    if abs(tdelta) < 1e-16:
+        return old_sz
+    if abs(old_sz) < 1e-16:
+        return float(tdelta)
+    if is_close:
+        return 0.0
+    if is_open and old_sz * tdelta < 0:
+        # Flip labeled as Open opposite — flat then enter the new side.
+        return float(tdelta)
+    if old_sz * tdelta < 0:
+        # Unlabeled reduce: keep non-flat so we do not coalesce mid-position.
+        return old_sz
+    return old_sz + float(tdelta)
+
+
+def _coalesce_flat_entry_fills(
+    bot: dict[str, Any], items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge consecutive same-sign clips while local flat (incl. intra-batch).
+
+    A tiny first Open (common in HL bursts) can sit under min_notional after
+    sizing on a small seat. Silently dropping it left the rest of the burst as
+    orphan_add — K opened, O stayed flat. Coalesce the entry burst so the open
+    is sized on the full clip sum.
+
+    Tracks simulated size through the batch so Close→Open in one event still
+    merges the reopen clips (Bugbot: coalesce must not only use pre-batch pos).
+    """
+    sim_sz: dict[str, float] = {}
+    for key, pos in (bot.get("positions") or {}).items():
+        if not isinstance(pos, dict):
+            continue
+        coin = str(pos.get("coin") or "")
+        if not coin and isinstance(key, str) and ":" in key:
+            coin = key.split(":", 1)[-1]
+        if not coin:
+            continue
+        try:
+            sim_sz[coin] = float(pos.get("sz") or 0)
+        except (TypeError, ValueError):
+            continue
+
+    out: list[dict[str, Any]] = []
+    i = 0
+    n = len(items)
+    while i < n:
+        item = items[i]
+        coin = str(item.get("coin") or "")
+        old_sz = float(sim_sz.get(coin) or 0.0)
+        try:
+            td0 = float(item.get("target_delta") or 0)
+        except (TypeError, ValueError):
+            out.append(item)
+            i += 1
+            continue
+        if abs(old_sz) > 1e-16 or abs(td0) < 1e-16:
+            out.append(item)
+            sim_sz[coin] = _sim_sz_after_fill(old_sz, td0, item.get("dir"))
+            i += 1
+            continue
+
+        j = i + 1
+        total_td = td0
+        abs_td = abs(td0)
+        px_weighted = abs_td * float(item.get("px") or 0)
+        tids: list[str] = []
+        if item.get("tid") is not None and str(item.get("tid")).strip():
+            tids.append(str(item.get("tid")))
+        open_dir = item.get("dir")
+        while j < n:
+            nxt = items[j]
+            if str(nxt.get("coin") or "") != coin:
+                break
+            dir_n = str(nxt.get("dir") or "").strip().lower()
+            if "close" in dir_n and "open" not in dir_n:
+                break
+            try:
+                td = float(nxt.get("target_delta") or 0)
+            except (TypeError, ValueError):
+                break
+            if abs(td) < 1e-16:
+                j += 1
+                continue
+            if td * total_td < 0:
+                break
+            total_td += td
+            abs_td += abs(td)
+            px_weighted += abs(td) * float(nxt.get("px") or 0)
+            if nxt.get("tid") is not None and str(nxt.get("tid")).strip():
+                tids.append(str(nxt.get("tid")))
+            nd = str(nxt.get("dir") or "").strip().lower()
+            if "open" in nd and "close" not in nd:
+                open_dir = nxt.get("dir")
+            j += 1
+
+        if j == i + 1:
+            out.append(item)
+            sim_sz[coin] = _sim_sz_after_fill(old_sz, td0, item.get("dir"))
+            i += 1
+            continue
+
+        merged = dict(item)
+        merged["target_delta"] = total_td
+        merged["px"] = (px_weighted / abs_td) if abs_td > 1e-16 else float(item.get("px") or 0)
+        merged["coalesced_n"] = j - i
+        merged["extra_tids"] = tids
+        if open_dir:
+            merged["dir"] = open_dir
+        out.append(merged)
+        sim_sz[coin] = float(total_td)
+        i = j
+    return out
+
+
 def _apply_market_fill(
     bot: dict[str, Any],
     *,
@@ -1896,11 +2035,13 @@ def _apply_market_fill(
     fill_dir: str | None = None,
     target_snap: dict[str, Any] | None = None,
     start_position: float | None = None,
+    extra_tids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply one proportional fill at market px; enforce equity×lev notional cap.
 
     Live-safe rules (CEX / Dextrabot Mirror style):
     - Local flat + target already had inventory / HL Add* → skip (no orphan open).
+    - Explicit HL Open* never orphan-skips.
     - Reduces scale our size by leader remaining fraction (not raw fill×ratio).
     - Never cross through zero into the opposite side on the same fill.
     """
@@ -1949,7 +2090,8 @@ def _apply_market_fill(
         )
 
     # Orphan add: we are flat, but leader is only adding to an existing book.
-    if abs(old_sz) < 1e-16 and increasing:
+    # Explicit Open Long/Short is never an orphan — HL already labeled a new entry.
+    if abs(old_sz) < 1e-16 and increasing and not is_open_dir:
         had_prior = (
             abs(pre_sz) > 1e-9
             if pre_sz is not None
@@ -1957,7 +2099,6 @@ def _apply_market_fill(
         )
         orphan = bool(is_add_dir) or (had_prior is True) or (
             had_prior is None
-            and not is_open_dir
             and bool(dir_l)
             and ("close" in dir_l or "add" in dir_l)
         )
@@ -2065,8 +2206,43 @@ def _apply_market_fill(
     ):
         new_sz = 0.0
 
-    # Dust open
-    if abs(old_sz) < 1e-16 and abs(new_sz) * px < cfg["min_notional"]:
+    # Dust open — must be visible; silent drop caused O to miss the whole entry burst.
+    if abs(old_sz) < 1e-16 and abs(new_sz) * float(px or 0) < float(
+        cfg.get("min_notional") or 0
+    ):
+        row = {
+            "id": str(uuid.uuid4())[:8],
+            "action": "signal",
+            "skipped": True,
+            "reason": "dust_open",
+            "skip_reason": "dust_open",
+            "source": bot.get("id"),
+            "coin": coin,
+            "px": px,
+            "our_sz": abs(new_sz),
+            "notional": abs(new_sz) * float(px or 0),
+            "target_delta": tdelta,
+            "copy_ratio": round(ratio, 10),
+            "leverage": lev,
+            "dir": fill_dir,
+            "min_notional": cfg.get("min_notional"),
+            "target_tid": trigger_tid,
+            "target_tids": _merge_tids(trigger_tid, extra_tids),
+            "fill_time": fill_time,
+            "ts": _now(),
+        }
+        fills = list(bot.get("fills") or [])
+        fills.insert(0, row)
+        bot["fills"] = fills[:300]
+        logger.info(
+            "HL skip dust_open bot=%s coin=%s our_sz=%s notional=%.4f min=%s dir=%s",
+            bot.get("id"),
+            coin,
+            new_sz,
+            abs(new_sz) * float(px or 0),
+            cfg.get("min_notional"),
+            fill_dir,
+        )
         return []
 
     # No effective change
@@ -2097,7 +2273,7 @@ def _apply_market_fill(
             "copy_ratio": round(ratio, 10),
             "target_delta": tdelta,
             "target_tid": trigger_tid,
-            "target_tids": [trigger_tid] if trigger_tid else [],
+            "target_tids": _merge_tids(trigger_tid, extra_tids),
             "target_address": bot.get("address"),
             "fill_time": fill_time,
             "side": side,
@@ -2105,6 +2281,8 @@ def _apply_market_fill(
             "ts": _now(),
             "max_notional": round(max_n, 4),
         }
+        if fill_dir:
+            out["dir"] = fill_dir
         if pre_sz is not None:
             out["leader_pre_sz"] = pre_sz
         if post_sz is not None:
@@ -2461,6 +2639,9 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     if post is not None:
                         leader_pos[c] = float(post) - float(dlt)
 
+            # Flatten tiny first-clip → orphan cascade on small seats (K vs O).
+            fresh_sorted = _coalesce_flat_entry_fills(bot, fresh_sorted)
+
             for item in fresh_sorted:
                 coin = item["coin"]
                 lev = _lev_for_coin(bot, coin, cfg)
@@ -2493,6 +2674,17 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     lag_ms,
                     start_pos,
                 )
+                extra_tids = item.get("extra_tids")
+                if not isinstance(extra_tids, list):
+                    extra_tids = None
+                if item.get("coalesced_n"):
+                    logger.info(
+                        "HL coalesce flat-entry bot=%s coin=%s n=%s tdelta=%s",
+                        bot.get("id"),
+                        coin,
+                        item.get("coalesced_n"),
+                        item.get("target_delta"),
+                    )
                 rows = _apply_market_fill(
                     bot,
                     coin=coin,
@@ -2507,6 +2699,7 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     fill_dir=item.get("dir"),
                     target_snap=snap,
                     start_position=start_pos,
+                    extra_tids=[str(t) for t in extra_tids] if extra_tids else None,
                 )
                 note_target_fill(bot, fill_ts)
                 logged.extend(rows)
