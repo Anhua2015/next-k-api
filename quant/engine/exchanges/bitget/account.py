@@ -59,23 +59,30 @@ def bitget_creds(creds: Optional[BitgetCreds]) -> Iterator[None]:
         _creds_ctx.reset(token)
 
 
+def _env_clean(name: str, default: str = "") -> str:
+    """Strip whitespace and accidental surrounding quotes from Railway/env values."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    s = str(raw).strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    return s
+
+
 def load_creds_from_env(prefix: str = "") -> BitgetCreds:
     """Load keys from env. prefix='' → BITGET_*; prefix='BITGET_SUB_BTC' → BITGET_SUB_BTC_API_KEY etc."""
     p = (prefix or "").strip().rstrip("_")
     if p:
-        key = (os.getenv(f"{p}_API_KEY") or "").strip()
-        sec = (os.getenv(f"{p}_API_SECRET") or "").strip()
-        pwd = (
-            os.getenv(f"{p}_PASSPHRASE")
-            or os.getenv(f"{p}_API_PASSPHRASE")
-            or ""
-        ).strip()
-        server = (os.getenv(f"{p}_SERVER") or os.getenv("BITGET_SERVER") or "REAL").strip().upper()
+        key = _env_clean(f"{p}_API_KEY")
+        sec = _env_clean(f"{p}_API_SECRET")
+        pwd = _env_clean(f"{p}_PASSPHRASE") or _env_clean(f"{p}_API_PASSPHRASE")
+        server = (_env_clean(f"{p}_SERVER") or _env_clean("BITGET_SERVER", "REAL")).upper()
     else:
-        key = (os.getenv("BITGET_API_KEY") or "").strip()
-        sec = (os.getenv("BITGET_API_SECRET") or "").strip()
-        pwd = (os.getenv("BITGET_PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE") or "").strip()
-        server = (os.getenv("BITGET_SERVER") or "REAL").strip().upper()
+        key = _env_clean("BITGET_API_KEY")
+        sec = _env_clean("BITGET_API_SECRET")
+        pwd = _env_clean("BITGET_PASSPHRASE") or _env_clean("BITGET_API_PASSPHRASE")
+        server = _env_clean("BITGET_SERVER", "REAL").upper()
     if server not in _BITGET_BASES:
         server = "REAL"
     return BitgetCreds(api_key=key, api_secret=sec, passphrase=pwd, server=server)
