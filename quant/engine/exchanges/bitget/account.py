@@ -128,6 +128,35 @@ def _headers(timestamp: str, sign: str) -> Dict[str, str]:
     }
 
 
+def _proxies() -> Optional[Dict[str, str]]:
+    """Optional egress via BITGET_PROXY_HOST/PORT (must be one of API-key whitelist IPs)."""
+    host = _env_clean("BITGET_PROXY_HOST")
+    port_s = _env_clean("BITGET_PROXY_PORT", "0")
+    try:
+        port = int(port_s or "0")
+    except ValueError:
+        port = 0
+    if not host or port <= 0:
+        return None
+    user = _env_clean("BITGET_PROXY_USER")
+    pwd = _env_clean("BITGET_PROXY_PASS")
+    if user:
+        auth = f"{user}:{pwd}@" if pwd else f"{user}@"
+    else:
+        auth = ""
+    url = f"http://{auth}{host}:{port}"
+    return {"http": url, "https": url}
+
+
+def _creds_fingerprint(creds: BitgetCreds) -> str:
+    """Safe lengths/prefix for debugging auth failures (never logs full secrets)."""
+    k = creds.api_key or ""
+    return (
+        f"key={k[:10]}… len={len(k)}/{len(creds.api_secret or '')}/{len(creds.passphrase or '')} "
+        f"pwd_ord0={(ord(creds.passphrase[0]) if creds.passphrase else -1)}"
+    )
+
+
 def _signed_request(method: str, path: str, params: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None) -> Any:
     creds = _active_creds()
     if not creds.ok():
@@ -143,15 +172,26 @@ def _signed_request(method: str, path: str, params: Optional[Dict[str, Any]] = N
     sign = _sign(ts, method, req_path, body_s)
     url = f"{_base_url()}{req_path}"
     headers = _headers(ts, sign)
+    proxies = _proxies()
     if method.upper() == "GET":
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=15, proxies=proxies)
     else:
-        resp = requests.post(url, headers=headers, data=body_s, timeout=15)
+        resp = requests.post(url, headers=headers, data=body_s, timeout=15, proxies=proxies)
     if resp.status_code >= 400:
         try:
             payload = resp.json()
         except Exception:
             payload = resp.text
+        code = ""
+        if isinstance(payload, dict):
+            code = str(payload.get("code") or "")
+        if code in ("40012", "40018", "40036", "40037", "40038"):
+            logger.warning(
+                "bitget auth/IP fail %s %s proxy=%s",
+                code,
+                _creds_fingerprint(creds),
+                bool(proxies),
+            )
         raise RuntimeError(f"Bitget {path} HTTP {resp.status_code}: {payload}")
     data = resp.json()
     if str(data.get("code", "")) != "00000":
