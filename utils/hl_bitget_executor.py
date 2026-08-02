@@ -1405,8 +1405,10 @@ def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
             low = msg.lower()
             if "40018" in msg or "invalid ip" in low:
                 bot["live_error"] = "Invalid IP（API Key IP 白名单未放行 Railway）"
-            elif "40001" in msg or "sign" in low or "apikey" in low.replace(" ", ""):
-                bot["live_error"] = "auth_failed（密钥/签名错误）"
+            elif "40012" in msg or "password is incorrect" in low or "apikey/password" in low:
+                bot["live_error"] = "40012 apikey/password incorrect（Key/Secret/Passphrase 错误或含多余引号空格）"
+            elif "40001" in msg or "sign" in low:
+                bot["live_error"] = "auth_failed（签名错误）"
             else:
                 bot["live_error"] = msg[:160]
             bot["equity"] = None
