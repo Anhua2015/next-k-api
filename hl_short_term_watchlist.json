@@ -1,5 +1,5 @@
 {
-  "updated": "2026-08-02",
+  "updated": "2026-08-02T20:45+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
   "note": "Live via Railway HL_BITGET_ENABLE_BOTS → live_only (no paper; Bitget eq/AV sizing). Other seats paper. AM sleeve paper-only. Not financial advice.",
@@ -190,6 +190,34 @@
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x45855f715af1045a71d83e3ea16cbb5edf89549a",
       "ht_style": "day_trader",
       "tag": "日内"
+    },
+    {
+      "id": "bot_o",
+      "address": "0xfb941d2344b72ea9101400392b818173772d0ddf",
+      "priority": 15,
+      "paper_balance": 1000,
+      "style": "day · HFT multi",
+      "why": "HyperStats S+ add 2026-08-02 · WR65% · 30D≈+$86万 · MaxDD≈-2.3% · quality signal but high fill pace (hard mirror)",
+      "coins": null,
+      "watch": ["HYPE/SOL/ETH", "xyz pace", "slippage"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xfb941d2344b72ea9101400392b818173772d0ddf",
+      "ht_style": "day_trader",
+      "tag": "日内",
+      "style_tags": ["degen"]
+    },
+    {
+      "id": "bot_p",
+      "address": "0xebcda26432c1e2a46898d9920759438f86c8fcf4",
+      "priority": 16,
+      "paper_balance": 1000,
+      "style": "swing · short majors",
+      "why": "HyperStats S+ add 2026-08-02 · WR98% · 30D≈+$9万 · short BTC/ETH/SOL · easier to shadow than O",
+      "coins": ["BTC", "ETH", "SOL"],
+      "watch": ["BTC short book", "majors only"],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xebcda26432c1e2a46898d9920759438f86c8fcf4",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": ["concentrated"]
     },
     {
       "id": "bot_am_a",
