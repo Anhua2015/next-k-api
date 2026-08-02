@@ -1,7 +1,11 @@
-"""HL paper mirror → Bitget USDT-M (vnpy REST).
+"""HL → Bitget USDT-M (vnpy REST).
 
-MODE=sub (default): each paper bot maps to a Bitget sub-account
+MODE=sub (default): each enabled bot maps to a Bitget sub-account
 (hl_bitget_subaccounts.json). Positions never net across sub-accounts.
+
+Railway-enabled seats are live_only (no paper): 
+  bitget_sz = leader_sz × (bitget_eq / target_AV) × scale
+Desk UI overlays Bitget wallet/positions for those seats.
 
 MODE=net: legacy single-account sum of bots.
 MODE=delta: per-row intents (single bot / single account only).
@@ -9,8 +13,8 @@ MODE=delta: per-row intents (single bot / single account only).
 Default dry-run. Live: HL_BITGET_LIVE=1, DRY_RUN=0, plus enabled subaccounts
 with credentials (sub mode) or ALLOW_COINS+BOT_IDS (net/delta).
 
-Burst fills: HL_BITGET_DEBOUNCE_MS (default 10000) coalesces paper→Bitget
-syncs so one HL fill storm becomes one position align.
+Burst fills: HL_BITGET_DEBOUNCE_MS (default 10000) coalesces HL fills into
+one Bitget position align.
 """
 
 from __future__ import annotations
@@ -214,6 +218,12 @@ def _subaccount_status() -> dict[str, Any]:
                 else [],
             }
         )
+    try:
+        from utils.hl_bitget_subaccounts import env_enable_bot_tokens
+
+        env_enable = sorted(env_enable_bot_tokens())
+    except Exception:
+        env_enable = []
     return {
         "ok": not problems,
         "max_subaccounts": max_subaccounts(),
@@ -221,6 +231,8 @@ def _subaccount_status() -> dict[str, Any]:
         "problems": problems,
         "routes": rows,
         "enabled_count": sum(1 for r in routes if r.enabled),
+        "env_enable_bots": env_enable or None,
+        "live_only_when_enabled": True,
     }
 
 
@@ -641,38 +653,172 @@ def apply_mirror_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def compute_bot_desired(
-    bot_id: str,
-    *,
-    route_coins: frozenset[str] | set[str] | None = None,
-    route_scale: float = 1.0,
-) -> dict[str, float]:
-    """Paper positions for one bot → Bitget symbol signed sizes."""
+def _load_bot(bot_id: str) -> dict[str, Any]:
     from utils.hl_paper_copy import load_paper
 
     book = load_paper()
     bot = (book.get("bots") or {}).get(bot_id) or {}
-    # also allow lookup by id field if keyed differently
-    if not bot:
-        for b in (book.get("bots") or {}).values():
-            if str(b.get("id") or "") == bot_id:
-                bot = b
-                break
+    if bot:
+        return bot if isinstance(bot, dict) else {}
+    for b in (book.get("bots") or {}).values():
+        if str(b.get("id") or "") == bot_id:
+            return b if isinstance(b, dict) else {}
+    return {}
+
+
+def _fetch_bitget_equity(env_prefix: str = "") -> float | None:
+    """Signed sub-account equity, or None if unavailable."""
+    try:
+        from quant.engine.exchanges.bitget.account import (
+            bitget_creds,
+            fetch_account_equity,
+            load_creds_from_env,
+        )
+
+        creds = load_creds_from_env(env_prefix) if env_prefix else load_creds_from_env("")
+        if not creds.ok():
+            return None
+        with bitget_creds(creds):
+            return float(fetch_account_equity().get("equity") or 0)
+    except Exception as exc:
+        logger.warning("bitget equity fetch failed [%s]: %s", env_prefix or "main", exc)
+        return None
+
+
+def _desired_from_target_book(
+    bot: dict[str, Any],
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+    route_scale: float = 1.0,
+    env_prefix: str = "",
+) -> dict[str, float] | None:
+    """live_only: our_sz = target_sz × (our_eq / target_av) × scale.
+
+    Returns None when sizing inputs are unavailable (caller must NOT flatten).
+    Returns {} when target book is flat (caller may flatten).
+    """
+    try:
+        av = float(bot.get("target_av") or 0)
+    except (TypeError, ValueError):
+        av = 0.0
+    if av <= 1e-9:
+        return None
+    tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+    # Explicit empty target book → flat (distinguish from missing meta above).
+    if not tpos:
+        return {}
+    eq = _fetch_bitget_equity(env_prefix)
+    if eq is None or eq <= 0:
+        # dry-run without keys: do not invent size; skip rather than flatten
+        return None
+    ratio = (eq / av) * float(route_scale or 1.0)
     net: dict[str, float] = {}
-    sc = scale() * float(route_scale or 1.0)
-    for pos in (bot.get("positions") or {}).values():
-        coin = str(pos.get("coin") or "")
-        sym = hl_coin_to_bitget(coin, route_coins=route_coins)
+    for coin, tp in tpos.items():
+        if not isinstance(tp, dict):
+            continue
+        sym = hl_coin_to_bitget(str(coin), route_coins=route_coins)
         if not sym:
             continue
         try:
-            sz = float(pos.get("sz") or 0) * sc
+            sz = float(tp.get("sz") or 0) * ratio
         except (TypeError, ValueError):
             continue
         if abs(sz) < 1e-16:
             continue
         net[sym] = net.get(sym, 0.0) + sz
     return net
+
+
+def _paper_equity(bot: dict[str, Any]) -> float:
+    try:
+        eq = float(bot.get("equity") or 0)
+    except (TypeError, ValueError):
+        eq = 0.0
+    if eq > 1e-9:
+        return eq
+    try:
+        return float(bot.get("balance") or bot.get("paper_balance") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _desired_paper_scaled_to_bitget(
+    bot: dict[str, Any],
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+    route_scale: float = 1.0,
+    env_prefix: str = "",
+) -> dict[str, float] | None:
+    """Paper legs × (bitget_eq / paper_eq) × scale.
+
+    Keeps trade-copy / orphan / risk decisions on paper; live notional follows
+    real sub-account equity. None = equity missing (do not flatten).
+    """
+    paper_eq = _paper_equity(bot)
+    positions = bot.get("positions") if isinstance(bot.get("positions"), dict) else {}
+    # Paper flat → Bitget should flatten (caller merges open book).
+    if not positions or paper_eq <= 1e-9:
+        return {}
+
+    bitget_eq = _fetch_bitget_equity(env_prefix)
+    if bitget_eq is None:
+        if dry_run():
+            bitget_eq = paper_eq  # dry-run without keys: 1× paper
+        else:
+            return None
+    if bitget_eq <= 0:
+        return None
+
+    factor = (bitget_eq / paper_eq) * float(route_scale or 1.0)
+    net: dict[str, float] = {}
+    for pos in positions.values():
+        if not isinstance(pos, dict):
+            continue
+        coin = str(pos.get("coin") or "")
+        sym = hl_coin_to_bitget(coin, route_coins=route_coins)
+        if not sym:
+            continue
+        try:
+            sz = float(pos.get("sz") or 0) * factor
+        except (TypeError, ValueError):
+            continue
+        if abs(sz) < 1e-16:
+            continue
+        net[sym] = net.get(sym, 0.0) + sz
+    return net
+
+
+def compute_bot_desired(
+    bot_id: str,
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+    route_scale: float = 1.0,
+    env_prefix: str = "",
+) -> dict[str, float] | None:
+    """Desired Bitget sizes for one bot.
+
+    - live_only (Railway enable): target × (bitget_eq / AV)
+    - legacy paper twin: paper legs × (bitget_eq / paper_eq)
+    - None = skip sync (sizing unavailable). {} = flat.
+    """
+    from utils.hl_paper_copy import is_live_only_bot
+
+    bot = _load_bot(bot_id)
+    sc = scale() * float(route_scale or 1.0)
+    if is_live_only_bot(bot):
+        return _desired_from_target_book(
+            bot,
+            route_coins=route_coins,
+            route_scale=sc,
+            env_prefix=env_prefix,
+        )
+    # Enabled Bitget routes are live_only; paper path is legacy/fallback only.
+    return _desired_paper_scaled_to_bitget(
+        bot,
+        route_coins=route_coins,
+        route_scale=sc,
+        env_prefix=env_prefix,
+    )
 
 
 def compute_net_desired() -> tuple[dict[str, float], dict[str, dict[str, float]]]:
@@ -983,7 +1129,24 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
             route.bot_id,
             route_coins=route.coins,
             route_scale=route.scale,
+            env_prefix=route.env_prefix,
         )
+        if desired is None:
+            logger.warning(
+                "HL→Bitget skip sync [%s] bot=%s: sizing unavailable (not flattening)",
+                route.id,
+                route.bot_id,
+            )
+            out.append(
+                {
+                    "status": "skipped",
+                    "account_id": route.id,
+                    "bot_id": route.bot_id,
+                    "error": "sizing_unavailable",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            continue
 
         # Symbols to touch: trigger coins + desired + (if paper flat) open Bitget book
         symbols: set[str] = set(desired.keys())
@@ -1133,3 +1296,109 @@ def maybe_execute_rows_async(
         t.daemon = True
         _debounce_timer = t
         t.start()
+
+
+def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
+    """Mutate API response: fill Bitget live-only seats with wallet/positions.
+
+    Paper→sub seats keep their paper book — do not overlay.
+    """
+    from utils.hl_paper_copy import is_live_only_bot
+    from utils.hl_bitget_subaccounts import enabled_routes, parse_routes, routes_for_bot
+
+    bots = book.get("bots") if isinstance(book.get("bots"), dict) else {}
+    if not bots:
+        return book
+    try:
+        from quant.engine.exchanges.bitget.account import (
+            bitget_creds,
+            fetch_account_equity,
+            fetch_all_position_rows,
+            load_creds_from_env,
+        )
+    except Exception as exc:
+        logger.warning("bitget overlay import failed: %s", exc)
+        return book
+
+    for bot in bots.values():
+        if not is_live_only_bot(bot):
+            continue
+        venue = str(bot.get("venue") or "").strip().lower()
+        if venue and venue != "bitget":
+            continue
+        bid = str(bot.get("id") or "")
+        routes = routes_for_bot(bid) or [r for r in enabled_routes() if r.bot_id == bid]
+        if not routes:
+            routes = [r for r in parse_routes() if r.bot_id == bid][:1]
+        if not routes:
+            bot["live_error"] = "no_bitget_route"
+            continue
+        route = routes[0]
+        creds = load_creds_from_env(route.env_prefix)
+        if not creds.ok():
+            bot["live_error"] = "credentials_missing"
+            bot["equity"] = None
+            bot["balance"] = None
+            continue
+        try:
+            with bitget_creds(creds):
+                eq = fetch_account_equity()
+                rows = fetch_all_position_rows()
+            bot["live_error"] = None
+            bot["equity"] = eq.get("equity")
+            bot["balance"] = eq.get("wallet")
+            bot["u_pnl"] = eq.get("upnl")
+            bot["live_available"] = eq.get("available")
+            bot["paper_balance"] = eq.get("wallet")
+            bot["realized_pnl"] = None
+            positions: dict[str, Any] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    total = float(row.get("total") or row.get("available") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(total) < 1e-12:
+                    continue
+                side = str(row.get("holdSide") or "").lower()
+                amt = total if side != "short" else -total
+                sym = str(row.get("symbol") or "").upper()
+                coin = sym[:-4] if sym.endswith("USDT") else sym
+                if not route.allows_coin(coin):
+                    continue
+                try:
+                    entry = float(row.get("openPriceAvg") or row.get("averageOpenPrice") or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                try:
+                    mark = float(row.get("markPrice") or row.get("marketPrice") or 0)
+                except (TypeError, ValueError):
+                    mark = entry
+                try:
+                    upnl = float(row.get("unrealizedPL") or row.get("unrealizedPnl") or 0)
+                except (TypeError, ValueError):
+                    upnl = 0.0
+                try:
+                    lev = float(row.get("leverage") or 0) or None
+                except (TypeError, ValueError):
+                    lev = None
+                notional = abs(amt) * mark if mark > 0 else 0.0
+                positions[f"{bid}:{coin}"] = {
+                    "coin": coin,
+                    "sz": amt,
+                    "entry_px": entry,
+                    "mark_px": mark,
+                    "u_pnl": upnl,
+                    "leverage": lev,
+                    "notional": notional,
+                    "source": bid,
+                    "venue": "bitget",
+                    "live": True,
+                }
+            bot["positions"] = positions
+            bot["live_at"] = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:
+            logger.warning("bitget overlay %s failed: %s", bid, exc)
+            bot["live_error"] = str(exc)
+    return book

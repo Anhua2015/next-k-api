@@ -1,6 +1,6 @@
 {
-  "updated": "2026-07-30",
-  "note": "bot_o Bitget twin retired 2026-07-31. No enabled live subs. Binance desk live off.",
+  "updated": "2026-08-02",
+  "note": "All routes enabled:false in git. Railway ENABLE_BOTS / SUB_<ID>_ENABLED → live_only (no paper). Never commit enabled:true.",
   "subaccounts": [
     {
       "id": "A",

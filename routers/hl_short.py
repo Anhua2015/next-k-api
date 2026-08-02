@@ -83,10 +83,11 @@ async def get_board(
 async def get_paper(mark: bool = Query(False, description="true 时尝试刷新浮盈（有冷却）")):
     """Simulated ledger. Default: cached book only; mark=true is rate-limited.
 
-    Binance live-only seats are overlaid with exchange wallet/positions.
-    Bitget paper→sub seats keep the paper book as-is.
+    Live-only seats (Binance / Bitget, including Railway-enabled Bitget) are
+    overlaid with exchange wallet/positions. Other seats keep the paper book.
     """
-    from utils.hl_binance_executor import overlay_live_bots
+    from utils.hl_binance_executor import overlay_live_bots as overlay_binance
+    from utils.hl_bitget_executor import overlay_live_bots as overlay_bitget
     from utils.hl_paper_copy import load_paper, refresh_marks, slim_paper_for_api
 
     def _run():
@@ -95,9 +96,13 @@ async def get_paper(mark: bool = Query(False, description="true 时尝试刷新�
         book = refresh_marks(force=False) if mark else load_paper()
         flush_pending_live_flatten()
         try:
-            book = overlay_live_bots(book)
+            book = overlay_binance(book)
         except Exception:
-            logger.exception("live overlay failed")
+            logger.exception("binance live overlay failed")
+        try:
+            book = overlay_bitget(book)
+        except Exception:
+            logger.exception("bitget live overlay failed")
         return slim_paper_for_api(book)
 
     return await run_in_threadpool(_run)

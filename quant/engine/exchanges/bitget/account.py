@@ -189,9 +189,70 @@ def ensure_one_way_mode() -> None:
         raise
 
 
-def fetch_all_signed_positions() -> Dict[str, float]:
-    """All non-zero one-way signed sizes on the active Bitget account."""
-    out: Dict[str, float] = {}
+def fetch_account_equity() -> Dict[str, float]:
+    """USDT-M equity snapshot for live desk display / live-only sizing."""
+    data: Any = None
+    try:
+        data = _signed_request(
+            "GET",
+            "/api/v2/mix/account/accounts",
+            params={"productType": _PRODUCT_TYPE},
+        )
+    except RuntimeError:
+        try:
+            data = _signed_request(
+                "GET",
+                "/api/v2/mix/account/account",
+                params={
+                    "productType": _PRODUCT_TYPE,
+                    "marginCoin": _MARGIN_COIN,
+                    "symbol": "BTCUSDT",
+                },
+            )
+        except RuntimeError as exc:
+            logger.warning("[vnpy] bitget account equity failed: %s", exc)
+            return {"equity": 0.0, "wallet": 0.0, "upnl": 0.0, "available": 0.0}
+    if isinstance(data, list):
+        # Prefer USDT marginCoin row when present.
+        picked = None
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("marginCoin") or "").upper() == _MARGIN_COIN:
+                picked = row
+                break
+        data = picked or (data[0] if data else {})
+    if not isinstance(data, dict):
+        return {"equity": 0.0, "wallet": 0.0, "upnl": 0.0, "available": 0.0}
+
+    def _f(*keys: str) -> float:
+        for k in keys:
+            if data.get(k) is None:
+                continue
+            try:
+                return float(data.get(k) or 0)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    equity = _f("accountEquity", "usdtEquity", "equity")
+    avail = _f("available", "crossedMaxAvailable", "availableBalance")
+    upnl = _f("unrealizedPL", "unrealizedPnl", "crossedUnrealizedPnl")
+    wallet = _f("accountBalance", "crossedBalance", "walletBalance")
+    if wallet <= 0 and equity > 0:
+        wallet = max(0.0, equity - upnl)
+    if equity <= 0 and wallet > 0:
+        equity = wallet + upnl
+    return {
+        "equity": round(equity, 6),
+        "wallet": round(wallet, 6),
+        "upnl": round(upnl, 6),
+        "available": round(avail, 6),
+    }
+
+
+def fetch_all_position_rows() -> List[Dict[str, Any]]:
+    """Raw non-flat USDT-M position rows (for desk overlay)."""
     try:
         rows = _signed_request(
             "GET",
@@ -200,10 +261,16 @@ def fetch_all_signed_positions() -> Dict[str, float]:
         )
     except RuntimeError as exc:
         logger.warning("[vnpy] bitget all-position failed: %s", exc)
-        return out
-    if not isinstance(rows, list):
-        return out
-    for row in rows:
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def fetch_all_signed_positions() -> Dict[str, float]:
+    """All non-zero one-way signed sizes on the active Bitget account."""
+    out: Dict[str, float] = {}
+    for row in fetch_all_position_rows():
+        if not isinstance(row, dict):
+            continue
         sym = norm_symbol(str(row.get("symbol") or ""))
         if not sym:
             continue

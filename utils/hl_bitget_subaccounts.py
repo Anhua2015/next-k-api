@@ -6,6 +6,11 @@ optionally limited to a coin allowlist.
 Credentials live in Railway/env only (never in JSON):
   {env_prefix}_API_KEY / _API_SECRET / _PASSPHRASE
 
+Enable live seats via Railway (JSON stays enabled:false). Enabled seats are
+live_only (no paper); size = leader × (bitget_eq / AV):
+  HL_BITGET_ENABLE_BOTS=bot_c,bot_a   # or C,A
+  HL_BITGET_SUB_C_ENABLED=1           # per route id
+
 Hard cap: at most HL_BITGET_MAX_SUBACCOUNTS enabled routes (default 10, ceiling 32).
 """
 
@@ -29,6 +34,105 @@ DEFAULT_MAX_SUBACCOUNTS = 10
 _lock = threading.Lock()
 _cache: dict[str, Any] | None = None
 _cache_mtime: float | None = None
+
+
+def _env_truthy(raw: str) -> bool | None:
+    s = str(raw or "").strip().lower()
+    if not s:
+        return None
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def _env_csv_set(*names: str) -> set[str]:
+    out: set[str] = set()
+    for name in names:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            continue
+        for part in raw.replace(";", ",").split(","):
+            tok = part.strip()
+            if tok:
+                out.add(tok)
+    return out
+
+
+def _expand_seat_tokens(tokens: set[str]) -> set[str]:
+    """Accept bot_c / C / c → match bot_id or route id."""
+    expanded: set[str] = set()
+    for tok in tokens:
+        t = str(tok or "").strip()
+        if not t:
+            continue
+        expanded.add(t)
+        expanded.add(t.lower())
+        expanded.add(t.upper())
+        low = t.lower()
+        if low.startswith("bot_"):
+            suffix = low[4:]
+            if suffix:
+                expanded.add(suffix)
+                expanded.add(suffix.upper())
+                expanded.add(f"bot_{suffix}")
+        else:
+            expanded.add(f"bot_{low}")
+            expanded.add(low.upper())
+    return expanded
+
+
+def env_enable_bot_tokens() -> set[str]:
+    """Railway: which seats go Bitget live_only (no paper book).
+
+    Accepts HL_BITGET_ENABLE_BOTS, plus aliases HL_LIVE_ONLY_BOTS /
+    HL_BITGET_LIVE_ONLY_BOTS.
+    """
+    return _expand_seat_tokens(
+        _env_csv_set(
+            "HL_BITGET_ENABLE_BOTS",
+            "HL_LIVE_ONLY_BOTS",
+            "HL_BITGET_LIVE_ONLY_BOTS",
+        )
+    )
+
+
+def seat_enabled_by_env(*, route_id: str, bot_id: str) -> bool | None:
+    """True/False if Railway forces enable/disable; None = use JSON.
+
+    When HL_BITGET_ENABLE_BOTS (or aliases) is set, it is an allowlist:
+    unmatched seats are forced off (do not fall through to JSON enabled:true).
+    Per-route HL_BITGET_SUB_<ID>_ENABLED still wins first.
+    """
+    rid = str(route_id or "").strip()
+    bid = str(bot_id or "").strip()
+    # Per-route: HL_BITGET_SUB_C_ENABLED=1
+    if rid:
+        forced = _env_truthy(os.getenv(f"HL_BITGET_SUB_{rid.upper()}_ENABLED", ""))
+        if forced is not None:
+            return forced
+    tokens = env_enable_bot_tokens()
+    if not tokens:
+        return None
+    if rid in tokens or rid.upper() in tokens or rid.lower() in tokens:
+        return True
+    if bid in tokens or bid.lower() in tokens:
+        return True
+    return False
+
+
+def route_id_for_bot(bot_id: str) -> str:
+    """Resolve Bitget route id for a watchlist bot (bot_c → C)."""
+    bid = str(bot_id or "").strip()
+    if not bid:
+        return ""
+    for r in parse_routes():
+        if r.bot_id == bid:
+            return r.id
+    if bid.lower().startswith("bot_") and len(bid) > 4:
+        return bid[4:].upper()
+    return ""
 
 
 @dataclass(frozen=True)
@@ -134,12 +238,10 @@ def parse_routes(doc: dict[str, Any] | None = None) -> list[SubAccountRoute]:
         except (TypeError, ValueError):
             scale = 1.0
         enabled = bool(row.get("enabled", False))
-        # Railway override: HL_BITGET_SUB_<ID>_ENABLED=1
-        env_en = os.getenv(f"HL_BITGET_SUB_{rid.upper()}_ENABLED", "").strip().lower()
-        if env_en in ("1", "true", "yes", "on"):
-            enabled = True
-        elif env_en in ("0", "false", "no", "off"):
-            enabled = False
+        # Railway overrides JSON enabled (see seat_enabled_by_env).
+        forced = seat_enabled_by_env(route_id=rid, bot_id=bot_id)
+        if forced is not None:
+            enabled = forced
         out.append(
             SubAccountRoute(
                 id=rid,

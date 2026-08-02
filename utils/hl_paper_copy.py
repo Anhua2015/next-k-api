@@ -16,12 +16,12 @@ Sizing:
   reduce: scale our size by leader remaining fraction (startPosition→post), not raw δ×ratio
   reconcile: leader flat on a coin → close our leg (Bitget syncs paper)
 
-Live seats (venue bitget / live:true) — shared rules for every desk seat going live:
-  1) Default = trade-copy from subscribe time (orphan skips mid-book).
-  2) Mid-book entry only via copy_current:true (full leader leg × equity/AV).
-  3) Paper book drives Bitget sub; keep paper_balance near real sub equity.
-  4) Seat removed from watchlist → paper pruned + exchange flatten attempted.
-  5) Deploy starts flat (WS snapshots ignored); never silent Copy Current.
+Live seats (Railway HL_BITGET_ENABLE_BOTS / SUB_*_ENABLED):
+  1) live_only — no paper ledger; desk shows Bitget wallet/positions.
+  2) Size: leader sz × (bitget_equity / target_AV) × scale.
+  3) Mid-book full align on fills (no paper orphan gate).
+  4) Seat disabled / removed → exchange flatten attempted.
+  5) Non-enabled seats stay paper as before.
 
 WS snapshots are ignored so deploy starts flat. Mark refresh updates uPnL and
 optionally runs the per-bot hard-stop (OFF unless HL_DAILY_LOSS_PCT>0).
@@ -61,8 +61,9 @@ _mark_guard = MinIntervalGuard("HL_PAPER_MARK_COOLDOWN_SEC", 10.0)
 _mids_ttl_sec = float(os.getenv("HL_MIDS_CACHE_SEC", "30") or 30)
 _av_ttl_sec = float(os.getenv("HL_TARGET_AV_TTL_SEC", "30") or 30)
 _health_guard = MinIntervalGuard("HL_TARGET_HEALTH_SEC", 300.0)
-# Bots pruned from watchlist — flatten live venues outside the paper lock.
+# Live venue ops queued outside the paper lock.
 _pending_live_flatten: list[str] = []
+_pending_live_align: list[str] = []
 
 
 def _truthy_flag(raw: Any) -> bool:
@@ -87,14 +88,26 @@ def _queue_live_flatten(bot_ids: list[str] | set[str]) -> None:
             _pending_live_flatten.append(s)
 
 
+def _queue_live_align(bot_ids: list[str] | set[str]) -> None:
+    """Align Bitget to leader×equity after entering live_only."""
+    for bid in bot_ids:
+        s = str(bid or "").strip()
+        if s and s not in _pending_live_align:
+            _pending_live_align.append(s)
+
+
 def flush_pending_live_flatten() -> list[str]:
-    """Run outside paper locks: Bitget/Binance sync flat for retired seats."""
-    global _pending_live_flatten
-    ids = list(_pending_live_flatten)
+    """Run outside paper locks: flatten retired seats + align new live_only seats."""
+    global _pending_live_flatten, _pending_live_align
+    flat_ids = list(_pending_live_flatten)
+    align_ids = list(_pending_live_align)
     _pending_live_flatten = []
-    if ids:
-        _sync_live_after_paper_reset(ids)
-    return ids
+    _pending_live_align = []
+    if flat_ids:
+        _sync_live_after_paper_reset(flat_ids)
+    if align_ids:
+        _sync_live_align(align_ids)
+    return flat_ids + align_ids
 
 
 def _data_dir() -> Path:
@@ -381,8 +394,8 @@ def _seen_fill_key(existing: list, kind: str, value: str) -> bool:
 def is_live_only_bot(bot: dict[str, Any] | None) -> bool:
     """True for seats that mirror on exchange only (no paper PnL book).
 
-    Bitget desk seats are paper→sub (not live-only). Binance live-only is opt-in
-    via paper:false / live_only / mode=live_only. Explicit paper:true always wins.
+    Opt-in via paper:false / live_only / mode=live_only, or live+venue
+    (binance|bitget). Explicit paper:true always wins (paper→sub twin).
     """
     if not isinstance(bot, dict):
         return False
@@ -393,7 +406,7 @@ def is_live_only_bot(bot: dict[str, Any] | None) -> bool:
     if bot.get("paper") is False:
         return True
     venue = str(bot.get("venue") or "").strip().lower()
-    if venue == "binance" and bot.get("live") is True and bot.get("paper") is not True:
+    if venue in ("binance", "bitget") and bot.get("live") is True and bot.get("paper") is not True:
         return True
     return False
 
@@ -561,19 +574,38 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             elif ht in ("swing_trader", "swing", "波段") or ht.startswith("swing"):
                 tag = "波段"
         bots[bid]["tag"] = tag or None
-        # Live-only: no paper ledger (Binance-style). Bitget live = paper→sub.
+        # Railway-enabled Bitget seats are live_only (no paper). Watchlist flags
+        # still work for non-Railway seats; Railway enable overrides paper:true.
         live_flag = bool(w.get("live"))
         paper_flag = w.get("paper")
         venue = str(w.get("venue") or "").strip().lower() or None
         mode = str(w.get("mode") or "").strip().lower()
+        env_live = False
+        try:
+            from utils.hl_bitget_subaccounts import route_id_for_bot, seat_enabled_by_env
+
+            rid = route_id_for_bot(bid)
+            env_live = seat_enabled_by_env(route_id=rid, bot_id=bid) is True
+        except Exception:
+            env_live = False
         live_only = (
-            paper_flag is False
+            env_live
+            or paper_flag is False
             or mode == "live_only"
-            or (live_flag and venue == "binance" and paper_flag is not True)
+            or w.get("live_only") is True
+            or (
+                live_flag
+                and venue in ("binance", "bitget")
+                and paper_flag is not True
+            )
         )
-        # Explicit paper:true always wins (paper→exchange twin).
-        if paper_flag is True:
+        if paper_flag is True and not env_live:
             live_only = False
+        if env_live:
+            live_flag = True
+            if not venue:
+                venue = "bitget"
+            live_only = True
         bots[bid]["live"] = live_flag
         bots[bid]["venue"] = venue
         bots[bid]["live_only"] = bool(live_only)
@@ -589,17 +621,21 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             bots[bid]["paper_balance"] = 0.0
             bots[bid]["paper_cleared_for_live"] = True
             membership_changed = True
+            _queue_live_align([bid])
+            logger.info("entered live_only %s — queued Bitget align", bid)
         elif not live_only and bots[bid].get("paper_cleared_for_live"):
-            # Leaving live-only (e.g. O Binance→Bitget): re-seed paper book.
+            # Leaving live-only: re-seed paper book; do not keep stale live/venue.
             init = _bot_initial_balance(w, cfg)
             keep_keys = (
                 "allow_coins",
                 "tag",
                 "ht_style",
                 "style_tags",
-                "live",
-                "venue",
                 "address",
+                "target_av",
+                "target_positions",
+                "target_lev_by_coin",
+                "target_last_fill_at",
             )
             kept = {k: bots[bid].get(k) for k in keep_keys}
             bots[bid].update(_empty_bot(w, init))
@@ -607,10 +643,13 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             bots[bid].pop("paper_cleared_for_live", None)
             bots[bid]["live_only"] = False
             bots[bid]["paper"] = True
+            bots[bid]["live"] = live_flag
+            bots[bid]["venue"] = venue
             for k, v in kept.items():
                 if v is not None:
                     bots[bid][k] = v
             membership_changed = True
+            _queue_live_flatten([bid])
             logger.info("restored paper book for %s after leaving live-only (%.0fU)", bid, init)
         if tag == "日内" or ht in ("day_trader", "day") or ht.startswith("day"):
             bots[bid]["ht_style"] = "day_trader"
@@ -917,9 +956,15 @@ def reset_paper_bot(bot_id: str) -> dict[str, Any]:
             out = load_paper()
     _sync_live_after_paper_reset([bid])
     try:
-        from utils.hl_binance_executor import overlay_live_bots
+        from utils.hl_binance_executor import overlay_live_bots as overlay_binance
 
-        return overlay_live_bots(out)
+        out = overlay_binance(out)
+    except Exception:
+        pass
+    try:
+        from utils.hl_bitget_executor import overlay_live_bots as overlay_bitget
+
+        return overlay_bitget(out)
     except Exception:
         return out
 
@@ -950,6 +995,35 @@ def _sync_live_after_paper_reset(bot_ids: list[str]) -> None:
         bn_exec(rows, immediate=True)
     except Exception:
         logger.exception("paper reset binance sync bots=%s", [r["source"] for r in rows])
+
+
+def _sync_live_align(bot_ids: list[str]) -> None:
+    """Align live_only seats to leader×equity (enter live / post-enable)."""
+    rows = [
+        {
+            "id": f"align-{bid}",
+            "source": bid,
+            "bot_id": bid,
+            "action": "live_sync",
+            "live_only": True,
+        }
+        for bid in bot_ids
+        if str(bid or "").strip()
+    ]
+    if not rows:
+        return
+    try:
+        from utils.hl_bitget_executor import maybe_execute_rows_async
+
+        maybe_execute_rows_async(rows, immediate=True)
+    except Exception:
+        logger.exception("live_only align bitget sync bots=%s", [r["source"] for r in rows])
+    try:
+        from utils.hl_binance_executor import maybe_execute_rows_async as bn_exec
+
+        bn_exec(rows, immediate=True)
+    except Exception:
+        logger.exception("live_only align binance sync bots=%s", [r["source"] for r in rows])
 
 
 def fetch_all_mids(*, force: bool = False) -> dict[str, float]:
