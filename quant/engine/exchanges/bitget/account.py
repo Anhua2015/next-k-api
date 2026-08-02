@@ -190,15 +190,20 @@ def ensure_one_way_mode() -> None:
 
 
 def fetch_account_equity() -> Dict[str, float]:
-    """USDT-M equity snapshot for live desk display / live-only sizing."""
+    """USDT-M equity snapshot for live desk display / live-only sizing.
+
+    Raises RuntimeError on API/auth failure (caller should surface live_error).
+    """
     data: Any = None
+    last_exc: Exception | None = None
     try:
         data = _signed_request(
             "GET",
             "/api/v2/mix/account/accounts",
             params={"productType": _PRODUCT_TYPE},
         )
-    except RuntimeError:
+    except RuntimeError as exc:
+        last_exc = exc
         try:
             data = _signed_request(
                 "GET",
@@ -209,9 +214,12 @@ def fetch_account_equity() -> Dict[str, float]:
                     "symbol": "BTCUSDT",
                 },
             )
-        except RuntimeError as exc:
-            logger.warning("[vnpy] bitget account equity failed: %s", exc)
-            return {"equity": 0.0, "wallet": 0.0, "upnl": 0.0, "available": 0.0}
+            last_exc = None
+        except RuntimeError as exc2:
+            last_exc = exc2
+    if last_exc is not None:
+        logger.warning("[vnpy] bitget account equity failed: %s", last_exc)
+        raise last_exc
     if isinstance(data, list):
         # Prefer USDT marginCoin row when present.
         picked = None

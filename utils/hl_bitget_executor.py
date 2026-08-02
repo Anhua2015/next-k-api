@@ -1400,5 +1400,16 @@ def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
             bot["live_at"] = datetime.now(timezone.utc).isoformat()
         except Exception as exc:
             logger.warning("bitget overlay %s failed: %s", bid, exc)
-            bot["live_error"] = str(exc)
+            msg = str(exc)
+            # Short, UI-friendly reason for common Bitget auth failures.
+            low = msg.lower()
+            if "40018" in msg or "invalid ip" in low:
+                bot["live_error"] = "Invalid IP（API Key IP 白名单未放行 Railway）"
+            elif "40001" in msg or "sign" in low or "apikey" in low.replace(" ", ""):
+                bot["live_error"] = "auth_failed（密钥/签名错误）"
+            else:
+                bot["live_error"] = msg[:160]
+            bot["equity"] = None
+            bot["balance"] = None
+            bot["live_available"] = None
     return book
