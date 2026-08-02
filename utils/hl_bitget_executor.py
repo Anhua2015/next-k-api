@@ -1298,6 +1298,9 @@ def maybe_execute_rows_async(
         t.start()
 
 
+_overlay_diag_at: dict[str, float] = {}
+
+
 def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
     """Mutate API response: fill Bitget live-only seats with wallet/positions.
 
@@ -1312,6 +1315,8 @@ def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
     try:
         from quant.engine.exchanges.bitget.account import (
             bitget_creds,
+            creds_diag,
+            detect_egress_ip,
             fetch_account_equity,
             fetch_all_position_rows,
             load_creds_from_env,
@@ -1332,13 +1337,37 @@ def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
             routes = [r for r in parse_routes() if r.bot_id == bid][:1]
         if not routes:
             bot["live_error"] = "no_bitget_route"
+            logger.warning("bitget overlay %s: no_bitget_route", bid)
             continue
         route = routes[0]
         creds = load_creds_from_env(route.env_prefix)
+        now = time.time()
+        last = _overlay_diag_at.get(bid, 0.0)
+        if now - last >= 60:
+            _overlay_diag_at[bid] = now
+            try:
+                egress = detect_egress_ip()
+            except Exception:
+                egress = ""
+            logger.info(
+                "bitget overlay diag bot=%s route=%s enabled=%s live=%s dry=%s egress_ip=%s %s",
+                bid,
+                route.id,
+                route.enabled,
+                live_enabled(),
+                dry_run(),
+                egress or "unknown",
+                creds_diag(creds, route.env_prefix),
+            )
         if not creds.ok():
             bot["live_error"] = "credentials_missing"
             bot["equity"] = None
             bot["balance"] = None
+            logger.warning(
+                "bitget overlay %s credentials_missing %s",
+                bid,
+                creds_diag(creds, route.env_prefix),
+            )
             continue
         try:
             with bitget_creds(creds):
@@ -1398,8 +1427,15 @@ def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
                 }
             bot["positions"] = positions
             bot["live_at"] = datetime.now(timezone.utc).isoformat()
+            if now - last >= 60:
+                logger.info(
+                    "bitget overlay %s ok equity=%s available=%s positions=%d",
+                    bid,
+                    eq.get("equity"),
+                    eq.get("available"),
+                    len(positions),
+                )
         except Exception as exc:
-            logger.warning("bitget overlay %s failed: %s", bid, exc)
             msg = str(exc)
             # Short, UI-friendly reason for common Bitget auth failures.
             low = msg.lower()
@@ -1411,6 +1447,18 @@ def overlay_live_bots(book: dict[str, Any]) -> dict[str, Any]:
                 bot["live_error"] = "auth_failed（签名错误）"
             else:
                 bot["live_error"] = msg[:160]
+            try:
+                egress = detect_egress_ip()
+            except Exception:
+                egress = ""
+            logger.warning(
+                "bitget overlay %s FAILED live_error=%s egress_ip=%s err=%s %s",
+                bid,
+                bot["live_error"],
+                egress or "unknown",
+                msg[:200],
+                creds_diag(creds, route.env_prefix),
+            )
             bot["equity"] = None
             bot["balance"] = None
             bot["live_available"] = None

@@ -59,15 +59,27 @@ def bitget_creds(creds: Optional[BitgetCreds]) -> Iterator[None]:
         _creds_ctx.reset(token)
 
 
+def _env_raw(name: str) -> Optional[str]:
+    return os.getenv(name)
+
+
 def _env_clean(name: str, default: str = "") -> str:
     """Strip whitespace and accidental surrounding quotes from Railway/env values."""
-    raw = os.getenv(name)
+    raw = _env_raw(name)
     if raw is None:
         return default
     s = str(raw).strip()
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
         s = s[1:-1].strip()
     return s
+
+
+def _env_had_wrapping_quotes(name: str) -> bool:
+    raw = _env_raw(name)
+    if raw is None:
+        return False
+    s = str(raw).strip()
+    return len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"')
 
 
 def load_creds_from_env(prefix: str = "") -> BitgetCreds:
@@ -86,6 +98,71 @@ def load_creds_from_env(prefix: str = "") -> BitgetCreds:
     if server not in _BITGET_BASES:
         server = "REAL"
     return BitgetCreds(api_key=key, api_secret=sec, passphrase=pwd, server=server)
+
+
+def creds_diag(creds: BitgetCreds, env_prefix: str = "") -> str:
+    """Safe one-line fingerprint for Railway logs (never logs full secrets)."""
+    p = (env_prefix or "").strip().rstrip("_")
+    if p:
+        key_n, sec_n = f"{p}_API_KEY", f"{p}_API_SECRET"
+        pwd_n = f"{p}_PASSPHRASE" if _env_raw(f"{p}_PASSPHRASE") is not None else f"{p}_API_PASSPHRASE"
+    else:
+        key_n, sec_n = "BITGET_API_KEY", "BITGET_API_SECRET"
+        pwd_n = (
+            "BITGET_PASSPHRASE"
+            if _env_raw("BITGET_PASSPHRASE") is not None
+            else "BITGET_API_PASSPHRASE"
+        )
+    k = creds.api_key or ""
+    s = creds.api_secret or ""
+    pw = creds.passphrase or ""
+    quoted = [n for n in (key_n, sec_n, pwd_n) if _env_had_wrapping_quotes(n)]
+    missing: list[str] = []
+    if not k:
+        missing.append(key_n)
+    if not s:
+        missing.append(sec_n)
+    if not pw:
+        missing.append(pwd_n)
+    proxy = _proxies()
+    proxy_s = "off"
+    if proxy:
+        host = _env_clean("BITGET_PROXY_HOST")
+        port = _env_clean("BITGET_PROXY_PORT", "0")
+        proxy_s = f"{host}:{port}"
+    return (
+        f"prefix={p or 'BITGET'} key={k[:10]}…{k[-4:] if len(k) >= 14 else ''} "
+        f"len_key/sec/pwd={len(k)}/{len(s)}/{len(pw)} "
+        f"pwd_first_last_ord={ord(pw[0]) if pw else -1}/{ord(pw[-1]) if pw else -1} "
+        f"quoted_env={quoted or 'none'} missing={missing or 'none'} "
+        f"server={creds.server} proxy={proxy_s}"
+    )
+
+
+_egress_ip_cache: tuple[float, str] = (0.0, "")
+
+
+def detect_egress_ip(force: bool = False) -> str:
+    """Best-effort public egress IP (for Bitget whitelist debugging). Cached 5 min."""
+    global _egress_ip_cache
+    now = time.time()
+    ts, ip = _egress_ip_cache
+    if not force and ip and now - ts < 300:
+        return ip
+    for url in (
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ):
+        try:
+            r = requests.get(url, timeout=5, proxies=_proxies())
+            text = (r.text or "").strip()
+            if r.status_code < 400 and text and " " not in text and len(text) < 64:
+                _egress_ip_cache = (now, text)
+                return text
+        except Exception:
+            continue
+    return ip or ""
 
 
 def _active_creds() -> BitgetCreds:
@@ -148,15 +225,6 @@ def _proxies() -> Optional[Dict[str, str]]:
     return {"http": url, "https": url}
 
 
-def _creds_fingerprint(creds: BitgetCreds) -> str:
-    """Safe lengths/prefix for debugging auth failures (never logs full secrets)."""
-    k = creds.api_key or ""
-    return (
-        f"key={k[:10]}… len={len(k)}/{len(creds.api_secret or '')}/{len(creds.passphrase or '')} "
-        f"pwd_ord0={(ord(creds.passphrase[0]) if creds.passphrase else -1)}"
-    )
-
-
 def _signed_request(method: str, path: str, params: Optional[Dict[str, Any]] = None, body: Optional[Dict[str, Any]] = None) -> Any:
     creds = _active_creds()
     if not creds.ok():
@@ -183,14 +251,23 @@ def _signed_request(method: str, path: str, params: Optional[Dict[str, Any]] = N
         except Exception:
             payload = resp.text
         code = ""
+        msg = ""
         if isinstance(payload, dict):
             code = str(payload.get("code") or "")
-        if code in ("40012", "40018", "40036", "40037", "40038"):
+            msg = str(payload.get("msg") or "")
+        if code in ("40012", "40018", "40036", "40037", "40038") or "invalid ip" in msg.lower():
+            egress = ""
+            try:
+                egress = detect_egress_ip()
+            except Exception:
+                egress = ""
             logger.warning(
-                "bitget auth/IP fail %s %s proxy=%s",
-                code,
-                _creds_fingerprint(creds),
-                bool(proxies),
+                "bitget AUTH_FAIL code=%s path=%s msg=%s egress_ip=%s %s",
+                code or "?",
+                path,
+                msg[:120],
+                egress or "unknown",
+                creds_diag(creds),
             )
         raise RuntimeError(f"Bitget {path} HTTP {resp.status_code}: {payload}")
     data = resp.json()
