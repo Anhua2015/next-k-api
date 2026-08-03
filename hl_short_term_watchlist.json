@@ -1,8 +1,8 @@
 {
-  "updated": "2026-08-02T20:45+08:00",
+  "updated": "2026-08-03T09:00+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Live via Railway HL_BITGET_ENABLE_BOTS → live_only (no paper; Bitget eq/AV sizing). Other seats paper. AM sleeve paper-only. Not financial advice.",
+  "note": "Live via Railway HL_BITGET_ENABLE_BOTS → live_only (no paper; Bitget eq/AV sizing). Other seats paper. AM sleeve paper-only. Cut H/M/N/O/P 2026-08-03 after desk paper90. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -11,12 +11,19 @@
       "paper_balance": 1000,
       "style": "swing · BTC",
       "why": "LW A#5 · pure BTC both-ways · month≈+$49万 · flat wait next open · demoted S→A persistence",
-      "coins": ["BTC"],
-      "watch": ["BTC open/flip", "spot dry powder"],
+      "coins": [
+        "BTC"
+      ],
+      "watch": [
+        "BTC open/flip",
+        "spot dry powder"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x20bc9cd229dfd681740834d9b4f55641ce435da3",
       "ht_style": "swing_trader",
       "tag": "波段",
-      "style_tags": ["concentrated"]
+      "style_tags": [
+        "concentrated"
+      ]
     },
     {
       "id": "bot_b",
@@ -26,7 +33,10 @@
       "style": "swing · BTC/ETH/BCH/FIL",
       "why": "return#2 · paper90≈+2245% · MDD≈56% · BTC-led majors",
       "coins": null,
-      "watch": ["BTC/ETH", "FIL risk"],
+      "watch": [
+        "BTC/ETH",
+        "FIL risk"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xb315067ae6b8ae6dfafd052b630d95b72a91cc25",
       "ht_style": "swing_trader",
       "tag": "波段"
@@ -39,7 +49,10 @@
       "style": "swing · majors+stocks",
       "why": "return#7 / keep C · paper90≈+89% · WR92% · steadier sleeve",
       "coins": null,
-      "watch": ["BTC/ETH/HYPE", "xyz stocks"],
+      "watch": [
+        "BTC/ETH/HYPE",
+        "xyz stocks"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
       "ht_style": "swing_trader",
       "tag": "波段"
@@ -52,11 +65,16 @@
       "style": "swing · BTC",
       "why": "user-add 2026-07-28 · AV≈22万 · BTC-led · open pos",
       "coins": null,
-      "watch": ["BTC Bitget", "xyz:XYZ100"],
+      "watch": [
+        "BTC Bitget",
+        "xyz:XYZ100"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xcb3ee3f1b22cdff8b6ca4839cd0784d34b85dea9",
       "ht_style": "swing_trader",
       "tag": "波段",
-      "style_tags": ["concentrated"]
+      "style_tags": [
+        "concentrated"
+      ]
     },
     {
       "id": "bot_k",
@@ -66,11 +84,16 @@
       "style": "day · AVAX",
       "why": "return#1 · keep K · paper90≈+3158% · AVAX concentrated",
       "coins": null,
-      "watch": ["AVAX Bitget", "pace"],
+      "watch": [
+        "AVAX Bitget",
+        "pace"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xa7405ff2687cb83b8a8a08eeaa4e4bc249344d23",
       "ht_style": "day_trader",
       "tag": "日内",
-      "style_tags": ["concentrated"]
+      "style_tags": [
+        "concentrated"
+      ]
     },
     {
       "id": "bot_e",
@@ -79,12 +102,19 @@
       "paper_balance": 1000,
       "style": "swing · BTC",
       "why": "stable90 swap 2026-07-28 · paper90≈+52% MDD≈13% WR83% · pure BTC",
-      "coins": ["BTC"],
-      "watch": ["BTC Bitget", "low MDD"],
+      "coins": [
+        "BTC"
+      ],
+      "watch": [
+        "BTC Bitget",
+        "low MDD"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x27aef25d774abc98ed55ec926c3e1461eca4184a",
       "ht_style": "swing_trader",
       "tag": "波段",
-      "style_tags": ["concentrated"]
+      "style_tags": [
+        "concentrated"
+      ]
     },
     {
       "id": "bot_f",
@@ -94,7 +124,10 @@
       "style": "swing · mix",
       "why": "stable90 swap 2026-07-28 · paper90≈+42% MDD≈27% WR86% trips29",
       "coins": null,
-      "watch": ["BTC/HYPE", "Bitget map"],
+      "watch": [
+        "BTC/HYPE",
+        "Bitget map"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xfd97600ac44b3c4e20ac1a5f23e3b18d10fa5912",
       "ht_style": "swing_trader",
       "tag": "波段"
@@ -107,23 +140,13 @@
       "style": "swing · stocks",
       "why": "stable90 swap 2026-07-28 · paper90≈+48% MDD≈30% WR85% · xyz sleeve",
       "coins": null,
-      "watch": ["xyz stocks", "MDD boundary"],
+      "watch": [
+        "xyz stocks",
+        "MDD boundary"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xf27cd4a3a17c2ab6cc7e0cd7f64470c9eab68586",
       "ht_style": "swing_trader",
       "tag": "波段"
-    },
-    {
-      "id": "bot_h",
-      "address": "0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
-      "priority": 9,
-      "paper_balance": 1000,
-      "style": "day · xyz stocks",
-      "why": "user-add quant-ish 2026-07-28 · 7d WR81% pnl~+4.8万 · open stock DD large",
-      "coins": null,
-      "watch": ["xyz:SNDK/INTC", "large uPnL"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
-      "ht_style": "day_trader",
-      "tag": "日内"
     },
     {
       "id": "bot_i",
@@ -133,7 +156,11 @@
       "style": "swing · majors + soft RWA",
       "why": "crypto dig 2026-07-30 · replace weak I · paper90≈+61% MDD≈15% · WR63% swing · note: BRENTOIL not on Bitget",
       "coins": null,
-      "watch": ["BTC/HYPE/SOL", "AAPL/SP500", "oil unmapped"],
+      "watch": [
+        "BTC/HYPE/SOL",
+        "AAPL/SP500",
+        "oil unmapped"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xf2060700d2f18e5727205652a181fcf970e4a5ce",
       "ht_style": "swing_trader",
       "tag": "波段"
@@ -146,7 +173,10 @@
       "style": "swing · BTC/XRP/ZEC",
       "why": "full-net stable+quant 2026-07-28 · paper90≈+126% MDD≈20% · few coins",
       "coins": null,
-      "watch": ["BTC/XRP/ZEC", "Bitget map"],
+      "watch": [
+        "BTC/XRP/ZEC",
+        "Bitget map"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x920fa68300c8aa95c4563e0daf79a0b0e51f0cfe",
       "ht_style": "swing_trader",
       "tag": "波段"
@@ -159,65 +189,13 @@
       "style": "swing · multi quant",
       "why": "full-net stable+quant 2026-07-28 · paper90≈+38% MDD≈13% trips63 · many xyz legs",
       "coins": null,
-      "watch": ["multi legs", "xyz stocks"],
+      "watch": [
+        "multi legs",
+        "xyz stocks"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x991068726c19aa2a799ee8636b2b5cf06bdf297d",
       "ht_style": "swing_trader",
       "tag": "波段"
-    },
-    {
-      "id": "bot_m",
-      "address": "0x868b65a7a1e1ff70b74f005f1c5be5e652b2b9a0",
-      "priority": 13,
-      "paper_balance": 1000,
-      "style": "swing · BTC/SOL",
-      "why": "LW A#10 add 2026-07-29 · BTC/SOL long-bias · month≈+$13万 · flat guerrilla · demoted S→A persistence",
-      "coins": ["BTC", "SOL"],
-      "watch": ["BTC/SOL open long", "deposit then fire"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x868b65a7a1e1ff70b74f005f1c5be5e652b2b9a0",
-      "ht_style": "swing_trader",
-      "tag": "波段",
-      "style_tags": ["concentrated"]
-    },
-    {
-      "id": "bot_n",
-      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
-      "priority": 14,
-      "paper_balance": 1000,
-      "style": "day · multi long",
-      "why": "stable WR add 2026-07-29 · fillWR≈74% PF≈9.4 · week/month/all>0 · whitelist majors only",
-      "coins": ["BTC", "ETH", "HYPE", "STRK"],
-      "watch": ["STRK/HYPE", "ignore xyz/alts"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x45855f715af1045a71d83e3ea16cbb5edf89549a",
-      "ht_style": "day_trader",
-      "tag": "日内"
-    },
-    {
-      "id": "bot_o",
-      "address": "0xfb941d2344b72ea9101400392b818173772d0ddf",
-      "priority": 15,
-      "paper_balance": 1000,
-      "style": "day · HFT multi",
-      "why": "HyperStats S+ add 2026-08-02 · WR65% · 30D≈+$86万 · MaxDD≈-2.3% · quality signal but high fill pace (hard mirror)",
-      "coins": null,
-      "watch": ["HYPE/SOL/ETH", "xyz pace", "slippage"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xfb941d2344b72ea9101400392b818173772d0ddf",
-      "ht_style": "day_trader",
-      "tag": "日内",
-      "style_tags": ["degen"]
-    },
-    {
-      "id": "bot_p",
-      "address": "0xebcda26432c1e2a46898d9920759438f86c8fcf4",
-      "priority": 16,
-      "paper_balance": 1000,
-      "style": "swing · short majors",
-      "why": "HyperStats S+ add 2026-08-02 · WR98% · 30D≈+$9万 · short BTC/ETH/SOL · easier to shadow than O",
-      "coins": ["BTC", "ETH", "SOL"],
-      "watch": ["BTC short book", "majors only"],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xebcda26432c1e2a46898d9920759438f86c8fcf4",
-      "ht_style": "swing_trader",
-      "tag": "波段",
-      "style_tags": ["concentrated"]
     },
     {
       "id": "bot_am_a",
@@ -229,12 +207,20 @@
       "mirror_of": "bot_a",
       "style": "swing · BTC · AM",
       "why": "AM twin of A · gentle anti-martingale (+0.5 cap2) paper-only · original A stays 1x",
-      "coins": ["BTC"],
-      "watch": ["AM sleeve", "same addr as A"],
+      "coins": [
+        "BTC"
+      ],
+      "watch": [
+        "AM sleeve",
+        "same addr as A"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x20bc9cd229dfd681740834d9b4f55641ce435da3",
       "ht_style": "swing_trader",
       "tag": "波段",
-      "style_tags": ["concentrated", "anti_martingale"]
+      "style_tags": [
+        "concentrated",
+        "anti_martingale"
+      ]
     },
     {
       "id": "bot_am_e",
@@ -246,12 +232,20 @@
       "mirror_of": "bot_e",
       "style": "swing · BTC · AM",
       "why": "AM twin of E · gentle anti-martingale (+0.5 cap2) paper-only · original E stays 1x",
-      "coins": ["BTC"],
-      "watch": ["AM sleeve", "same addr as E"],
+      "coins": [
+        "BTC"
+      ],
+      "watch": [
+        "AM sleeve",
+        "same addr as E"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x27aef25d774abc98ed55ec926c3e1461eca4184a",
       "ht_style": "swing_trader",
       "tag": "波段",
-      "style_tags": ["concentrated", "anti_martingale"]
+      "style_tags": [
+        "concentrated",
+        "anti_martingale"
+      ]
     },
     {
       "id": "bot_am_c",
@@ -264,14 +258,39 @@
       "style": "swing · majors+stocks · AM",
       "why": "AM twin of C · gentle anti-martingale (+0.5 cap2) paper-only · original C stays 1x",
       "coins": null,
-      "watch": ["AM sleeve", "same addr as C"],
+      "watch": [
+        "AM sleeve",
+        "same addr as C"
+      ],
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
       "ht_style": "swing_trader",
       "tag": "波段",
-      "style_tags": ["anti_martingale"]
+      "style_tags": [
+        "anti_martingale"
+      ]
     }
   ],
   "reject_for_now": [
+    {
+      "address": "0xebcda26432c1e2a46898d9920759438f86c8fcf4",
+      "reason": "Dropped 2026-08-03 desk paper90 ~-12% weak HyperStats add"
+    },
+    {
+      "address": "0xfb941d2344b72ea9101400392b818173772d0ddf",
+      "reason": "Dropped 2026-08-03 desk paper90 ~+7% weak HyperStats add"
+    },
+    {
+      "address": "0x45855f715af1045a71d83e3ea16cbb5edf89549a",
+      "reason": "Dropped 2026-08-03 desk paper90 ~-134% MDD~231% worst"
+    },
+    {
+      "address": "0x868b65a7a1e1ff70b74f005f1c5be5e652b2b9a0",
+      "reason": "Dropped 2026-08-03 desk paper90 ~+34% but MDD~88% (user cut bottom)"
+    },
+    {
+      "address": "0x7b10a79ca8e28ac412617c5a382fecd37a9c7684",
+      "reason": "Dropped 2026-08-03 desk paper90 ~-103% MDD~119%"
+    },
     {
       "address": "0xb1169c6daac76bacaf0d8f87641fc38fbabe569f",
       "reason": "Dropped 2026-07-28 stable90 — ex bot_e; 7d WR93% but 90d net loss"
