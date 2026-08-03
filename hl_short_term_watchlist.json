@@ -1,8 +1,8 @@
 {
-  "updated": "2026-08-03T09:30+08:00",
+  "updated": "2026-08-03T09:40+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Live via Railway HL_BITGET_ENABLE_BOTS (B on main BITGET_*). Other seats paper. AM paper-only. Added O/P from 30d screen 2026-08-03. Not financial advice.",
+  "note": "Live via Railway HL_BITGET_ENABLE_BOTS (B on main BITGET_*). Other seats paper. AM paper-only. Removed O/P after quality audit 2026-08-03. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -198,45 +198,6 @@
       "tag": "波段"
     },
     {
-      "id": "bot_o",
-      "address": "0x6807f127eaf85e3d0b9dbc7971bbed2afd041f8d",
-      "priority": 13,
-      "paper_balance": 1000,
-      "style": "day · BTC/HYPE/xyz",
-      "why": "30d screen 2026-08-03 · paper30≈+105% MDD≈33% · live AV≈3.5万 · active now · dense fills",
-      "coins": null,
-      "watch": [
-        "pace",
-        "xyz legs",
-        "BTC/HYPE"
-      ],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x6807f127eaf85e3d0b9dbc7971bbed2afd041f8d",
-      "ht_style": "day_trader",
-      "tag": "日内"
-    },
-    {
-      "id": "bot_p",
-      "address": "0xe5d844a60e2d547205aea63d473ca704be014ebe",
-      "priority": 14,
-      "paper_balance": 1000,
-      "style": "swing · HYPE/ETH",
-      "why": "30d screen 2026-08-03 · paper30≈+40% MDD≈26% · live AV≈7.3万 · cleaner than O",
-      "coins": [
-        "HYPE",
-        "ETH"
-      ],
-      "watch": [
-        "HYPE/ETH",
-        "flat wait next open"
-      ],
-      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xe5d844a60e2d547205aea63d473ca704be014ebe",
-      "ht_style": "swing_trader",
-      "tag": "波段",
-      "style_tags": [
-        "concentrated"
-      ]
-    },
-    {
       "id": "bot_am_a",
       "address": "0x20bc9cd229dfd681740834d9b4f55641ce435da3",
       "priority": 101,
@@ -310,6 +271,14 @@
     }
   ],
   "reject_for_now": [
+    {
+      "address": "0xe5d844a60e2d547205aea63d473ca704be014ebe",
+      "reason": "Dropped 2026-08-03 quality audit — silent~2d + paper30 MDD>25%"
+    },
+    {
+      "address": "0x6807f127eaf85e3d0b9dbc7971bbed2afd041f8d",
+      "reason": "Dropped 2026-08-03 quality audit — HFT fills~30k/30d MDD~50% not quality"
+    },
     {
       "address": "0xebcda26432c1e2a46898d9920759438f86c8fcf4",
       "reason": "Dropped 2026-08-03 desk paper90 ~-12% weak HyperStats add"
