@@ -2,7 +2,7 @@
   "updated": "2026-08-03T09:00+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Live via Railway HL_BITGET_ENABLE_BOTS → live_only (no paper; Bitget eq/AV sizing). Other seats paper. AM sleeve paper-only. Cut H/M/N/O/P 2026-08-03 after desk paper90. Not financial advice.",
+  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_b → live_only on main BITGET_* (switched from C 2026-08-03). Other seats paper. AM sleeve paper-only. Cut H/M/N/O/P after desk paper90. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",

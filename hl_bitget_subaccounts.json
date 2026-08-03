@@ -1,6 +1,6 @@
 {
-  "updated": "2026-08-02",
-  "note": "All routes enabled:false in git. Railway ENABLE_BOTS → live_only. Seat C uses main BITGET_* keys (not Bitget sub-account). Never commit enabled:true.",
+  "updated": "2026-08-03",
+  "note": "All routes enabled:false in git. Railway ENABLE_BOTS → live_only. Seat B uses main BITGET_* keys (switched from C 2026-08-03). Never commit enabled:true.",
   "subaccounts": [
     {
       "id": "A",
@@ -17,7 +17,7 @@
       "bot_id": "bot_b",
       "coins": null,
       "enabled": false,
-      "env_prefix": "BITGET_SUB_B",
+      "env_prefix": "BITGET",
       "scale": 1.0
     },
     {
@@ -26,7 +26,7 @@
       "bot_id": "bot_c",
       "coins": null,
       "enabled": false,
-      "env_prefix": "BITGET",
+      "env_prefix": "BITGET_SUB_C",
       "scale": 1.0
     },
     {
