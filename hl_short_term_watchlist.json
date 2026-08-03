@@ -1,8 +1,8 @@
 {
-  "updated": "2026-08-03T09:00+08:00",
+  "updated": "2026-08-03T09:30+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_b → live_only on main BITGET_* (switched from C 2026-08-03). Other seats paper. AM sleeve paper-only. Cut H/M/N/O/P after desk paper90. Not financial advice.",
+  "note": "Live via Railway HL_BITGET_ENABLE_BOTS (B on main BITGET_*). Other seats paper. AM paper-only. Added O/P from 30d screen 2026-08-03. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -196,6 +196,45 @@
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x991068726c19aa2a799ee8636b2b5cf06bdf297d",
       "ht_style": "swing_trader",
       "tag": "波段"
+    },
+    {
+      "id": "bot_o",
+      "address": "0x6807f127eaf85e3d0b9dbc7971bbed2afd041f8d",
+      "priority": 13,
+      "paper_balance": 1000,
+      "style": "day · BTC/HYPE/xyz",
+      "why": "30d screen 2026-08-03 · paper30≈+105% MDD≈33% · live AV≈3.5万 · active now · dense fills",
+      "coins": null,
+      "watch": [
+        "pace",
+        "xyz legs",
+        "BTC/HYPE"
+      ],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x6807f127eaf85e3d0b9dbc7971bbed2afd041f8d",
+      "ht_style": "day_trader",
+      "tag": "日内"
+    },
+    {
+      "id": "bot_p",
+      "address": "0xe5d844a60e2d547205aea63d473ca704be014ebe",
+      "priority": 14,
+      "paper_balance": 1000,
+      "style": "swing · HYPE/ETH",
+      "why": "30d screen 2026-08-03 · paper30≈+40% MDD≈26% · live AV≈7.3万 · cleaner than O",
+      "coins": [
+        "HYPE",
+        "ETH"
+      ],
+      "watch": [
+        "HYPE/ETH",
+        "flat wait next open"
+      ],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xe5d844a60e2d547205aea63d473ca704be014ebe",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": [
+        "concentrated"
+      ]
     },
     {
       "id": "bot_am_a",

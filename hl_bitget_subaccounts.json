@@ -114,9 +114,35 @@
       "id": "N",
       "label": "Bot N",
       "bot_id": "bot_n",
-      "coins": ["BTC", "ETH", "HYPE", "STRK"],
+      "coins": [
+        "BTC",
+        "ETH",
+        "HYPE",
+        "STRK"
+      ],
       "enabled": false,
       "env_prefix": "BITGET_SUB_N",
+      "scale": 1.0
+    },
+    {
+      "id": "O",
+      "label": "Bot O",
+      "bot_id": "bot_o",
+      "coins": null,
+      "enabled": false,
+      "env_prefix": "BITGET_SUB_O",
+      "scale": 1.0
+    },
+    {
+      "id": "P",
+      "label": "Bot P",
+      "bot_id": "bot_p",
+      "coins": [
+        "HYPE",
+        "ETH"
+      ],
+      "enabled": false,
+      "env_prefix": "BITGET_SUB_P",
       "scale": 1.0
     }
   ]
