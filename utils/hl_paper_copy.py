@@ -1026,6 +1026,32 @@ def _sync_live_align(bot_ids: list[str]) -> None:
         logger.exception("live_only align binance sync bots=%s", [r["source"] for r in rows])
 
 
+def realign_live_only_seats() -> list[str]:
+    """Refresh leader books and force exchange align for all live_only seats.
+
+    Call on copy-supervisor boot so a prior failed sync (e.g. Bitget order-detail
+    40109 treated as hard error) is repaired without waiting for the next fill.
+    """
+    if not paper_enabled():
+        return []
+    try:
+        refresh_target_health(force=True)
+    except Exception:
+        logger.exception("live_only realign: target health refresh failed")
+    with _lock:
+        book = load_paper()
+        ids = [
+            str(bid)
+            for bid, bot in (book.get("bots") or {}).items()
+            if isinstance(bot, dict) and is_live_only_bot(bot)
+        ]
+    if not ids:
+        return []
+    logger.info("live_only realign bots=%s", ids)
+    _sync_live_align(ids)
+    return ids
+
+
 def fetch_all_mids(*, force: bool = False) -> dict[str, float]:
     """Cached allMids to avoid HL 429 under UI polling.
 

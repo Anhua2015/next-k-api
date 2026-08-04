@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -456,6 +457,31 @@ def fetch_signed_position(symbol: str) -> float:
     return float((snaps.get(sym) or {}).get("amount") or 0.0)
 
 
+# Order-detail "no such clientOid" — must return None so place_market_order proceeds.
+# Bitget wording is "cannot be found" (not "not found"); code 40109 is the stable signal.
+_ORDER_NOT_FOUND_CODES = frozenset({"40109", "40015", "43001"})
+_ORDER_NOT_FOUND_MSG = (
+    "not exist",
+    "not found",
+    "cannot be found",
+    "does not exist",
+    "no order",
+)
+_BITGET_CODE_RE = re.compile(r"['\"]code['\"]\s*:\s*['\"]?(\d+)", re.I)
+
+
+def is_order_not_found_error(exc: BaseException | str) -> bool:
+    """True when Bitget order-detail says this clientOid has no order yet."""
+    msg = str(exc or "")
+    msg_l = msg.lower()
+    m = _BITGET_CODE_RE.search(msg)
+    if m and m.group(1) in _ORDER_NOT_FOUND_CODES:
+        return True
+    if any(f"code={c}" in msg_l for c in _ORDER_NOT_FOUND_CODES):
+        return True
+    return any(k in msg_l for k in _ORDER_NOT_FOUND_MSG)
+
+
 def get_order_by_client_oid(symbol: str, client_oid: str) -> Optional[Dict[str, Any]]:
     """Return order detail if clientOid already used; None if not found."""
     sym = norm_symbol(symbol)
@@ -473,19 +499,7 @@ def get_order_by_client_oid(symbol: str, client_oid: str) -> Optional[Dict[str, 
             },
         )
     except RuntimeError as exc:
-        msg = str(exc).lower()
-        if any(
-            k in msg
-            for k in (
-                "not exist",
-                "not found",
-                "does not exist",
-                "no order",
-                "order id",
-                "40015",  # common bitget not-found-ish
-                "43001",
-            )
-        ):
+        if is_order_not_found_error(exc):
             return None
         # Ambiguous: do not place duplicate blindly — surface error to caller
         raise
