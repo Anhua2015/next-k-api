@@ -11,6 +11,10 @@ live_only (no paper); size = leader × (bitget_eq / AV):
   HL_BITGET_ENABLE_BOTS=bot_c,bot_a   # or C,A
   HL_BITGET_SUB_C_ENABLED=1           # per route id
 
+Desk habit: only main BITGET_* keys are provisioned. When ENABLE_BOTS flips a
+seat whose JSON still says BITGET_SUB_* (empty keys), enabled routes auto-fall
+back to main BITGET_* so UI never shows 实盘 + credentials_missing.
+
 Hard cap: at most HL_BITGET_MAX_SUBACCOUNTS enabled routes (default 10, ceiling 32).
 """
 
@@ -135,6 +139,56 @@ def route_id_for_bot(bot_id: str) -> str:
     return ""
 
 
+MAIN_ENV_PREFIX = "BITGET"
+_fallback_logged: set[str] = set()
+
+
+def normalize_env_prefix(prefix: str) -> str:
+    """Empty / BITGET → main account prefix."""
+    p = str(prefix or "").strip().rstrip("_")
+    if not p or p.upper() == MAIN_ENV_PREFIX:
+        return MAIN_ENV_PREFIX
+    return p
+
+
+def _bitget_creds_ok(prefix: str) -> bool:
+    try:
+        from quant.engine.exchanges.bitget.account import load_creds_from_env
+    except Exception:
+        return False
+    p = normalize_env_prefix(prefix)
+    try:
+        return bool(load_creds_from_env(p).ok())
+    except Exception:
+        return False
+
+
+def resolve_live_env_prefix(configured: str, *, route_id: str = "", enabled: bool = False) -> str:
+    """Pick env prefix for a seat.
+
+    Enabled seats: configured keys if present; else main BITGET_* when available.
+    Disabled seats keep JSON prefix unchanged (no live overlay).
+    """
+    configured = str(configured or "").strip().rstrip("_")
+    if not enabled:
+        return configured
+    if configured and _bitget_creds_ok(configured):
+        return normalize_env_prefix(configured)
+    if _bitget_creds_ok(MAIN_ENV_PREFIX):
+        if normalize_env_prefix(configured) != MAIN_ENV_PREFIX:
+            key = str(route_id or configured or "?")
+            if key not in _fallback_logged:
+                _fallback_logged.add(key)
+                logger.warning(
+                    "route %s: %s credentials missing — using main BITGET_* "
+                    "(set BITGET_SUB_* keys or point env_prefix at BITGET)",
+                    route_id or "?",
+                    configured or "(empty)",
+                )
+        return MAIN_ENV_PREFIX
+    return configured or MAIN_ENV_PREFIX
+
+
 @dataclass(frozen=True)
 class SubAccountRoute:
     id: str
@@ -242,6 +296,10 @@ def parse_routes(doc: dict[str, Any] | None = None) -> list[SubAccountRoute]:
         forced = seat_enabled_by_env(route_id=rid, bot_id=bot_id)
         if forced is not None:
             enabled = forced
+        configured_prefix = str(row.get("env_prefix") or "").strip()
+        env_prefix = resolve_live_env_prefix(
+            configured_prefix, route_id=rid, enabled=enabled
+        )
         out.append(
             SubAccountRoute(
                 id=rid,
@@ -249,7 +307,7 @@ def parse_routes(doc: dict[str, Any] | None = None) -> list[SubAccountRoute]:
                 bot_id=bot_id,
                 coins=coins,
                 enabled=enabled,
-                env_prefix=str(row.get("env_prefix") or "").strip(),
+                env_prefix=env_prefix,
                 scale=scale,
             )
         )
@@ -257,7 +315,11 @@ def parse_routes(doc: dict[str, Any] | None = None) -> list[SubAccountRoute]:
 
 
 def enabled_routes() -> list[SubAccountRoute]:
-    """Enabled routes, hard-capped at max_subaccounts() (fail-closed over cap)."""
+    """Enabled routes, hard-capped at max_subaccounts() (fail-closed over cap).
+
+    Also refuse when 2+ enabled seats resolve to the same API key prefix
+    (usually both falling back to main BITGET_*).
+    """
     enabled = [r for r in parse_routes() if r.enabled]
     cap = max_subaccounts()
     if len(enabled) > cap:
@@ -265,6 +327,17 @@ def enabled_routes() -> list[SubAccountRoute]:
             "enabled subaccounts %d > max %d — refusing all until trimmed",
             len(enabled),
             cap,
+        )
+        return []
+    by_prefix: dict[str, list[str]] = {}
+    for r in enabled:
+        by_prefix.setdefault(normalize_env_prefix(r.env_prefix), []).append(r.id)
+    clashes = {p: ids for p, ids in by_prefix.items() if len(ids) > 1}
+    if clashes:
+        logger.error(
+            "enabled seats share Bitget API prefix %s — refusing all until "
+            "ENABLE_BOTS is a single seat or each has own keys",
+            clashes,
         )
         return []
     return enabled
@@ -285,11 +358,19 @@ def validate_routes(routes: list[SubAccountRoute] | None = None) -> list[str]:
         problems.append(f"enabled subaccounts {len(enabled)} > max {cap}")
 
     seen_bots: dict[str, str] = {}
+    seen_prefix: dict[str, str] = {}
     for r in enabled:
         if not r.env_prefix:
             problems.append(
                 f"route {r.id}: env_prefix required (Railway: {r.id.upper()} API keys)"
             )
+        pref = normalize_env_prefix(r.env_prefix)
+        if pref in seen_prefix and seen_prefix[pref] != r.id:
+            problems.append(
+                f"routes {seen_prefix[pref]} and {r.id} share API prefix {pref}"
+            )
+        else:
+            seen_prefix[pref] = r.id
         if r.bot_id in seen_bots and seen_bots[r.bot_id] != r.id:
             # one bot → one subaccount recommended; coin-split still allowed via validate below
             pass

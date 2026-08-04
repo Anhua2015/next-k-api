@@ -2,7 +2,7 @@
   "updated": "2026-08-03T09:50+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_j → live_only on main BITGET_* (switched from B 2026-08-03). Other seats paper. AM paper-only. Not financial advice.",
+  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_c → live_only on main BITGET_* (switched from J 2026-08-04). Other seats paper. AM paper-only. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
