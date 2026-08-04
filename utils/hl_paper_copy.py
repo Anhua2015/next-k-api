@@ -64,6 +64,7 @@ _health_guard = MinIntervalGuard("HL_TARGET_HEALTH_SEC", 300.0)
 # Live venue ops queued outside the paper lock.
 _pending_live_flatten: list[str] = []
 _pending_live_align: list[str] = []
+_dup_addr_warned: set[str] = set()
 
 
 def _truthy_flag(raw: Any) -> bool:
@@ -519,9 +520,39 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
     membership_changed = False
 
     want_ids: set[str] = set()
+    addr_seats: dict[str, list[str]] = {}
     for w in wallets:
         bid = str(w.get("id") or w.get("address") or "")[:32]
         want_ids.add(bid)
+        a = str(w.get("address") or "").strip().lower()
+        if a:
+            addr_seats.setdefault(a, []).append(bid)
+    # One address → one seat (warn once; never share an address with a live seat).
+    try:
+        from utils.hl_bitget_subaccounts import env_enable_bot_tokens
+
+        enable_tokens = {t.lower() for t in env_enable_bot_tokens()}
+    except Exception:
+        enable_tokens = set()
+    for a, ids in addr_seats.items():
+        if len(ids) <= 1 or a in _dup_addr_warned:
+            continue
+        _dup_addr_warned.add(a)
+        live_ids = [
+            i
+            for i in ids
+            if i.lower() in enable_tokens
+            or i.lower().replace("bot_", "") in enable_tokens
+            or _truthy_flag((bots.get(i) or {}).get("live_only"))
+        ]
+        logger.warning(
+            "watchlist duplicate address %s seats=%s%s",
+            a[:14],
+            ids,
+            f" live={live_ids}" if live_ids else "",
+        )
+    for w in wallets:
+        bid = str(w.get("id") or w.get("address") or "")[:32]
         init = _bot_initial_balance(w, cfg)
         new_addr = str(w.get("address") or "").strip().lower()
         if bid not in bots:
@@ -1012,6 +1043,17 @@ def _sync_live_align(bot_ids: list[str]) -> None:
     ]
     if not rows:
         return
+    # Fresh seat: never inherit stale pending opens from a prior live period.
+    try:
+        from utils.hl_bitget_executor import clear_pending_fresh_account
+        from utils.hl_bitget_subaccounts import route_id_for_bot
+
+        for bid in bot_ids:
+            rid = route_id_for_bot(str(bid or "").strip())
+            if rid:
+                clear_pending_fresh_account(rid)
+    except Exception:
+        logger.exception("clear pending fresh on live align failed")
     try:
         from utils.hl_bitget_executor import maybe_execute_rows_async
 
@@ -1176,6 +1218,12 @@ def refresh_marks(*, force: bool = False) -> dict[str, Any]:
             bn_exec(halt_logged)
         except Exception:
             logger.exception("HL Binance live hook failed (mark halt)")
+    # Enter/leave live queues align/flatten inside load_paper; flush here so
+    # ENABLE_BOTS swaps do not wait for the next WS fill or desk poll.
+    try:
+        flush_pending_live_flatten()
+    except Exception:
+        logger.exception("HL pending live flatten flush failed (mark)")
     return out
 
 
@@ -1771,6 +1819,51 @@ def _leader_pre_post_sz(
     if post is None:
         return None, None
     return float(post) - delta, float(post)
+
+
+def _stamp_leader_start_positions(
+    fresh: list[dict[str, Any]],
+    snap: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Chronological stamp of startPosition from snap when HL omits it.
+
+    Shared by paper + live_only so Bitget fresh-open gate never has to guess
+    from unreliable Open* dir labels.
+    """
+
+    def _ft_key(it: dict[str, Any]) -> tuple[float, str]:
+        return (_fill_time_epoch(it.get("fill_time")) or 0.0, str(it.get("tid") or ""))
+
+    fresh_sorted = sorted(fresh, key=_ft_key)
+    batch_delta: dict[str, float] = {}
+    for it in fresh_sorted:
+        c = str(it.get("coin") or "")
+        try:
+            batch_delta[c] = batch_delta.get(c, 0.0) + float(it.get("target_delta") or 0)
+        except (TypeError, ValueError):
+            continue
+    leader_pos: dict[str, float] = {}
+    if snap is not None:
+        for c, dlt in batch_delta.items():
+            post = _target_coin_szi(snap, c)
+            if post is not None:
+                leader_pos[c] = float(post) - float(dlt)
+
+    chain = dict(leader_pos)
+    for item in fresh_sorted:
+        c = str(item.get("coin") or "")
+        if item.get("start_position") is None and c in chain:
+            item["start_position"] = chain[c]
+        try:
+            td = float(item.get("target_delta") or 0)
+            sp = item.get("start_position")
+            if sp is not None:
+                chain[c] = float(sp) + td
+            elif c in chain:
+                chain[c] = float(chain[c]) + td
+        except (TypeError, ValueError):
+            pass
+    return fresh_sorted
 
 
 def _reduce_sz_by_leader_pct(
@@ -3085,7 +3178,9 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
 
             # Live-only seat: update target meta + trigger exchange sync; no paper book.
             if is_live_only_bot(bot):
-                for item in fresh:
+                # Stamp startPosition from snap (same as paper) so Bitget
+                # copy_current=off gate can tell flat→open from mid-book Open*.
+                for item in _stamp_leader_start_positions(fresh, snap):
                     note_target_fill(bot, item.get("fill_time"))
                     coin = item.get("coin")
                     lev = _lev_for_coin(bot, str(coin or ""), cfg)
@@ -3110,13 +3205,14 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                         }
                     )
                     logger.info(
-                        "HL live-sync bot=%s coin=%s tdelta=%s px=%s lev=%s av=%s",
+                        "HL live-sync bot=%s coin=%s tdelta=%s px=%s lev=%s av=%s sp=%s",
                         bot.get("id"),
                         coin,
                         item.get("target_delta"),
                         item.get("px"),
                         lev,
                         bot.get("target_av"),
+                        item.get("start_position"),
                     )
                     row = logged[-1]
                     fills = list(bot.get("fills") or [])
@@ -3174,42 +3270,18 @@ def ingest_user_event(address: str, data: dict) -> list[dict]:
                     )
                 continue
 
-            # Chronological fills + reconstruct leader size before this batch so
-            # percentage reduces work when startPosition is missing mid-burst.
-            def _ft_key(it: dict[str, Any]) -> tuple[float, str]:
-                return (_fill_time_epoch(it.get("fill_time")) or 0.0, str(it.get("tid") or ""))
-
-            fresh_sorted = sorted(fresh, key=_ft_key)
-            batch_delta: dict[str, float] = {}
-            for it in fresh_sorted:
-                c = str(it.get("coin") or "")
-                try:
-                    batch_delta[c] = batch_delta.get(c, 0.0) + float(it.get("target_delta") or 0)
-                except (TypeError, ValueError):
-                    continue
+            # Chronological fills + stamp startPosition from snap when missing.
+            fresh_sorted = _stamp_leader_start_positions(fresh, snap)
+            # Pre-batch leader size per coin (first stamped startPosition).
             leader_pos: dict[str, float] = {}
-            if snap is not None:
-                for c, dlt in batch_delta.items():
-                    post = _target_coin_szi(snap, c)
-                    if post is not None:
-                        leader_pos[c] = float(post) - float(dlt)
-
-            # Stamp chained startPosition onto each clip before coalesce so
-            # mid-book adds (HL "Open Short" with prior) are not fused into opens.
-            chain = dict(leader_pos)
             for item in fresh_sorted:
                 c = str(item.get("coin") or "")
-                if item.get("start_position") is None and c in chain:
-                    item["start_position"] = chain[c]
-                try:
-                    td = float(item.get("target_delta") or 0)
-                    sp = item.get("start_position")
-                    if sp is not None:
-                        chain[c] = float(sp) + td
-                    elif c in chain:
-                        chain[c] = float(chain[c]) + td
-                except (TypeError, ValueError):
-                    pass
+                sp = item.get("start_position")
+                if sp is not None and c and c not in leader_pos:
+                    try:
+                        leader_pos[c] = float(sp)
+                    except (TypeError, ValueError):
+                        pass
 
             # Flatten tiny first-clip → orphan cascade on small seats (K vs O).
             fresh_sorted = _coalesce_flat_entry_fills(bot, fresh_sorted)

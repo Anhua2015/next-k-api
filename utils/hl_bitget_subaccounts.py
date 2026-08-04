@@ -348,6 +348,32 @@ def routes_for_bot(bot_id: str) -> list[SubAccountRoute]:
     return [r for r in enabled_routes() if r.bot_id == bid]
 
 
+def route_for_bot_any(bot_id: str) -> SubAccountRoute | None:
+    """Configured route for bot even when seat is disabled (leave-live flatten)."""
+    bid = str(bot_id or "").strip()
+    if not bid:
+        return None
+    for r in parse_routes():
+        if r.bot_id == bid:
+            return r
+    return None
+
+
+def route_for_flatten(bot_id: str) -> SubAccountRoute | None:
+    """Route for forced flatten after DISABLE / leave live.
+
+    Resolves credentials as if the seat were enabled so SUB→main fallback still
+    works when cleaning up the account the desk was trading on.
+    """
+    from dataclasses import replace
+
+    raw = route_for_bot_any(bot_id)
+    if raw is None:
+        return None
+    prefix = resolve_live_env_prefix(raw.env_prefix, route_id=raw.id, enabled=True)
+    return replace(raw, enabled=True, env_prefix=prefix)
+
+
 def validate_routes(routes: list[SubAccountRoute] | None = None) -> list[str]:
     """Return human-readable config problems (empty = ok)."""
     routes = routes if routes is not None else parse_routes()

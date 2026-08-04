@@ -567,7 +567,49 @@ def place_market_order(
         "clientOid": oid,
         "reduceOnly": "YES" if reduce_only else "NO",
     }
-    data = _signed_request("POST", "/api/v2/mix/order/place-order", body=body)
+    # One retry on transient transport/5xx — same clientOid stays idempotent.
+    last_exc: Exception | None = None
+    data = None
+    for attempt in range(2):
+        try:
+            data = _signed_request("POST", "/api/v2/mix/order/place-order", body=body)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            transient = any(
+                k in msg
+                for k in (
+                    "timeout",
+                    "timed out",
+                    "temporarily",
+                    "502",
+                    "503",
+                    "504",
+                    "connection",
+                    "reset by peer",
+                )
+            )
+            if attempt == 0 and transient:
+                logger.warning(
+                    "[vnpy] bitget place retry %s oid=%s: %s", sym, oid, exc
+                )
+                time.sleep(0.4)
+                # Another worker may have filled the same oid meanwhile.
+                again = get_order_by_client_oid(sym, oid)
+                if again:
+                    return {
+                        "deduped": True,
+                        "order": again,
+                        "clientOid": oid,
+                        "symbol": sym,
+                        "retried": True,
+                    }
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
     logger.info(
         "[vnpy] bitget place %s %s size=%s reduceOnly=%s oid=%s -> %s",
         sym,

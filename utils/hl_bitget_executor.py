@@ -47,6 +47,13 @@ _debounce_timer: threading.Timer | None = None
 _debounce_pending: list[dict[str, Any]] = []
 _debounce_gen = 0
 
+# After a flat→open is seen (or open place fails), keep the symbol eligible for
+# open while copy_current=off — so a later mid-book add does not orphan-skip forever.
+_pending_fresh_lock = threading.Lock()
+_pending_fresh_opens: dict[str, set[str]] = {}
+_open_retry_lock = threading.Lock()
+_open_retry_at: dict[str, float] = {}
+
 
 def _env_truthy(name: str, *, default: bool = False) -> bool:
     raw = os.getenv(name, "")
@@ -1076,6 +1083,22 @@ def _trigger_meta(rows: list[dict[str, Any]] | None) -> tuple[set[str], set[str]
     return coins, bots, trigger_tid
 
 
+def _row_is_fresh_open(row: dict[str, Any]) -> bool:
+    """True only when startPosition≈0 (flat→open).
+
+    Never trust HL Open* alone — mid-book adds are often labeled Open*.
+    Missing startPosition must be stamped from snap upstream; if still missing,
+    treat as unknown (not fresh) so copy_current=off does not catch up.
+    """
+    sp = row.get("start_position")
+    if sp is None or sp == "":
+        return False
+    try:
+        return abs(float(sp)) <= 1e-12
+    except (TypeError, ValueError):
+        return False
+
+
 def _fresh_open_bitget_symbols(
     rows: list[dict[str, Any]] | None,
     *,
@@ -1086,21 +1109,208 @@ def _fresh_open_bitget_symbols(
     for row in rows or []:
         if not isinstance(row, dict) or row.get("skipped"):
             continue
+        if not _row_is_fresh_open(row):
+            continue
         coin = str(row.get("coin") or "").strip()
         if not coin:
-            continue
-        sp = row.get("start_position")
-        if sp is None or sp == "":
-            continue
-        try:
-            if abs(float(sp)) > 1e-12:
-                continue
-        except (TypeError, ValueError):
             continue
         sym = hl_coin_to_bitget(coin, route_coins=route_coins)
         if sym:
             out.add(sym)
     return out
+
+
+def _pending_fresh_path() -> Path:
+    return resolve_data_dir() / "hl_bitget_pending_fresh.json"
+
+
+def _load_pending_fresh_opens() -> None:
+    """Restore pending fresh symbols after process restart."""
+    path = _pending_fresh_path()
+    if not path.is_file():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(raw, dict):
+        return
+    with _pending_fresh_lock:
+        for aid, syms in raw.items():
+            if not isinstance(syms, list):
+                continue
+            bucket = {str(s).upper() for s in syms if s}
+            if bucket:
+                _pending_fresh_opens[str(aid)] = bucket
+
+
+def _persist_pending_fresh_opens() -> None:
+    with _pending_fresh_lock:
+        payload = {aid: sorted(syms) for aid, syms in _pending_fresh_opens.items() if syms}
+    path = _pending_fresh_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not payload:
+            if path.is_file():
+                path.unlink()
+            return
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        logger.warning("HL→Bitget pending fresh persist failed", exc_info=True)
+
+
+_pending_fresh_loaded = False
+
+
+def _ensure_pending_fresh_loaded() -> None:
+    global _pending_fresh_loaded
+    if _pending_fresh_loaded:
+        return
+    _load_pending_fresh_opens()
+    _pending_fresh_loaded = True
+
+
+def _mark_pending_fresh_opens(account_id: str, symbols: set[str] | frozenset[str]) -> None:
+    if not account_id or not symbols:
+        return
+    _ensure_pending_fresh_loaded()
+    with _pending_fresh_lock:
+        bucket = _pending_fresh_opens.setdefault(account_id, set())
+        before = len(bucket)
+        bucket.update(str(s).upper() for s in symbols)
+        changed = len(bucket) != before
+    if changed:
+        logger.info(
+            "HL→Bitget [%s] pending fresh opens += %s",
+            account_id,
+            sorted(symbols),
+        )
+        _persist_pending_fresh_opens()
+
+
+def _clear_pending_fresh_opens(account_id: str, symbols: set[str] | frozenset[str]) -> None:
+    if not account_id or not symbols:
+        return
+    _ensure_pending_fresh_loaded()
+    with _pending_fresh_lock:
+        bucket = _pending_fresh_opens.get(account_id)
+        if not bucket:
+            return
+        for sym in symbols:
+            bucket.discard(str(sym).upper())
+        if not bucket:
+            _pending_fresh_opens.pop(account_id, None)
+    _persist_pending_fresh_opens()
+
+
+def clear_pending_fresh_account(account_id: str) -> None:
+    """Drop all pending fresh opens for a route (leave-live / reset)."""
+    if not account_id:
+        return
+    _ensure_pending_fresh_loaded()
+    with _pending_fresh_lock:
+        if account_id not in _pending_fresh_opens:
+            return
+        _pending_fresh_opens.pop(account_id, None)
+    _persist_pending_fresh_opens()
+    logger.info("HL→Bitget [%s] cleared pending fresh opens", account_id)
+
+
+def _pending_fresh_open_symbols(account_id: str) -> set[str]:
+    if not account_id:
+        return set()
+    _ensure_pending_fresh_loaded()
+    with _pending_fresh_lock:
+        return set(_pending_fresh_opens.get(account_id) or ())
+
+
+def _leader_sz_for_bitget_sym(
+    bot: dict[str, Any],
+    sym: str,
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+) -> float:
+    tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+    for coin, tp in tpos.items():
+        mapped = hl_coin_to_bitget(str(coin), route_coins=route_coins)
+        if mapped != sym:
+            continue
+        if not isinstance(tp, dict):
+            continue
+        try:
+            return float(tp.get("sz") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _schedule_failed_open_retry(
+    *,
+    account_id: str,
+    bot_id: str,
+    symbol: str,
+    coin: str,
+    rows: list[dict[str, Any]] | None,
+) -> None:
+    """One short retry after a failed open place (same clientOid is idempotent)."""
+    key = f"{account_id}|{symbol}"
+    now = time.time()
+    with _open_retry_lock:
+        last = float(_open_retry_at.get(key) or 0.0)
+        if now - last < 25.0:
+            return
+        _open_retry_at[key] = now
+
+    retry_rows = [
+        r
+        for r in (rows or [])
+        if isinstance(r, dict)
+        and not r.get("skipped")
+        and str(r.get("source") or r.get("bot_id") or "") in ("", bot_id)
+        and (
+            str(r.get("coin") or "").strip().upper() == coin.upper()
+            or hl_coin_to_bitget(str(r.get("coin") or "")) == symbol
+        )
+    ]
+    if not retry_rows:
+        retry_rows = [
+            {
+                "action": "live_sync",
+                "source": bot_id,
+                "bot_id": bot_id,
+                "coin": coin,
+                "start_position": 0.0,
+                "dir": "Open Long",
+                "live_only": True,
+            }
+        ]
+    else:
+        # Ensure gate still treats this as a fresh open on retry.
+        patched: list[dict[str, Any]] = []
+        for r in retry_rows:
+            rr = dict(r)
+            if rr.get("start_position") in (None, ""):
+                rr["start_position"] = 0.0
+            patched.append(rr)
+        retry_rows = patched
+
+    def _run() -> None:
+        time.sleep(3.0)
+        logger.warning(
+            "HL→Bitget [%s] retry open sync %s bot=%s",
+            account_id,
+            symbol,
+            bot_id,
+        )
+        with _bg_lock:
+            maybe_execute_rows(retry_rows)
+
+    try:
+        threading.Thread(
+            target=_run, name=f"hl-bitget-retry-{account_id}-{symbol}", daemon=True
+        ).start()
+    except Exception:
+        logger.exception("HL→Bitget open retry dispatch failed %s", symbol)
 
 
 def _gate_desired_no_copy_current(
@@ -1115,14 +1325,34 @@ def _gate_desired_no_copy_current(
     """copy_current=false: sync legs we hold; open only on true flat→open fills.
 
     Skips orphan mid-book entry (leader already in, we are flat) so a missed
-    seat does not silently catch up on the next add.
+    seat does not silently catch up on the next add. Symbols that already had a
+    flat→open (or a failed open place) stay eligible via pending_fresh_opens.
     """
     from utils.hl_paper_copy import _bot_copy_current, is_live_only_bot
 
     if not is_live_only_bot(bot) or _bot_copy_current(bot):
         return desired
 
-    fresh = _fresh_open_bitget_symbols(rows, route_coins=route_coins)
+    batch_fresh = _fresh_open_bitget_symbols(rows, route_coins=route_coins)
+    _mark_pending_fresh_opens(account_id, batch_fresh)
+    fresh = set(batch_fresh) | _pending_fresh_open_symbols(account_id)
+
+    # Drop pending only when we hold the leg, or leader is truly flat on it.
+    # Do NOT clear on a single want≈0 glitch (sizing/AV blip) — that recreated
+    # the J miss: failed open → pending cleared → later adds orphan-skipped.
+    clear_syms: set[str] = set()
+    for sym in list(fresh):
+        have = float(open_pos.get(sym) or 0.0)
+        if abs(have) > 1e-12:
+            clear_syms.add(sym)
+            continue
+        leader_sz = _leader_sz_for_bitget_sym(bot, sym, route_coins=route_coins)
+        want = float(desired.get(sym) or 0.0)
+        if abs(leader_sz) <= 1e-12 and abs(want) <= 1e-12 and sym not in batch_fresh:
+            clear_syms.add(sym)
+    _clear_pending_fresh_opens(account_id, clear_syms)
+    fresh -= clear_syms
+
     out: dict[str, float] = {}
     for sym, want in desired.items():
         have = float(open_pos.get(sym) or 0.0)
@@ -1148,10 +1378,109 @@ def _gate_desired_no_copy_current(
     return out
 
 
+def _flatten_disabled_bot_routes(bot_ids: set[str]) -> list[dict[str, Any]]:
+    """Force-flat Bitget for seats leaving live (route may already be disabled)."""
+    from quant.engine.exchanges.bitget.account import bitget_creds, load_creds_from_env
+    from utils.hl_bitget_subaccounts import route_for_flatten
+
+    out: list[dict[str, Any]] = []
+    for bid in sorted(bot_ids):
+        route = route_for_flatten(bid)
+        if route is None:
+            out.append(
+                {
+                    "status": "blocked",
+                    "bot_id": bid,
+                    "error": "no_bitget_route_for_flatten",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            continue
+        clear_pending_fresh_account(route.id)
+        creds = load_creds_from_env(route.env_prefix)
+        if not creds.ok() and not dry_run():
+            out.append(
+                {
+                    "status": "blocked",
+                    "account_id": route.id,
+                    "bot_id": bid,
+                    "error": "credentials_missing",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            continue
+        open_pos: dict[str, float] = {}
+        with bitget_creds(creds if creds.ok() else None):
+            if creds.ok():
+                try:
+                    from quant.engine.exchanges.bitget.account import (
+                        fetch_all_signed_positions,
+                    )
+
+                    open_pos = fetch_all_signed_positions()
+                except Exception as exc:
+                    logger.warning("flatten open-pos scan failed [%s]: %s", route.id, exc)
+                    out.append(
+                        {
+                            "status": "error",
+                            "account_id": route.id,
+                            "bot_id": bid,
+                            "error": f"fetch_positions: {exc}",
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    continue
+            symbols = {
+                sym
+                for sym, sz in open_pos.items()
+                if abs(sz) > 1e-12
+                and route.allows_coin(sym[:-4] if sym.endswith("USDT") else sym)
+            }
+            if not symbols:
+                out.append(
+                    {
+                        "status": "synced",
+                        "account_id": route.id,
+                        "bot_id": bid,
+                        "action": "reset_flat",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                continue
+            logger.warning(
+                "HL→Bitget [%s] leave-live flatten bot=%s symbols=%s",
+                route.id,
+                bid,
+                sorted(symbols),
+            )
+            for sym in sorted(symbols):
+                out.extend(
+                    sync_account_symbol(
+                        sym,
+                        0.0,
+                        account_id=route.id,
+                        parts={bid: 0.0},
+                        trigger_tid=None,
+                        mode_tag="reset_flat",
+                    )
+                )
+                time.sleep(0.05)
+    return out
+
+
 def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Per sub-account: sync that bot's filtered paper book onto its Bitget keys."""
     from quant.engine.exchanges.bitget.account import bitget_creds, load_creds_from_env
     from utils.hl_bitget_subaccounts import enabled_routes, routes_for_bot
+
+    reset_bots = {
+        str(r.get("source") or r.get("bot_id") or "").strip()
+        for r in (rows or [])
+        if str(r.get("action") or "").lower() == "reset"
+        and str(r.get("source") or r.get("bot_id") or "").strip()
+    }
+    if reset_bots:
+        return _flatten_disabled_bot_routes(reset_bots)
 
     touched_coins, touched_bots, trigger_tid = _trigger_meta(rows)
     routes = enabled_routes()
@@ -1265,16 +1594,32 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
 
             for sym in sorted(symbols):
                 want = float(desired.get(sym) or 0.0)
-                out.extend(
-                    sync_account_symbol(
-                        sym,
-                        want,
-                        account_id=route.id,
-                        parts={route.bot_id: want},
-                        trigger_tid=trigger_tid,
-                        mode_tag="sub_sync",
-                    )
+                results = sync_account_symbol(
+                    sym,
+                    want,
+                    account_id=route.id,
+                    parts={route.bot_id: want},
+                    trigger_tid=trigger_tid,
+                    mode_tag="sub_sync",
                 )
+                out.extend(results)
+                # Open place failed → keep pending + one short retry (J ZEC miss mode).
+                if abs(want) > 1e-12:
+                    for res in results:
+                        if res.get("status") != "error":
+                            continue
+                        if res.get("reduce_only"):
+                            continue
+                        _mark_pending_fresh_opens(route.id, {sym})
+                        coin = sym[:-4] if sym.endswith("USDT") else sym
+                        _schedule_failed_open_retry(
+                            account_id=route.id,
+                            bot_id=route.bot_id,
+                            symbol=sym,
+                            coin=coin,
+                            rows=rows,
+                        )
+                        break
                 time.sleep(0.05)
     return out
 

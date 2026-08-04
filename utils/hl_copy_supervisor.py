@@ -143,7 +143,12 @@ class HlCopySupervisor:
             addr = str(w.get("address") or "").strip()
             if not addr:
                 continue
-            wanted[addr.lower()] = w
+            # One address → one WS client. If watchlist ever duplicates an
+            # address, keep the first entry (desk order); do not merge seats.
+            key = addr.lower()
+            if key in wanted:
+                continue
+            wanted[key] = w
 
         # Drop removed
         for addr in list(self._clients.keys()):
@@ -265,9 +270,16 @@ class HlCopySupervisor:
                     with self._lock:
                         self._status["error"] = None
                     try:
-                        load_paper()  # pick up new bot slots
+                        load_paper()  # pick up new bot slots / ENABLE_BOTS flips
                     except Exception:
                         pass
+                    try:
+                        from utils.hl_paper_copy import flush_pending_live_flatten
+
+                        # Leave/enter live queues flatten/align — do not wait for fills.
+                        await asyncio.to_thread(flush_pending_live_flatten)
+                    except Exception as exc:
+                        logger.warning("HL pending live flatten flush: %s", exc)
                     await self._ensure_wallet_clients(wallets)
 
                 try:
