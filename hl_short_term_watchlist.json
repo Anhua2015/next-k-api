@@ -2,7 +2,7 @@
   "updated": "2026-08-04T12:50+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_c → live_only on main BITGET_* (switched from J 2026-08-04). H=0x11eee2 paper-only (90d WR~90% / 250+ trips; too dense for live). Other seats paper. AM paper-only. Not financial advice.",
+  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_c → live_only on main BITGET_* (switched from J 2026-08-04). H=0x11eee2 paper (dense). M=0x362ad6 paper BTC whale (90d live screen WR86% PF49). Other seats paper. AM paper-only. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -215,6 +215,31 @@
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x991068726c19aa2a799ee8636b2b5cf06bdf297d",
       "ht_style": "swing_trader",
       "tag": "波段"
+    },
+    {
+      "id": "bot_m",
+      "address": "0x362ad6209a5e904a5569f69884375809c5781d9f",
+      "priority": 13,
+      "paper_balance": 1000,
+      "style": "swing · BTC",
+      "why": "90d live LB screen 2026-08-04 · 22 trips WR86% PF49 · pnl≈+$198万 / AV≈144万 · pure BTC(+SOL) · paper first (live still C)",
+      "coins": [
+        "BTC",
+        "SOL"
+      ],
+      "watch": [
+        "BTC Bitget",
+        "whale size",
+        "paper before live"
+      ],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x362ad6209a5e904a5569f69884375809c5781d9f",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "style_tags": [
+        "concentrated"
+      ],
+      "paper": true,
+      "live": false
     },
     {
       "id": "bot_am_a",

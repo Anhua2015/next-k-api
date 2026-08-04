@@ -111,6 +111,15 @@
       "scale": 1.0
     },
     {
+      "id": "M",
+      "label": "Bot M",
+      "bot_id": "bot_m",
+      "coins": null,
+      "enabled": false,
+      "env_prefix": "BITGET_SUB_M",
+      "scale": 1.0
+    },
+    {
       "id": "N",
       "label": "Bot N",
       "bot_id": "bot_n",
