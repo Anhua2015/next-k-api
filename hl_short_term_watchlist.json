@@ -1,8 +1,8 @@
 {
-  "updated": "2026-08-03T09:50+08:00",
+  "updated": "2026-08-04T12:50+08:00",
   "venue": "hyperliquid",
   "mode": "monitor_first_then_dry_run_copy",
-  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_c → live_only on main BITGET_* (switched from J 2026-08-04). Other seats paper. AM paper-only. Not financial advice.",
+  "note": "Live via Railway HL_BITGET_ENABLE_BOTS=bot_c → live_only on main BITGET_* (switched from J 2026-08-04). H=0x11eee2 paper-only (90d WR~90% / 250+ trips; too dense for live). Other seats paper. AM paper-only. Not financial advice.",
   "wallets": [
     {
       "id": "bot_a",
@@ -147,6 +147,25 @@
       "hl_url": "https://app.hyperliquid.xyz/explorer/address/0xf27cd4a3a17c2ab6cc7e0cd7f64470c9eab68586",
       "ht_style": "swing_trader",
       "tag": "波段"
+    },
+    {
+      "id": "bot_h",
+      "address": "0x11eee2e0a613af4f636e23ff295e2dac6a191d1d",
+      "priority": 9,
+      "paper_balance": 1000,
+      "style": "swing · dense multi",
+      "why": "90d round screen 2026-08-04 · ~250 trips WR~90% PF~14 · paper-only (med hold~1.6h / ~128 fills/d — not live)",
+      "coins": null,
+      "watch": [
+        "sample quality",
+        "too dense for live",
+        "LIT/ZEC/stocks"
+      ],
+      "hl_url": "https://app.hyperliquid.xyz/explorer/address/0x11eee2e0a613af4f636e23ff295e2dac6a191d1d",
+      "ht_style": "swing_trader",
+      "tag": "波段",
+      "paper": true,
+      "live": false
     },
     {
       "id": "bot_i",
