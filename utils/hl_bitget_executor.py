@@ -1076,6 +1076,78 @@ def _trigger_meta(rows: list[dict[str, Any]] | None) -> tuple[set[str], set[str]
     return coins, bots, trigger_tid
 
 
+def _fresh_open_bitget_symbols(
+    rows: list[dict[str, Any]] | None,
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+) -> set[str]:
+    """Symbols whose trigger fills are leader flat→open (startPosition≈0)."""
+    out: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("skipped"):
+            continue
+        coin = str(row.get("coin") or "").strip()
+        if not coin:
+            continue
+        sp = row.get("start_position")
+        if sp is None or sp == "":
+            continue
+        try:
+            if abs(float(sp)) > 1e-12:
+                continue
+        except (TypeError, ValueError):
+            continue
+        sym = hl_coin_to_bitget(coin, route_coins=route_coins)
+        if sym:
+            out.add(sym)
+    return out
+
+
+def _gate_desired_no_copy_current(
+    bot: dict[str, Any],
+    desired: dict[str, float],
+    open_pos: dict[str, float],
+    rows: list[dict[str, Any]] | None,
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+    account_id: str = "",
+) -> dict[str, float]:
+    """copy_current=false: sync legs we hold; open only on true flat→open fills.
+
+    Skips orphan mid-book entry (leader already in, we are flat) so a missed
+    seat does not silently catch up on the next add.
+    """
+    from utils.hl_paper_copy import _bot_copy_current, is_live_only_bot
+
+    if not is_live_only_bot(bot) or _bot_copy_current(bot):
+        return desired
+
+    fresh = _fresh_open_bitget_symbols(rows, route_coins=route_coins)
+    out: dict[str, float] = {}
+    for sym, want in desired.items():
+        have = float(open_pos.get(sym) or 0.0)
+        if abs(have) > 1e-12:
+            out[sym] = float(want)
+            continue
+        if abs(want) <= 1e-12:
+            continue
+        if sym in fresh:
+            out[sym] = float(want)
+            continue
+        logger.info(
+            "HL→Bitget [%s] skip orphan open %s want=%.6g (copy_current=off)",
+            account_id or "?",
+            sym,
+            want,
+        )
+    # Still flatten leftovers we hold even if leader dropped them from desired.
+    for sym, have in open_pos.items():
+        if abs(have) <= 1e-12 or sym in out:
+            continue
+        out[sym] = float(desired.get(sym) or 0.0)
+    return out
+
+
 def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Per sub-account: sync that bot's filtered paper book onto its Bitget keys."""
     from quant.engine.exchanges.bitget.account import bitget_creds, load_creds_from_env
@@ -1155,6 +1227,7 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
             if sym:
                 symbols.add(sym)
 
+        open_pos: dict[str, float] = {}
         with bitget_creds(creds if creds.ok() else None):
             # Always merge open book for this route so paper-flat / reset can flatten
             # leftovers even when other coins still have desired size.
@@ -1172,6 +1245,20 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
                         symbols.add(sym)
                 except Exception as exc:
                     logger.warning("sub open-pos scan failed [%s]: %s", route.id, exc)
+
+            bot = _load_bot(route.bot_id)
+            desired = _gate_desired_no_copy_current(
+                bot,
+                desired,
+                open_pos,
+                rows,
+                route_coins=route.coins,
+                account_id=route.id,
+            )
+            symbols = set(desired.keys())
+            for sym, sz in open_pos.items():
+                if abs(sz) > 1e-12:
+                    symbols.add(sym)
 
             if not symbols:
                 continue

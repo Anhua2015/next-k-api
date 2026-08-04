@@ -245,16 +245,6 @@ class HlCopySupervisor:
         except Exception as exc:
             logger.warning("paper ensure on start: %s", exc)
 
-        # Repair live_only drift from prior failed Bitget syncs (no fill needed).
-        try:
-            from utils.hl_paper_copy import realign_live_only_seats
-
-            aligned = await asyncio.to_thread(realign_live_only_seats)
-            if aligned:
-                logger.info("HL live_only boot align queued: %s", aligned)
-        except Exception as exc:
-            logger.warning("HL live_only boot align failed: %s", exc)
-
         mark_every = float(os.getenv("HL_PAPER_MARK_LOOP_SEC", "15") or 15)
         reload_every = float(os.getenv("HL_WATCHLIST_RELOAD_SEC", "120") or 120)
         last_reload = 0.0
