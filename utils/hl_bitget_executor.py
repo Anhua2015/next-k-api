@@ -870,6 +870,27 @@ def make_net_client_oid(*, symbol: str, tid: str | None, desired: float, account
     return f"hs{digest}"
 
 
+def _coin_from_bitget_symbol(symbol: str) -> str:
+    sym = str(symbol or "").upper()
+    return sym[:-4] if sym.endswith("USDT") else sym
+
+
+def leader_leverage_for_symbol(bot_id: str, symbol: str) -> int | None:
+    """Resolve HL leader leverage for a Bitget symbol (e.g. BTCUSDT → 20)."""
+    from utils.hl_paper_copy import _lev_for_coin, paper_config
+
+    bot = _load_bot(bot_id)
+    if not bot:
+        return None
+    coin = _coin_from_bitget_symbol(symbol)
+    if not coin:
+        return None
+    try:
+        return int(_lev_for_coin(bot, coin, paper_config()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _place_one(
     *,
     symbol: str,
@@ -879,6 +900,7 @@ def _place_one(
     reduce_only: bool,
     meta: dict[str, Any],
     account_id: str = "main",
+    leverage: int | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     payload = {
@@ -892,6 +914,7 @@ def _place_one(
         "client_oid": client_oid,
         "dry_run": dry_run(),
         "live_enabled": live_enabled(),
+        "leverage": leverage,
     }
     if size <= 0:
         payload["status"] = "skipped"
@@ -901,12 +924,13 @@ def _place_one(
     if dry_run():
         payload["status"] = "dry_run"
         logger.info(
-            "HL→Bitget [%s] DRY %s %s size=%.6f reduceOnly=%s oid=%s desired=%s have=%s",
+            "HL→Bitget [%s] DRY %s %s size=%.6f reduceOnly=%s lev=%s oid=%s desired=%s have=%s",
             account_id,
             side,
             symbol,
             size,
             reduce_only,
+            leverage,
             client_oid,
             meta.get("desired"),
             meta.get("have"),
@@ -942,6 +966,7 @@ def _place_one(
                 size=qty,
                 client_oid=client_oid,
                 reduce_only=reduce_only,
+                leverage=None if reduce_only else leverage,
             )
             payload["status"] = "deduped" if result.get("deduped") else "sent"
             payload["exchange"] = result
@@ -961,6 +986,8 @@ def sync_account_symbol(
     parts: dict[str, float] | None = None,
     trigger_tid: str | None = None,
     mode_tag: str = "sync",
+    bot_id: str | None = None,
+    leverage: int | None = None,
 ) -> list[dict[str, Any]]:
     """Move one Bitget account's position to desired (signed)."""
     from quant.engine.exchanges.bitget.account import fetch_signed_position
@@ -984,6 +1011,14 @@ def sync_account_symbol(
             ]
         have = 0.0
 
+    lev = leverage
+    if lev is None:
+        bid = bot_id
+        if not bid and parts:
+            bid = next(iter(parts.keys()), None)
+        if bid:
+            lev = leader_leverage_for_symbol(str(bid), symbol)
+
     delta = desired - have
     meta = {
         "action": mode_tag,
@@ -993,9 +1028,12 @@ def sync_account_symbol(
         "parts": parts or {},
         "trigger_tid": trigger_tid,
         "mode": exec_mode(),
+        "leverage": lev,
+        "bot_id": bot_id,
     }
 
     if abs(delta) < eps:
+        # Hold existing size/leverage — do not rewrite venue lev on idle sync.
         out = {
             **meta,
             "status": "synced",
@@ -1024,6 +1062,7 @@ def sync_account_symbol(
                 reduce_only=True,
                 meta={**meta, "leg": "flatten"},
                 account_id=account_id,
+                leverage=None,
             )
         )
         have = 0.0
@@ -1034,6 +1073,9 @@ def sync_account_symbol(
 
     side = "buy" if delta > 0 else "sell"
     reduce_only = abs(have) > eps and abs(desired) < abs(have) - eps and have * desired >= 0
+    # Set leader leverage only on flat→open (or flip reopen). Never retouch an
+    # already-open symbol's leverage on size-up / idle hold.
+    apply_lev = None if reduce_only or abs(have) > eps else lev
     oid = make_net_client_oid(
         symbol=symbol, tid=trigger_tid, desired=desired, account_id=account_id
     )
@@ -1046,6 +1088,7 @@ def sync_account_symbol(
             reduce_only=reduce_only,
             meta={**meta, "leg": "adjust"},
             account_id=account_id,
+            leverage=apply_lev,
         )
     )
     return results
@@ -1687,6 +1730,7 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
                     parts={route.bot_id: want},
                     trigger_tid=trigger_tid,
                     mode_tag="sub_sync",
+                    bot_id=route.bot_id,
                 )
                 out.extend(results)
                 # Open place failed → keep pending + one short retry (J ZEC miss mode).

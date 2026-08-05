@@ -2103,15 +2103,20 @@ def _book_copy_scale(book: dict[str, Any], cfg: dict[str, Any] | None = None) ->
 
 
 def _lev_for_coin(bot: dict[str, Any], coin: str, cfg: dict[str, Any]) -> int:
+    """Leader leverage for coin — never Bitget overlay (that echoes venue lev)."""
     lev_map = bot.get("target_lev_by_coin") if isinstance(bot.get("target_lev_by_coin"), dict) else {}
     raw = None
     for key in _scope_keys_for_coin(coin):
         if key in lev_map:
             raw = lev_map[key]
             break
-    pos = (bot.get("positions") or {}).get(f"{bot.get('id')}:{coin}")
-    if raw is None and isinstance(pos, dict) and pos.get("leverage") is not None:
-        raw = pos.get("leverage")
+    if raw is None:
+        tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+        for key in _scope_keys_for_coin(coin):
+            tp = tpos.get(key)
+            if isinstance(tp, dict) and tp.get("leverage") is not None:
+                raw = tp.get("leverage")
+                break
     if raw is None:
         raw = 10.0
     return _adjusted_leverage(raw, cfg.get("leverage_adjustment", 1.0), coin)
@@ -2437,7 +2442,8 @@ def _sync_paper_to_mirror_sibling(
             dust_keys.add(key)
             continue
         try:
-            lev = int(pos.get("leverage") or _lev_for_coin(bot, coin, cfg) or 1)
+            # Always leader lev map / target book — never our Bitget echo.
+            lev = int(_lev_for_coin(bot, coin, cfg) or 1)
         except (TypeError, ValueError):
             lev = int(_lev_for_coin(bot, coin, cfg) or 1)
         raw.append(

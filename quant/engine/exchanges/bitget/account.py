@@ -278,25 +278,51 @@ def _signed_request(method: str, path: str, params: Optional[Dict[str, Any]] = N
 
 
 def set_symbol_leverage(symbol: str, leverage: int) -> None:
+    """Set USDT-M leverage to match the leader (cross / one-way).
+
+    Also sets longLeverage+shortLeverage so hedge-mode accounts do not keep a
+    stale side-specific leverage when ``leverage`` alone is ignored.
+    """
     sym = norm_symbol(symbol)
     lev = str(max(1, int(leverage)))
+    body = {
+        "symbol": sym,
+        "productType": _PRODUCT_TYPE,
+        "marginCoin": _MARGIN_COIN,
+        "leverage": lev,
+        "longLeverage": lev,
+        "shortLeverage": lev,
+    }
     try:
         _signed_request(
             "POST",
             "/api/v2/mix/account/set-leverage",
-            body={
-                "symbol": sym,
-                "productType": _PRODUCT_TYPE,
-                "marginCoin": _MARGIN_COIN,
-                "leverage": lev,
-            },
+            body=body,
         )
         logger.info("[vnpy] bitget leverage %s -> %sx", sym, lev)
     except RuntimeError as exc:
         msg = str(exc).lower()
         if "no change" in msg or "not modified" in msg:
             return
-        raise
+        # Retry with only ``leverage`` (some accounts reject long/short fields).
+        try:
+            _signed_request(
+                "POST",
+                "/api/v2/mix/account/set-leverage",
+                body={
+                    "symbol": sym,
+                    "productType": _PRODUCT_TYPE,
+                    "marginCoin": _MARGIN_COIN,
+                    "leverage": lev,
+                },
+            )
+            logger.info("[vnpy] bitget leverage %s -> %sx (leverage-only)", sym, lev)
+            return
+        except RuntimeError as exc2:
+            msg2 = str(exc2).lower()
+            if "no change" in msg2 or "not modified" in msg2:
+                return
+            raise exc2 from exc
 
 
 def ensure_one_way_mode() -> None:
@@ -546,10 +572,8 @@ def place_market_order(
         return {"deduped": True, "order": existing, "clientOid": oid, "symbol": sym}
 
     if leverage is not None and int(leverage) > 0 and not reduce_only:
-        try:
-            set_symbol_leverage(sym, int(leverage))
-        except Exception as exc:
-            logger.warning("[vnpy] bitget set leverage skip %s: %s", sym, exc)
+        # Opens must use the leader leverage — never silently keep account default.
+        set_symbol_leverage(sym, int(leverage))
 
     # Size string: trim trailing zeros; Bitget rejects excess precision per symbol.
     size_s = f"{qty:.8f}".rstrip("0").rstrip(".")
