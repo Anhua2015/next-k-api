@@ -136,6 +136,47 @@ class EnterLiveNoAlignTests(unittest.TestCase):
         self.assertTrue((out.get("bots") or {}).get("bot_c", {}).get("paper_cleared_for_live"))
         self.assertEqual(queued, [])
 
+    def test_copy_current_off_to_on_queues_sync_align(self):
+        data = {
+            "bots": {
+                "bot_c": {
+                    "id": "bot_c",
+                    "address": "0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
+                    "live_only": True,
+                    "paper_cleared_for_live": True,
+                    "copy_current": False,
+                    "positions": {},
+                    "fills": [],
+                    "balance": 0.0,
+                    "equity": 0.0,
+                    "realized_pnl": 0.0,
+                    "paper_balance": 0.0,
+                }
+            }
+        }
+        w = {
+            "id": "bot_c",
+            "address": "0xd05d2e015b9ed6f17f2111cf1ac7ae229155816e",
+            "copy_current": True,
+        }
+        queued: list[str] = []
+        with mock.patch.object(pc, "load_watchlist", return_value=[w]), mock.patch.object(
+            pc, "paper_config", return_value={"bot_balance": 1000.0}
+        ), mock.patch.object(
+            pc,
+            "_queue_live_align",
+            side_effect=lambda ids: queued.extend(ids),
+        ), mock.patch(
+            "utils.hl_bitget_subaccounts.seat_enabled_by_env",
+            return_value=True,
+        ), mock.patch(
+            "utils.hl_bitget_subaccounts.route_id_for_bot",
+            return_value="C",
+        ):
+            out = pc._ensure_bots(data)
+        self.assertTrue((out.get("bots") or {}).get("bot_c", {}).get("copy_current"))
+        self.assertEqual(queued, ["bot_c"])
+
 
 class AlignNoIncreaseGateTests(unittest.TestCase):
     def setUp(self) -> None:

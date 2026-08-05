@@ -725,7 +725,9 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
         bots[bid]["live_only"] = bool(live_only)
         bots[bid]["paper"] = False if live_only else True
         # Explicit mid-book entry (default off — Legend/Dextrabot default).
+        was_copy_current = _bot_copy_current(bots[bid])
         bots[bid]["copy_current"] = _truthy_flag(w.get("copy_current"))
+        now_copy_current = _bot_copy_current(bots[bid])
         if live_only and not bots[bid].get("paper_cleared_for_live"):
             bots[bid]["positions"] = {}
             bots[bid]["fills"] = []
@@ -738,7 +740,7 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             # copy_current=off: NEVER Bitget-align on enter. Align after a
             # corrupt-paper rebuild was topping up an already-open seat (C
             # 2026-08-05). New opens only come from real flat→open fills.
-            if _bot_copy_current(bots[bid]):
+            if now_copy_current:
                 _queue_live_align([bid])
                 logger.info(
                     "entered live_only %s — queued Bitget align (copy_current)",
@@ -750,6 +752,19 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
                     "(copy_current=off; follow fills only)",
                     bid,
                 )
+        elif (
+            live_only
+            and bots[bid].get("paper_cleared_for_live")
+            and now_copy_current
+            and not was_copy_current
+        ):
+            # User flipped copy_current off→on: one-shot sync to leader×equity.
+            membership_changed = True
+            _queue_live_align([bid])
+            logger.info(
+                "copy_current ON %s — queued Bitget sync align",
+                bid,
+            )
         elif not live_only and bots[bid].get("paper_cleared_for_live"):
             # Leaving live-only: re-seed paper book; do not keep stale live/venue.
             init = _bot_initial_balance(w, cfg)
