@@ -3,9 +3,17 @@
 MODE=sub (default): each enabled bot maps to a Bitget sub-account
 (hl_bitget_subaccounts.json). Positions never net across sub-accounts.
 
-Railway-enabled seats are live_only (no paper): 
-  bitget_sz = leader_sz × (bitget_eq / target_AV) × scale
+Railway-enabled seats are live_only (no paper):
+  open size ≈ leader_sz × (bitget_eq / target_AV) × scale
 Desk UI overlays Bitget wallet/positions for those seats.
+
+Mature copy_current=off policy (event-driven, not target-chase):
+  • Open only on leader flat→open fills (or pending_fresh after a failed open).
+  • Size-UP only when this batch carries a leader fill signal (target_delta /
+    flat→open). No signal → hold (never top-up on AV drift / paper rebuild /
+    enter-live align).
+  • Reduce / flatten whenever leader book says so.
+  • copy_current=on keeps full desired sync (explicit catch-up).
 
 MODE=net: legacy single-account sum of bots.
 MODE=delta: per-row intents (single bot / single account only).
@@ -14,7 +22,7 @@ Default dry-run. Live: HL_BITGET_LIVE=1, DRY_RUN=0, plus enabled subaccounts
 with credentials (sub mode) or ALLOW_COINS+BOT_IDS (net/delta).
 
 Burst fills: HL_BITGET_DEBOUNCE_MS (default 10000) coalesces HL fills into
-one Bitget position align.
+one Bitget position sync.
 """
 
 from __future__ import annotations
@@ -1154,7 +1162,9 @@ def _persist_pending_fresh_opens() -> None:
             if path.is_file():
                 path.unlink()
             return
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(path)
     except Exception:
         logger.warning("HL→Bitget pending fresh persist failed", exc_info=True)
 
@@ -1313,6 +1323,62 @@ def _schedule_failed_open_retry(
         logger.exception("HL→Bitget open retry dispatch failed %s", symbol)
 
 
+def _rows_are_live_align(rows: list[dict[str, Any]] | None) -> bool:
+    """Enter-live / resume align — never a size-up signal."""
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        action = str(r.get("action") or "").strip().lower()
+        rid = str(r.get("id") or "")
+        if action == "live_align" or rid.startswith("align-"):
+            return True
+    return False
+
+
+def _symbols_with_leader_size_up_signal(
+    rows: list[dict[str, Any]] | None,
+    open_pos: dict[str, float],
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+) -> set[str]:
+    """Symbols with a leader fill that extends inventory (event-driven size-up).
+
+    • flat→open (startPosition≈0), or
+    • target_delta same sign as current Bitget ``have`` (true add).
+
+    A reduce fill in the batch must NOT unlock ratio top-up. Ignores live_align /
+    reset so paper rebuild cannot invent a signal.
+    """
+    out: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("skipped"):
+            continue
+        action = str(row.get("action") or "").strip().lower()
+        rid = str(row.get("id") or "")
+        if action in ("live_align", "reset", "reset_flat") or rid.startswith("align-"):
+            continue
+        coin = str(row.get("coin") or "").strip()
+        if not coin:
+            continue
+        sym = hl_coin_to_bitget(coin, route_coins=route_coins)
+        if not sym:
+            continue
+        if _row_is_fresh_open(row):
+            out.add(sym)
+            continue
+        try:
+            td = float(row.get("target_delta") or 0.0)
+        except (TypeError, ValueError):
+            td = 0.0
+        if abs(td) <= 1e-16:
+            continue
+        have = float(open_pos.get(sym) or 0.0)
+        # Extending an existing leg, or opening while still flat on Bitget.
+        if abs(have) <= 1e-12 or have * td > 0:
+            out.add(sym)
+    return out
+
+
 def _gate_desired_no_copy_current(
     bot: dict[str, Any],
     desired: dict[str, float],
@@ -1322,17 +1388,22 @@ def _gate_desired_no_copy_current(
     route_coins: frozenset[str] | set[str] | None = None,
     account_id: str = "",
 ) -> dict[str, float]:
-    """copy_current=false: sync legs we hold; open only on true flat→open fills.
+    """copy_current=false: event-driven Bitget sync (mature hold-without-signal).
 
-    Skips orphan mid-book entry (leader already in, we are flat) so a missed
-    seat does not silently catch up on the next add. Symbols that already had a
-    flat→open (or a failed open place) stay eligible via pending_fresh_opens.
+    • Flat → open only on true flat→open fills (pending_fresh keeps retries).
+    • Already holding → size-UP only if this batch has a leader fill signal.
+      No signal (AV drift, paper rebuild, enter-live align) → hold ``have``.
+    • Reduce / flatten / flip always allowed from desired book.
     """
     from utils.hl_paper_copy import _bot_copy_current, is_live_only_bot
 
     if not is_live_only_bot(bot) or _bot_copy_current(bot):
         return desired
 
+    align_block = _rows_are_live_align(rows)
+    fill_signal = _symbols_with_leader_size_up_signal(
+        rows, open_pos, route_coins=route_coins
+    )
     batch_fresh = _fresh_open_bitget_symbols(rows, route_coins=route_coins)
     _mark_pending_fresh_opens(account_id, batch_fresh)
     fresh = set(batch_fresh) | _pending_fresh_open_symbols(account_id)
@@ -1356,19 +1427,34 @@ def _gate_desired_no_copy_current(
     out: dict[str, float] = {}
     for sym, want in desired.items():
         have = float(open_pos.get(sym) or 0.0)
+        want_f = float(want)
         if abs(have) > 1e-12:
-            out[sym] = float(want)
+            size_up = have * want_f > 0 and abs(want_f) > abs(have) + 1e-12
+            allow_up = (not align_block) and (sym in fill_signal)
+            if size_up and not allow_up:
+                logger.warning(
+                    "HL→Bitget [%s] hold (no leader size-up signal) %s "
+                    "have=%.6g want=%.6g align=%s",
+                    account_id or "?",
+                    sym,
+                    have,
+                    want_f,
+                    align_block,
+                )
+                out[sym] = have
+            else:
+                out[sym] = want_f
             continue
-        if abs(want) <= 1e-12:
+        if abs(want_f) <= 1e-12:
             continue
         if sym in fresh:
-            out[sym] = float(want)
+            out[sym] = want_f
             continue
         logger.info(
             "HL→Bitget [%s] skip orphan open %s want=%.6g (copy_current=off)",
             account_id or "?",
             sym,
-            want,
+            want_f,
         )
     # Still flatten leftovers we hold even if leader dropped them from desired.
     for sym, have in open_pos.items():

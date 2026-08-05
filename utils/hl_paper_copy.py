@@ -18,10 +18,12 @@ Sizing:
 
 Live seats (Railway HL_BITGET_ENABLE_BOTS / SUB_*_ENABLED):
   1) live_only — no paper ledger; desk shows Bitget wallet/positions.
-  2) Size: leader sz × (bitget_equity / target_AV) × scale.
-  3) Mid-book full align on fills (no paper orphan gate).
-  4) Seat disabled / removed → exchange flatten attempted.
-  5) Non-enabled seats stay paper as before.
+  2) Event-driven Bitget (copy_current=off): open/size-up only on leader
+     fill signals; no signal → hold exchange position (no target chase).
+  3) enter-live does NOT Bitget-align when copy_current=off.
+  4) Paper JSON is atomic tmp+replace + .bak; corrupt load recovers bak.
+  5) Seat disabled / removed → exchange flatten attempted.
+  6) Non-enabled seats stay paper as before.
 
 WS snapshots are ignored so deploy starts flat. Mark refresh updates uPnL and
 optionally runs the per-bot hard-stop (OFF unless HL_DAILY_LOSS_PCT>0).
@@ -33,6 +35,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -123,6 +126,86 @@ def _data_dir() -> Path:
 
 def _path() -> Path:
     return _data_dir() / PAPER_NAME
+
+
+def _bak_path() -> Path:
+    return _data_dir() / f"{PAPER_NAME}.bak"
+
+
+def _try_read_paper_dict(path: Path) -> dict[str, Any] | None:
+    """Return parsed paper dict, or None if missing/empty/corrupt."""
+    try:
+        if not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            return None
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _atomic_write_json(
+    path: Path,
+    data: dict[str, Any],
+    *,
+    refresh_bak: bool = True,
+) -> None:
+    """Write JSON via tmp+replace. Refresh .bak only from a known-good primary."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bak = path.with_name(path.name + ".bak")
+    if refresh_bak and path.is_file() and path.stat().st_size > 8:
+        prev = _try_read_paper_dict(path)
+        if prev is not None:
+            try:
+                shutil.copy2(path, bak)
+            except Exception:
+                logger.warning("hl paper bak copy failed path=%s", path, exc_info=True)
+    # Unique tmp avoids two writers truncating the same *.tmp.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp.write_text(payload, encoding="utf-8")
+    try:
+        tmp.replace(path)
+    except Exception:
+        if tmp.is_file():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _scrub_live_only_for_disk(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop exchange overlays before persisting (same as save_paper)."""
+    for bot in (data.get("bots") or {}).values():
+        if not isinstance(bot, dict) or not is_live_only_bot(bot):
+            continue
+        bot["positions"] = {}
+        bot["balance"] = 0.0
+        bot["equity"] = 0.0
+        bot["realized_pnl"] = 0.0
+        for k in ("u_pnl", "live_available", "live_error", "live_at", "paper_balance"):
+            if k == "paper_balance":
+                bot[k] = 0.0
+            else:
+                bot.pop(k, None)
+    return data
+
+
+def _rewrite_primary_from_recovered(data: dict[str, Any]) -> None:
+    """Persist bak-recovered book without re-running _ensure_bots / save_paper.
+
+    Avoids nested ensure side-effects and does not refresh .bak from a bad
+    primary (refresh_bak=False).
+    """
+    payload = dict(data)
+    payload = _scrub_live_only_for_disk(payload)
+    payload = _aggregate(payload)
+    payload["updated_at"] = _now()
+    payload.pop("error", None)
+    _atomic_write_json(_path(), payload, refresh_bak=False)
 
 
 def _env_float(key: str, default: float) -> float:
@@ -652,8 +735,21 @@ def _ensure_bots(data: dict[str, Any]) -> dict[str, Any]:
             bots[bid]["paper_balance"] = 0.0
             bots[bid]["paper_cleared_for_live"] = True
             membership_changed = True
-            _queue_live_align([bid])
-            logger.info("entered live_only %s — queued Bitget align", bid)
+            # copy_current=off: NEVER Bitget-align on enter. Align after a
+            # corrupt-paper rebuild was topping up an already-open seat (C
+            # 2026-08-05). New opens only come from real flat→open fills.
+            if _bot_copy_current(bots[bid]):
+                _queue_live_align([bid])
+                logger.info(
+                    "entered live_only %s — queued Bitget align (copy_current)",
+                    bid,
+                )
+            else:
+                logger.info(
+                    "entered live_only %s — Bitget align skipped "
+                    "(copy_current=off; follow fills only)",
+                    bid,
+                )
         elif not live_only and bots[bid].get("paper_cleared_for_live"):
             # Leaving live-only: re-seed paper book; do not keep stale live/venue.
             init = _bot_initial_balance(w, cfg)
@@ -888,41 +984,56 @@ def slim_paper_for_api(
 
 def load_paper() -> dict[str, Any]:
     path = _path()
-    if not path.exists():
+    bak = _bak_path()
+    recovered_from_bak = False
+    data = _try_read_paper_dict(path)
+    if data is None:
+        # Primary missing OR corrupt/empty — always try bak before empty shell.
+        # (Bugbot: missing primary previously skipped bak and could wipe it later.)
+        if path.exists() or bak.is_file():
+            why = "corrupt/empty" if path.exists() else "missing"
+            logger.error(
+                "hl paper primary %s path=%s — trying bak",
+                why,
+                path,
+            )
+            data = _try_read_paper_dict(bak)
+            if data is not None:
+                recovered_from_bak = True
+                logger.error("hl paper recovered from bak %s", bak)
+            else:
+                logger.error(
+                    "hl paper unrecovered (primary+bak bad) — empty shell; "
+                    "live seats will NOT Bitget-align on rebuild (copy_current=off)"
+                )
+                data = {
+                    "bots": {},
+                    "updated_at": _now(),
+                    "error": "paper_corrupt_unrecovered",
+                }
+    if data is None:
         data = {"bots": {}, "updated_at": _now()}
-        data = _ensure_bots(data)
-        return _aggregate(data)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-    except Exception as exc:
-        logger.warning("hl paper load failed: %s", exc)
-        data = {"error": str(exc)}
     data = _ensure_bots(data)
-    return _aggregate(data)
+    out = _aggregate(data)
+    if recovered_from_bak:
+        try:
+            # Rewrite primary only; do not touch .bak / do not nest save_paper.
+            _rewrite_primary_from_recovered(data)
+        except Exception:
+            logger.exception("hl paper rewrite-after-bak-recover failed")
+    return out
 
 
 def save_paper(data: dict[str, Any]) -> None:
     data = _ensure_bots(data)
-    # Never persist Binance overlay onto disk for live-only seats.
-    for bot in (data.get("bots") or {}).values():
-        if not isinstance(bot, dict) or not is_live_only_bot(bot):
-            continue
-        bot["positions"] = {}
-        bot["balance"] = 0.0
-        bot["equity"] = 0.0
-        bot["realized_pnl"] = 0.0
-        for k in ("u_pnl", "live_available", "live_error", "live_at", "paper_balance"):
-            if k == "paper_balance":
-                bot[k] = 0.0
-            else:
-                bot.pop(k, None)
+    data = _scrub_live_only_for_disk(data)
     data = _aggregate(data)
     data["updated_at"] = _now()
-    path = _path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Never persist an unrecovered empty shell over a good .bak.
+    if str(data.get("error") or "") == "paper_corrupt_unrecovered":
+        logger.error("hl paper save refused: unrecovered corrupt shell")
+        return
+    _atomic_write_json(_path(), data)
 
 
 def reset_paper() -> dict[str, Any]:
@@ -1029,13 +1140,17 @@ def _sync_live_after_paper_reset(bot_ids: list[str]) -> None:
 
 
 def _sync_live_align(bot_ids: list[str]) -> None:
-    """Align live_only seats to leader×equity (enter live / post-enable)."""
+    """Align live_only seats to leader×equity (enter live / post-enable).
+
+    Rows are tagged ``live_align`` so Bitget will not increase an already-open
+    leg when copy_current=off (fill path owns size-ups).
+    """
     rows = [
         {
             "id": f"align-{bid}",
             "source": bid,
             "bot_id": bid,
-            "action": "live_sync",
+            "action": "live_align",
             "live_only": True,
         }
         for bid in bot_ids

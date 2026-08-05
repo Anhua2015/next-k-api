@@ -118,14 +118,69 @@ class CopyCurrentGateTests(unittest.TestCase):
             )
         self.assertEqual(out.get("ZECUSDT"), 5.0)
 
-    def test_syncs_existing_leg(self):
+    def test_holds_existing_leg_without_fill_signal(self):
+        """Mature: no leader fill in batch → do not top-up on ratio chase."""
         bot = {"id": "bot_j", "live_only": True, "copy_current": False}
         desired = {"ZECUSDT": 5.0}
         open_pos = {"ZECUSDT": 2.0}
         out = ex._gate_desired_no_copy_current(
             bot, desired, open_pos, rows=[], account_id="J"
         )
+        self.assertEqual(out.get("ZECUSDT"), 2.0)
+
+    def test_size_up_when_leader_fill_delta_present(self):
+        bot = {"id": "bot_j", "live_only": True, "copy_current": False}
+        rows = [
+            {
+                "action": "live_sync",
+                "coin": "ZEC",
+                "target_delta": 50.0,
+                "dir": "Open Long",
+                "start_position": 100.0,
+            }
+        ]
+        with mock.patch.object(ex, "hl_coin_to_bitget", return_value="ZECUSDT"):
+            out = ex._gate_desired_no_copy_current(
+                bot,
+                {"ZECUSDT": 5.0},
+                {"ZECUSDT": 2.0},
+                rows,
+                account_id="J",
+            )
         self.assertEqual(out.get("ZECUSDT"), 5.0)
+
+    def test_reduce_without_fill_signal_still_ok(self):
+        bot = {"id": "bot_j", "live_only": True, "copy_current": False}
+        out = ex._gate_desired_no_copy_current(
+            bot,
+            {"ZECUSDT": 1.0},
+            {"ZECUSDT": 2.0},
+            rows=[],
+            account_id="J",
+        )
+        self.assertEqual(out.get("ZECUSDT"), 1.0)
+
+    def test_reduce_fill_does_not_unlock_ratio_top_up(self):
+        """A leader reduce in-batch must not allow chasing a larger desired."""
+        bot = {"id": "bot_j", "live_only": True, "copy_current": False}
+        rows = [
+            {
+                "action": "live_sync",
+                "coin": "ZEC",
+                "target_delta": -10.0,  # reduce long
+                "dir": "Close Long",
+                "start_position": 100.0,
+            }
+        ]
+        with mock.patch.object(ex, "hl_coin_to_bitget", return_value="ZECUSDT"):
+            out = ex._gate_desired_no_copy_current(
+                bot,
+                {"ZECUSDT": 5.0},  # ratio wants larger
+                {"ZECUSDT": 2.0},
+                rows,
+                account_id="J",
+            )
+        self.assertEqual(out.get("ZECUSDT"), 2.0)
 
 
 class StampStartPositionTests(unittest.TestCase):
