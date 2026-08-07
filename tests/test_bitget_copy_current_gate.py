@@ -267,6 +267,67 @@ class CopyCurrentGateTests(unittest.TestCase):
         self.assertEqual(out.get("GOOGLUSDT"), 8.0)
         self.assertEqual(out.get("BTCUSDT"), -0.05)
 
+    def test_catch_up_does_not_pollute_pending_fresh(self):
+        bot = {"id": "bot_c", "live_only": True, "copy_current": False}
+        rows = [
+            {
+                "action": "catch_up",
+                "coin": "xyz:GOOGL",
+                "start_position": 0.0,
+                "dir": "Open Long",
+            }
+        ]
+        with mock.patch.object(ex, "hl_coin_to_bitget", return_value="GOOGLUSDT"):
+            ex._gate_desired_no_copy_current(
+                bot,
+                {"GOOGLUSDT": 8.0},
+                {},
+                rows,
+                account_id="C",
+            )
+            self.assertNotIn("GOOGLUSDT", ex._pending_fresh_open_symbols("C"))
+
+
+class FlattenGuardTests(unittest.TestCase):
+    def test_flatten_error_does_not_open_opposite(self):
+        placed: list[dict] = []
+
+        def _fake_place(**kwargs):
+            placed.append(dict(kwargs))
+            if kwargs.get("reduce_only"):
+                return {
+                    "status": "error",
+                    "error": "flatten_failed",
+                    "symbol": kwargs["symbol"],
+                }
+            return {"status": "sent", "symbol": kwargs["symbol"]}
+
+        with mock.patch.object(ex, "dry_run", return_value=False), mock.patch.object(
+            ex, "live_enabled", return_value=True
+        ), mock.patch.object(
+            ex, "live_ready", return_value=(True, "")
+        ), mock.patch.object(
+            ex, "_ensure_one_way_once"
+        ), mock.patch.object(
+            ex, "_append_ledger"
+        ), mock.patch.object(
+            ex, "leader_leverage_for_symbol", return_value=20
+        ), mock.patch(
+            "quant.engine.exchanges.bitget.account.fetch_signed_position",
+            return_value=5.0,
+        ), mock.patch.object(
+            ex, "_place_one", side_effect=_fake_place
+        ):
+            out = ex.sync_account_symbol(
+                "GOOGLUSDT",
+                -8.0,
+                account_id="C",
+                bot_id="bot_c",
+            )
+        self.assertEqual(len(placed), 1)
+        self.assertTrue(placed[0].get("reduce_only"))
+        self.assertEqual(out[0].get("status"), "error")
+
 
 class StampStartPositionTests(unittest.TestCase):
     def test_infers_pre_from_snap_batch(self):

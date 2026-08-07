@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 import threading
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from starlette.concurrency import run_in_threadpool
 
 from utils.rate_limit import MinIntervalGuard
@@ -16,6 +18,7 @@ router = APIRouter(prefix="/api/hl-short", tags=["hl-short"])
 
 _refresh_lock = threading.Lock()
 _refresh_cooldown = MinIntervalGuard("HL_SHORT_REFRESH_COOLDOWN_SEC", 20.0)
+_catch_up_cooldown = MinIntervalGuard("HL_CATCH_UP_COOLDOWN_SEC", 60.0)
 
 
 @router.get("/watchlist")
@@ -159,28 +162,53 @@ async def get_hl_bitget_live_status():
 async def post_hl_bitget_catch_up(
     bot_id: str = Query(..., description="live seat id, e.g. bot_c"),
     coins: str = Query(
-        "",
-        description="comma-separated HL coins to open (e.g. xyz:GOOGL). empty=all orphans",
+        ...,
+        description="comma-separated HL coins to open (required, e.g. xyz:GOOGL)",
     ),
     refresh: bool = Query(True, description="refresh leader snapshot before sizing"),
+    x_hl_catch_up_token: str | None = Header(
+        None, alias="X-HL-Catch-Up-Token", description="must match HL_CATCH_UP_TOKEN"
+    ),
 ):
-    """One-shot open missed mid-book legs without copy_current rebalance.
+    """Manual one-shot open of missed mid-book legs (not used on deploy).
 
-    Does not resize already-held BTC/ETH; only opens flat orphans (pending-fresh
-    style). Use when a HIP-3 / snap miss left Bitget flat while the leader holds.
+    Disabled unless ``HL_CATCH_UP_TOKEN`` is set and the header matches.
+    Requires explicit ``coins``. Does not resize already-held legs; does not
+    write pending_fresh. Not for routine copy — event-driven fills only.
     """
     from utils.hl_bitget_executor import catch_up_orphan_coins
 
+    expected = (os.getenv("HL_CATCH_UP_TOKEN") or "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=403,
+            detail="catch_up_disabled (set HL_CATCH_UP_TOKEN to enable)",
+        )
+    provided = (x_hl_catch_up_token or "").strip()
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="catch_up_forbidden")
+
+    allowed, wait = _catch_up_cooldown.check_allow()
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"catch_up cooldown, retry in {wait:.0f}s",
+        )
+
     coin_list = [c.strip() for c in str(coins or "").split(",") if c.strip()]
+    if not coin_list:
+        raise HTTPException(status_code=400, detail="coins_required")
+
     out = await run_in_threadpool(
         lambda: catch_up_orphan_coins(
             str(bot_id or "").strip(),
-            coin_list or None,
+            coin_list,
             refresh_target=bool(refresh),
         )
     )
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "catch_up_failed")
+    _catch_up_cooldown.mark_used()
     return out
 
 

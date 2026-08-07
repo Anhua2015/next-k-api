@@ -1072,18 +1072,27 @@ def sync_account_symbol(
             symbol=symbol, tid=trigger_tid, desired=0.0, account_id=account_id
         ) + "c"
         oid_c = oid_c[:32]
-        results.append(
-            _place_one(
-                symbol=symbol,
-                side=close_side,
-                size=abs(have),
-                client_oid=oid_c,
-                reduce_only=True,
-                meta={**meta, "leg": "flatten"},
-                account_id=account_id,
-                leverage=None,
-            )
+        flat_res = _place_one(
+            symbol=symbol,
+            side=close_side,
+            size=abs(have),
+            client_oid=oid_c,
+            reduce_only=True,
+            meta={**meta, "leg": "flatten"},
+            account_id=account_id,
+            leverage=None,
         )
+        results.append(flat_res)
+        st = str(flat_res.get("status") or "")
+        flat_ok = st in ("sent", "dry_run", "deduped") or (
+            st == "skipped"
+            and str(flat_res.get("reason") or "")
+            in ("no_position_to_reduce", "zero_size")
+        )
+        if not flat_ok:
+            # Never assume flat after a failed close — opening the other side
+            # would create a double-sided book.
+            return results
         have = 0.0
         delta = desired - have
         if abs(desired) < eps or abs(delta) < eps:
@@ -1169,17 +1178,48 @@ def _row_is_fresh_open(row: dict[str, Any]) -> bool:
         return False
 
 
+def _row_is_catch_up(row: dict[str, Any]) -> bool:
+    return str(row.get("action") or "").strip().lower() == "catch_up"
+
+
 def _fresh_open_bitget_symbols(
     rows: list[dict[str, Any]] | None,
     *,
     route_coins: frozenset[str] | set[str] | None = None,
 ) -> set[str]:
-    """Symbols whose trigger fills are leader flat→open (startPosition≈0)."""
+    """Symbols whose trigger fills are leader flat→open (startPosition≈0).
+
+    Manual ``catch_up`` rows are excluded — they use ``_catch_up_force_symbols``
+    and must not pollute ``pending_fresh`` (would leave a long-lived orphan gate).
+    """
     out: set[str] = set()
     for row in rows or []:
         if not isinstance(row, dict) or row.get("skipped"):
             continue
+        if _row_is_catch_up(row):
+            continue
         if not _row_is_fresh_open(row):
+            continue
+        coin = str(row.get("coin") or "").strip()
+        if not coin:
+            continue
+        sym = hl_coin_to_bitget(coin, route_coins=route_coins)
+        if sym:
+            out.add(sym)
+    return out
+
+
+def _catch_up_force_symbols(
+    rows: list[dict[str, Any]] | None,
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+) -> set[str]:
+    """One-shot catch-up symbols (do not persist into pending_fresh)."""
+    out: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("skipped"):
+            continue
+        if not _row_is_catch_up(row):
             continue
         coin = str(row.get("coin") or "").strip()
         if not coin:
@@ -1567,6 +1607,7 @@ def _gate_desired_no_copy_current(
     reduce_signal = _symbols_with_leader_reduce_signal(
         rows, open_pos, route_coins=route_coins
     )
+    force_open = _catch_up_force_symbols(rows, route_coins=route_coins)
     batch_fresh = _fresh_open_bitget_symbols(rows, route_coins=route_coins)
     _mark_pending_fresh_opens(account_id, batch_fresh)
     fresh = set(batch_fresh) | _pending_fresh_open_symbols(account_id)
@@ -1631,7 +1672,7 @@ def _gate_desired_no_copy_current(
             continue
         if abs(want_f) <= 1e-12:
             continue
-        if sym in fresh:
+        if sym in fresh or sym in force_open:
             out[sym] = want_f
             continue
         logger.info(
@@ -1980,8 +2021,8 @@ def catch_up_orphan_coins(
 ) -> dict[str, Any]:
     """One-shot open mid-book orphans without ``copy_current`` full rebalance.
 
-    Injects synthetic flat→open rows so the copy_current=off gate allows those
-    symbols only; already-held legs stay put (no AV-ratio cut on BTC/ETH).
+    Requires explicit ``coins``. Uses ``action=catch_up`` force-open (does not
+    write ``pending_fresh``). Already-held legs stay put (no AV-ratio cut).
     """
     from utils.hl_bitget_subaccounts import enabled_routes, routes_for_bot
     from utils.hl_paper_copy import is_live_only_bot, refresh_target_health
@@ -1991,6 +2032,13 @@ def catch_up_orphan_coins(
         return {"ok": False, "error": "bot_id required"}
     if not live_enabled():
         return {"ok": False, "error": "live_disabled"}
+    ready, ready_reason = live_ready()
+    if not ready and not dry_run():
+        return {"ok": False, "error": ready_reason or "live_not_ready"}
+
+    coin_list = [c for c in (coins or []) if str(c or "").strip()]
+    if not coin_list:
+        return {"ok": False, "error": "coins_required"}
 
     if refresh_target:
         try:
@@ -2004,7 +2052,7 @@ def catch_up_orphan_coins(
     if not is_live_only_bot(bot):
         return {"ok": False, "error": "not_live_only"}
 
-    routes = [r for r in routes_for_bot(bid) if r.enabled] or [
+    routes = list(routes_for_bot(bid)) or [
         r for r in enabled_routes() if r.bot_id == bid
     ]
     if not routes:
@@ -2032,28 +2080,24 @@ def catch_up_orphan_coins(
                 open_pos = fetch_all_signed_positions()
         except Exception as exc:
             return {"ok": False, "error": f"fetch_positions: {exc}", "bot_id": bid}
+    elif not dry_run():
+        return {"ok": False, "error": "credentials_missing", "bot_id": bid}
 
     want_syms: set[str] = set()
-    if coins:
-        for raw in coins:
-            coin = _normalize_catch_up_coin(raw)
-            if not coin:
-                continue
-            sym = hl_coin_to_bitget(coin, route_coins=route.coins)
-            if not sym:
-                return {
-                    "ok": False,
-                    "error": f"unmapped_coin:{raw}",
-                    "bot_id": bid,
-                }
-            want_syms.add(sym)
-    else:
-        for sym, sz in desired.items():
-            if abs(float(sz or 0)) <= 1e-12:
-                continue
-            if abs(float(open_pos.get(sym) or 0)) > 1e-12:
-                continue
-            want_syms.add(sym)
+    for raw in coin_list:
+        coin = _normalize_catch_up_coin(raw)
+        if not coin:
+            continue
+        sym = hl_coin_to_bitget(coin, route_coins=route.coins)
+        if not sym:
+            return {
+                "ok": False,
+                "error": f"unmapped_coin:{raw}",
+                "bot_id": bid,
+            }
+        want_syms.add(sym)
+    if not want_syms:
+        return {"ok": False, "error": "coins_required", "bot_id": bid}
 
     orphans: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
@@ -2071,7 +2115,7 @@ def catch_up_orphan_coins(
         have = float(open_pos.get(sym) or 0.0)
         coin = _leader_coin_for_sym(sym)
         if abs(have) > 1e-12:
-            # Size already open (prior catch-up); still align leverage to leader.
+            # Size already open; optional leverage align only (no resize / flip).
             lev = leader_leverage_for_symbol(bid, sym)
             if lev is not None and lev > 0 and creds.ok() and not dry_run():
                 try:
@@ -2079,8 +2123,11 @@ def catch_up_orphan_coins(
                         set_symbol_leverage,
                     )
 
-                    with bitget_creds(creds):
-                        set_symbol_leverage(sym, int(lev))
+                    lk = _symbol_lock(sym, account_id=route.id)
+                    with _bg_lock:
+                        with lk:
+                            with bitget_creds(creds):
+                                set_symbol_leverage(sym, int(lev))
                     lev_fix.append(
                         {"symbol": sym, "leverage": int(lev), "status": "set"}
                     )
@@ -2105,17 +2152,15 @@ def catch_up_orphan_coins(
             )
             continue
         if abs(want) <= 1e-12:
-            orphans.append(
-                {
-                    "symbol": sym,
-                    "coin": coin,
-                    "status": "skipped",
-                    "reason": "leader_flat_or_unmapped",
-                    "have": have,
-                    "want": want,
-                }
-            )
-            continue
+            # Explicit coin with no sized desire = snap miss / leader flat.
+            return {
+                "ok": False,
+                "error": f"leader_flat_or_snap_miss:{coin}",
+                "bot_id": bid,
+                "symbol": sym,
+                "have": have,
+                "want": want,
+            }
         orphans.append(
             {
                 "symbol": sym,
@@ -2160,14 +2205,28 @@ def catch_up_orphan_coins(
         )
         with _bg_lock:
             results = maybe_execute_rows(rows)
+    place_errors = [
+        r
+        for r in results
+        if isinstance(r, dict) and str(r.get("status") or "") == "error"
+    ]
+    lev_errors = [
+        r
+        for r in lev_fix
+        if isinstance(r, dict) and str(r.get("status") or "") == "error"
+    ]
     return {
-        "ok": True,
+        "ok": not place_errors and not lev_errors,
         "bot_id": bid,
         "account_id": route.id,
         "opened": [r["coin"] for r in rows],
         "orphans": orphans,
         "results": results,
         "leverage_fix": lev_fix,
+        "error": (
+            (place_errors[0].get("error") if place_errors else None)
+            or (lev_errors[0].get("error") if lev_errors else None)
+        ),
     }
 
 

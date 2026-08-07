@@ -26,6 +26,18 @@ def test_lev_for_coin_uses_target_positions_when_map_missing():
     assert _lev_for_coin(bot, "BTC", paper_config()) == 20
 
 
+def test_leader_leverage_hip3_not_clamped_by_paper_cap():
+    """Paper default asset cap is 10; live Bitget must still follow leader 20x."""
+    bot = {
+        "id": "bot_c",
+        "target_positions": {"XYZ:GOOGL": {"sz": 2808.0, "leverage": 20.0}},
+    }
+    # Paper path still caps non-majors at 10.
+    assert _lev_for_coin(bot, "GOOGL", paper_config()) == 10
+    with patch.object(ex, "_load_bot", return_value=bot):
+        assert ex.leader_leverage_for_symbol("bot_c", "GOOGLUSDT") == 20
+
+
 def test_place_one_passes_leverage_on_open(monkeypatch):
     monkeypatch.setenv("HL_BITGET_LIVE", "1")
     monkeypatch.setenv("HL_BITGET_DRY_RUN", "0")
