@@ -877,8 +877,12 @@ def _coin_from_bitget_symbol(symbol: str) -> str:
 
 
 def leader_leverage_for_symbol(bot_id: str, symbol: str) -> int | None:
-    """Resolve HL leader leverage for a Bitget symbol (e.g. BTCUSDT → 20)."""
-    from utils.hl_paper_copy import _lev_for_coin, paper_config
+    """Resolve HL leader leverage for a Bitget symbol (e.g. BTCUSDT → 20).
+
+    Uses raw leader book leverage — not the paper ``_adjusted_leverage`` asset
+    cap (default 10), which would wrongly clamp HIP-3 stocks like GOOGL.
+    """
+    from utils.hl_paper_copy import _scope_keys_for_coin
 
     bot = _load_bot(bot_id)
     if not bot:
@@ -886,10 +890,24 @@ def leader_leverage_for_symbol(bot_id: str, symbol: str) -> int | None:
     coin = _coin_from_bitget_symbol(symbol)
     if not coin:
         return None
-    try:
-        return int(_lev_for_coin(bot, coin, paper_config()))
-    except (TypeError, ValueError):
-        return None
+    want = _scope_keys_for_coin(coin)
+    lev_map = bot.get("target_lev_by_coin") if isinstance(bot.get("target_lev_by_coin"), dict) else {}
+    for key, val in lev_map.items():
+        if want & _scope_keys_for_coin(str(key)):
+            try:
+                return max(1, int(round(float(val))))
+            except (TypeError, ValueError):
+                break
+    tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+    for tcoin, tp in tpos.items():
+        if not isinstance(tp, dict) or tp.get("leverage") is None:
+            continue
+        if want & _scope_keys_for_coin(str(tcoin)):
+            try:
+                return max(1, int(round(float(tp.get("leverage")))))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _place_one(
@@ -2039,13 +2057,46 @@ def catch_up_orphan_coins(
 
     orphans: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
+    lev_fix: list[dict[str, Any]] = []
+    tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+
+    def _leader_coin_for_sym(sym: str) -> str:
+        for tcoin, _tp in tpos.items():
+            if hl_coin_to_bitget(str(tcoin), route_coins=route.coins) == sym:
+                return str(tcoin)
+        return sym[:-4] if sym.endswith("USDT") else sym
+
     for sym in sorted(want_syms):
         want = float(desired.get(sym) or 0.0)
         have = float(open_pos.get(sym) or 0.0)
+        coin = _leader_coin_for_sym(sym)
         if abs(have) > 1e-12:
+            # Size already open (prior catch-up); still align leverage to leader.
+            lev = leader_leverage_for_symbol(bid, sym)
+            if lev is not None and lev > 0 and creds.ok() and not dry_run():
+                try:
+                    from quant.engine.exchanges.bitget.account import (
+                        set_symbol_leverage,
+                    )
+
+                    with bitget_creds(creds):
+                        set_symbol_leverage(sym, int(lev))
+                    lev_fix.append(
+                        {"symbol": sym, "leverage": int(lev), "status": "set"}
+                    )
+                except Exception as exc:
+                    lev_fix.append(
+                        {
+                            "symbol": sym,
+                            "leverage": int(lev),
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    )
             orphans.append(
                 {
                     "symbol": sym,
+                    "coin": coin,
                     "status": "skipped",
                     "reason": "already_open",
                     "have": have,
@@ -2057,6 +2108,7 @@ def catch_up_orphan_coins(
             orphans.append(
                 {
                     "symbol": sym,
+                    "coin": coin,
                     "status": "skipped",
                     "reason": "leader_flat_or_unmapped",
                     "have": have,
@@ -2064,13 +2116,6 @@ def catch_up_orphan_coins(
                 }
             )
             continue
-        coin = sym[:-4] if sym.endswith("USDT") else sym
-        # Prefer leader coin key from target book when present.
-        tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
-        for tcoin, tp in tpos.items():
-            if hl_coin_to_bitget(str(tcoin), route_coins=route.coins) == sym:
-                coin = str(tcoin)
-                break
         orphans.append(
             {
                 "symbol": sym,
@@ -2093,7 +2138,7 @@ def catch_up_orphan_coins(
             }
         )
 
-    if not rows:
+    if not rows and not lev_fix:
         return {
             "ok": True,
             "bot_id": bid,
@@ -2101,17 +2146,20 @@ def catch_up_orphan_coins(
             "opened": [],
             "orphans": orphans,
             "results": [],
+            "leverage_fix": lev_fix,
             "note": "nothing_to_open",
         }
 
-    logger.warning(
-        "HL→Bitget catch_up bot=%s route=%s symbols=%s",
-        bid,
-        route.id,
-        [r["coin"] for r in rows],
-    )
-    with _bg_lock:
-        results = maybe_execute_rows(rows)
+    results: list[dict[str, Any]] = []
+    if rows:
+        logger.warning(
+            "HL→Bitget catch_up bot=%s route=%s symbols=%s",
+            bid,
+            route.id,
+            [r["coin"] for r in rows],
+        )
+        with _bg_lock:
+            results = maybe_execute_rows(rows)
     return {
         "ok": True,
         "bot_id": bid,
@@ -2119,6 +2167,7 @@ def catch_up_orphan_coins(
         "opened": [r["coin"] for r in rows],
         "orphans": orphans,
         "results": results,
+        "leverage_fix": lev_fix,
     }
 
 

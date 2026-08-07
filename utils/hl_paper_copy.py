@@ -2106,16 +2106,18 @@ def _book_copy_scale(book: dict[str, Any], cfg: dict[str, Any] | None = None) ->
 def _lev_for_coin(bot: dict[str, Any], coin: str, cfg: dict[str, Any]) -> int:
     """Leader leverage for coin — never Bitget overlay (that echoes venue lev)."""
     lev_map = bot.get("target_lev_by_coin") if isinstance(bot.get("target_lev_by_coin"), dict) else {}
+    want = _scope_keys_for_coin(coin)
     raw = None
-    for key in _scope_keys_for_coin(coin):
-        if key in lev_map:
-            raw = lev_map[key]
+    for key, val in lev_map.items():
+        if want & _scope_keys_for_coin(str(key)):
+            raw = val
             break
     if raw is None:
         tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
-        for key in _scope_keys_for_coin(coin):
-            tp = tpos.get(key)
-            if isinstance(tp, dict) and tp.get("leverage") is not None:
+        for tcoin, tp in tpos.items():
+            if not isinstance(tp, dict) or tp.get("leverage") is None:
+                continue
+            if want & _scope_keys_for_coin(str(tcoin)):
                 raw = tp.get("leverage")
                 break
     if raw is None:
