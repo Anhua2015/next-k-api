@@ -19,7 +19,8 @@ Sizing:
 Live seats (Railway HL_BITGET_ENABLE_BOTS / SUB_*_ENABLED):
   1) live_only — no paper ledger; desk shows Bitget wallet/positions.
   2) Event-driven Bitget (copy_current=off): open/size-up only on leader
-     fill signals; no signal → hold exchange position (no target chase).
+     fill signals; size-down only when that coin actually reduces/flattens;
+     no signal → hold (no AV-chase top-up or shrink). Snapshots merge HIP-3 xyz.
   3) enter-live does NOT Bitget-align when copy_current=off.
   4) Paper JSON is atomic tmp+replace + .bak; corrupt load recovers bak.
   5) Seat disabled / removed → exchange flatten attempted.

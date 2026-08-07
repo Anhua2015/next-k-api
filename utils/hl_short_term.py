@@ -89,29 +89,102 @@ def load_watchlist() -> list[dict]:
     return [w for w in wallets if isinstance(w, dict) and w.get("address")]
 
 
-def snapshot_positions(address: str) -> dict:
-    """Clearinghouse-only snapshot (no userFills) — used by paper mirror on each WS fill."""
-    state = http_json({"type": "clearinghouseState", "user": address})
-    av = float((state.get("marginSummary") or {}).get("accountValue") or 0)
-    positions = []
-    for item in state.get("assetPositions") or []:
-        pos = item.get("position") or {}
-        szi = float(pos.get("szi") or 0)
-        if abs(szi) < 1e-12:
+def _clearinghouse_dexes() -> tuple[str | None, ...]:
+    """Main book + HIP-3 equity/commodity sleeve (``xyz:GOOGL`` etc.).
+
+    Override with ``HL_CLEARINGHOUSE_DEXES=main,xyz`` (``main`` = omit dex field).
+    """
+    raw = (os.getenv("HL_CLEARINGHOUSE_DEXES") or "main,xyz").strip()
+    if not raw:
+        return (None, "xyz")
+    out: list[str | None] = []
+    for part in raw.split(","):
+        token = part.strip().lower()
+        if not token or token in ("main", "-", "default", "perp"):
+            out.append(None)
+        else:
+            out.append(token)
+    # Preserve order, drop dupes (None and "xyz" once each).
+    seen: set[str] = set()
+    uniq: list[str | None] = []
+    for d in out:
+        key = "" if d is None else d
+        if key in seen:
             continue
-        positions.append(
-            {
-                "coin": pos.get("coin"),
-                "szi": szi,
-                "entry": pos.get("entryPx"),
-                "uPnl": float(pos.get("unrealizedPnl") or 0),
-                "lev": (pos.get("leverage") or {}).get("value"),
-            }
-        )
+        seen.add(key)
+        uniq.append(d)
+    return tuple(uniq) if uniq else (None, "xyz")
+
+
+def snapshot_positions(address: str) -> dict:
+    """Clearinghouse snapshot across main + HIP-3 dexes (no userFills).
+
+    ``xyz:GOOGL`` / stock perps live on ``dex=xyz``, not the main book — merging
+    both is required for live copy sizing/desired.
+    """
+    by_coin: dict[str, dict[str, Any]] = {}
+    total_av = 0.0
+    for dex in _clearinghouse_dexes():
+        body: dict[str, Any] = {"type": "clearinghouseState", "user": address}
+        if dex:
+            body["dex"] = dex
+        try:
+            state = http_json(body)
+        except Exception as exc:
+            if dex is None:
+                raise
+            logger.warning(
+                "clearinghouse dex=%s failed %s: %s",
+                dex,
+                str(address or "")[:10],
+                exc,
+            )
+            continue
+        if not isinstance(state, dict):
+            continue
+        try:
+            total_av += float((state.get("marginSummary") or {}).get("accountValue") or 0)
+        except (TypeError, ValueError):
+            pass
+        for item in state.get("assetPositions") or []:
+            if not isinstance(item, dict):
+                continue
+            pos = item.get("position") or {}
+            if not isinstance(pos, dict):
+                continue
+            try:
+                szi = float(pos.get("szi") or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(szi) < 1e-12:
+                continue
+            coin = str(pos.get("coin") or "").strip()
+            if not coin:
+                continue
+            try:
+                upnl = float(pos.get("unrealizedPnl") or 0)
+            except (TypeError, ValueError):
+                upnl = 0.0
+            lev = (pos.get("leverage") or {}).get("value")
+            prev = by_coin.get(coin)
+            if prev is None:
+                by_coin[coin] = {
+                    "coin": coin,
+                    "szi": szi,
+                    "entry": pos.get("entryPx"),
+                    "uPnl": upnl,
+                    "lev": lev,
+                }
+            else:
+                # Same coin on two books should not happen; sum size defensively.
+                prev["szi"] = float(prev.get("szi") or 0) + szi
+                prev["uPnl"] = float(prev.get("uPnl") or 0) + upnl
+                if prev.get("lev") is None and lev is not None:
+                    prev["lev"] = lev
     return {
         "address": address,
-        "account_value": av,
-        "positions": positions,
+        "account_value": total_av,
+        "positions": list(by_coin.values()),
         "recent_fills": [],
         "ts": datetime.now(timezone.utc).isoformat(),
     }

@@ -149,8 +149,14 @@ class CopyCurrentGateTests(unittest.TestCase):
             )
         self.assertEqual(out.get("ZECUSDT"), 5.0)
 
-    def test_reduce_without_fill_signal_still_ok(self):
-        bot = {"id": "bot_j", "live_only": True, "copy_current": False}
+    def test_av_drift_shrink_holds_without_leader_reduce(self):
+        """Leader coin unchanged → must not cut Bitget on AV/ratio shrink."""
+        bot = {
+            "id": "bot_j",
+            "live_only": True,
+            "copy_current": False,
+            "target_positions": {"ZEC": {"sz": 200.0}},
+        }
         out = ex._gate_desired_no_copy_current(
             bot,
             {"ZECUSDT": 1.0},
@@ -158,6 +164,48 @@ class CopyCurrentGateTests(unittest.TestCase):
             rows=[],
             account_id="J",
         )
+        self.assertEqual(out.get("ZECUSDT"), 2.0)
+
+    def test_reduce_when_leader_flat(self):
+        bot = {
+            "id": "bot_j",
+            "live_only": True,
+            "copy_current": False,
+            "target_positions": {},
+        }
+        out = ex._gate_desired_no_copy_current(
+            bot,
+            {"ZECUSDT": 0.0},
+            {"ZECUSDT": 2.0},
+            rows=[],
+            account_id="J",
+        )
+        self.assertEqual(out.get("ZECUSDT"), 0.0)
+
+    def test_reduce_when_leader_reduce_fill(self):
+        bot = {
+            "id": "bot_j",
+            "live_only": True,
+            "copy_current": False,
+            "target_positions": {"ZEC": {"sz": 50.0}},
+        }
+        rows = [
+            {
+                "action": "live_sync",
+                "coin": "ZEC",
+                "target_delta": -50.0,
+                "dir": "Close Long",
+                "start_position": 100.0,
+            }
+        ]
+        with mock.patch.object(ex, "hl_coin_to_bitget", return_value="ZECUSDT"):
+            out = ex._gate_desired_no_copy_current(
+                bot,
+                {"ZECUSDT": 1.0},
+                {"ZECUSDT": 2.0},
+                rows,
+                account_id="J",
+            )
         self.assertEqual(out.get("ZECUSDT"), 1.0)
 
     def test_reduce_fill_does_not_unlock_ratio_top_up(self):

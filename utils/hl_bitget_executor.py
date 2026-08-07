@@ -12,7 +12,8 @@ Mature copy_current=off policy (event-driven, not target-chase):
   • Size-UP only when this batch carries a leader fill signal (target_delta /
     flat→open). No signal → hold (never top-up on AV drift / paper rebuild /
     enter-live align).
-  • Reduce / flatten whenever leader book says so.
+  • Size-DOWN / flatten only when leader that coin actually reduces/flattens
+    (fill signal or leader_sz≈0). Never shrink BTC/ETH just because AV drifted.
   • copy_current=on keeps full desired sync (explicit catch-up).
 
 MODE=net: legacy single-account sum of bots.
@@ -1422,6 +1423,103 @@ def _symbols_with_leader_size_up_signal(
     return out
 
 
+def _symbols_with_leader_reduce_signal(
+    rows: list[dict[str, Any]] | None,
+    open_pos: dict[str, float],
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+) -> set[str]:
+    """Symbols where this batch shows leader cutting the Bitget leg we hold."""
+    out: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("skipped"):
+            continue
+        action = str(row.get("action") or "").strip().lower()
+        rid = str(row.get("id") or "")
+        if action in ("live_align", "reset", "reset_flat") or rid.startswith("align-"):
+            continue
+        coin = str(row.get("coin") or "").strip()
+        if not coin:
+            continue
+        sym = hl_coin_to_bitget(coin, route_coins=route_coins)
+        if not sym:
+            continue
+        have = float(open_pos.get(sym) or 0.0)
+        if abs(have) <= 1e-12:
+            continue
+        try:
+            td = float(row.get("target_delta") or 0.0)
+        except (TypeError, ValueError):
+            td = 0.0
+        if abs(td) > 1e-16 and have * td < 0:
+            out.add(sym)
+            continue
+        direction = str(row.get("dir") or "").lower()
+        if "close" in direction or action in ("reduce", "close"):
+            if "short" in direction and have < 0:
+                out.add(sym)
+            elif "long" in direction and have > 0:
+                out.add(sym)
+            elif "close" in direction or action in ("reduce", "close"):
+                # Generic close/reduce without long/short token.
+                out.add(sym)
+    return out
+
+
+def _augment_desired_from_fresh_fills(
+    bot: dict[str, Any],
+    desired: dict[str, float],
+    rows: list[dict[str, Any]] | None,
+    *,
+    route_coins: frozenset[str] | set[str] | None = None,
+    route_scale: float = 1.0,
+    env_prefix: str = "",
+) -> dict[str, float]:
+    """If snap missed a HIP-3 coin, still size flat→open from fill delta × eq/AV."""
+    out = dict(desired)
+    try:
+        av = float(bot.get("target_av") or 0)
+    except (TypeError, ValueError):
+        av = 0.0
+    if av <= 1e-9:
+        return out
+    eq = _fetch_bitget_equity(env_prefix)
+    if eq is None or eq <= 0:
+        return out
+    ratio = (eq / av) * float(route_scale or 1.0)
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("skipped"):
+            continue
+        if not _row_is_fresh_open(row):
+            continue
+        coin = str(row.get("coin") or "").strip()
+        if not coin:
+            continue
+        sym = hl_coin_to_bitget(coin, route_coins=route_coins)
+        if not sym:
+            continue
+        if abs(float(out.get(sym) or 0.0)) > 1e-12:
+            continue
+        try:
+            td = float(row.get("target_delta") or 0.0)
+        except (TypeError, ValueError):
+            td = 0.0
+        if abs(td) <= 1e-16:
+            continue
+        sized = td * ratio
+        if abs(sized) <= 1e-16:
+            continue
+        out[sym] = out.get(sym, 0.0) + sized
+        logger.info(
+            "HL→Bitget seed desired from fresh fill %s td=%s ratio=%.6g -> %.6g",
+            sym,
+            td,
+            ratio,
+            out[sym],
+        )
+    return out
+
+
 def _gate_desired_no_copy_current(
     bot: dict[str, Any],
     desired: dict[str, float],
@@ -1436,7 +1534,8 @@ def _gate_desired_no_copy_current(
     • Flat → open only on true flat→open fills (pending_fresh keeps retries).
     • Already holding → size-UP only if this batch has a leader fill signal.
       No signal (AV drift, paper rebuild, enter-live align) → hold ``have``.
-    • Reduce / flatten / flip always allowed from desired book.
+    • Size-DOWN only on leader reduce/flatten for that coin (fill signal or
+      leader_sz≈0). AV-ratio shrink alone must not cut BTC/ETH.
     """
     from utils.hl_paper_copy import _bot_copy_current, is_live_only_bot
 
@@ -1445,6 +1544,9 @@ def _gate_desired_no_copy_current(
 
     align_block = _rows_are_live_align(rows)
     fill_signal = _symbols_with_leader_size_up_signal(
+        rows, open_pos, route_coins=route_coins
+    )
+    reduce_signal = _symbols_with_leader_reduce_signal(
         rows, open_pos, route_coins=route_coins
     )
     batch_fresh = _fresh_open_bitget_symbols(rows, route_coins=route_coins)
@@ -1472,8 +1574,13 @@ def _gate_desired_no_copy_current(
         have = float(open_pos.get(sym) or 0.0)
         want_f = float(want)
         if abs(have) > 1e-12:
-            size_up = have * want_f > 0 and abs(want_f) > abs(have) + 1e-12
+            leader_sz = _leader_sz_for_bitget_sym(bot, sym, route_coins=route_coins)
+            leader_flat = abs(leader_sz) <= 1e-12
+            same_side = abs(want_f) > 1e-12 and have * want_f > 0
+            size_up = same_side and abs(want_f) > abs(have) + 1e-12
+            shrinking = abs(want_f) < abs(have) - 1e-12  # incl. flat / flip / ratio cut
             allow_up = (not align_block) and (sym in fill_signal)
+            allow_cut = (not align_block) and (sym in reduce_signal or leader_flat)
             if size_up and not allow_up:
                 logger.warning(
                     "HL→Bitget [%s] hold (no leader size-up signal) %s "
@@ -1485,6 +1592,22 @@ def _gate_desired_no_copy_current(
                     align_block,
                 )
                 out[sym] = have
+            elif shrinking and not allow_cut:
+                # Opposite-side want only if leader actually flipped.
+                if abs(want_f) > 1e-12 and have * want_f < 0 and leader_sz * have < 0:
+                    out[sym] = want_f
+                else:
+                    logger.warning(
+                        "HL→Bitget [%s] hold (no leader reduce signal) %s "
+                        "have=%.6g want=%.6g leader_sz=%.6g align=%s",
+                        account_id or "?",
+                        sym,
+                        have,
+                        want_f,
+                        leader_sz,
+                        align_block,
+                    )
+                    out[sym] = have
             else:
                 out[sym] = want_f
             continue
@@ -1499,11 +1622,22 @@ def _gate_desired_no_copy_current(
             sym,
             want_f,
         )
-    # Still flatten leftovers we hold even if leader dropped them from desired.
+    # Leftovers we hold: flatten only when leader is flat on that coin.
     for sym, have in open_pos.items():
         if abs(have) <= 1e-12 or sym in out:
             continue
-        out[sym] = float(desired.get(sym) or 0.0)
+        leader_sz = _leader_sz_for_bitget_sym(bot, sym, route_coins=route_coins)
+        if abs(leader_sz) <= 1e-12:
+            out[sym] = float(desired.get(sym) or 0.0)
+        else:
+            logger.warning(
+                "HL→Bitget [%s] hold leftover %s have=%.6g (leader still %.6g)",
+                account_id or "?",
+                sym,
+                have,
+                leader_sz,
+            )
+            out[sym] = have
     return out
 
 
@@ -1705,6 +1839,15 @@ def sync_subaccounts_from_paper(rows: list[dict[str, Any]] | None = None) -> lis
                     logger.warning("sub open-pos scan failed [%s]: %s", route.id, exc)
 
             bot = _load_bot(route.bot_id)
+            # HIP-3/snap miss: seed flat→open size from fill delta when desired lacks coin.
+            desired = _augment_desired_from_fresh_fills(
+                bot,
+                desired,
+                rows,
+                route_coins=route.coins,
+                route_scale=scale() * float(route.scale or 1.0),
+                env_prefix=route.env_prefix,
+            )
             desired = _gate_desired_no_copy_current(
                 bot,
                 desired,
