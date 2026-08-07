@@ -1944,6 +1944,184 @@ def maybe_execute_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return []
 
 
+def _normalize_catch_up_coin(raw: str) -> str:
+    """GOOGL / xyz:GOOGL / GOOGLUSDT → HL-ish coin key for mapping."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    if s.upper().endswith("USDT") and ":" not in s:
+        s = s[:-4]
+    return s
+
+
+def catch_up_orphan_coins(
+    bot_id: str,
+    coins: list[str] | None = None,
+    *,
+    refresh_target: bool = True,
+) -> dict[str, Any]:
+    """One-shot open mid-book orphans without ``copy_current`` full rebalance.
+
+    Injects synthetic flat→open rows so the copy_current=off gate allows those
+    symbols only; already-held legs stay put (no AV-ratio cut on BTC/ETH).
+    """
+    from utils.hl_bitget_subaccounts import enabled_routes, routes_for_bot
+    from utils.hl_paper_copy import is_live_only_bot, refresh_target_health
+
+    bid = str(bot_id or "").strip()
+    if not bid:
+        return {"ok": False, "error": "bot_id required"}
+    if not live_enabled():
+        return {"ok": False, "error": "live_disabled"}
+
+    if refresh_target:
+        try:
+            refresh_target_health(force=True)
+        except Exception as exc:
+            logger.warning("catch_up refresh_target_health failed: %s", exc)
+
+    bot = _load_bot(bid)
+    if not bot:
+        return {"ok": False, "error": f"unknown bot {bid}"}
+    if not is_live_only_bot(bot):
+        return {"ok": False, "error": "not_live_only"}
+
+    routes = [r for r in routes_for_bot(bid) if r.enabled] or [
+        r for r in enabled_routes() if r.bot_id == bid
+    ]
+    if not routes:
+        return {"ok": False, "error": "no_enabled_route", "bot_id": bid}
+    route = routes[0]
+
+    desired = compute_bot_desired(
+        bid,
+        route_coins=route.coins,
+        route_scale=route.scale,
+        env_prefix=route.env_prefix,
+    )
+    if desired is None:
+        return {"ok": False, "error": "sizing_unavailable", "bot_id": bid}
+
+    from quant.engine.exchanges.bitget.account import bitget_creds, load_creds_from_env
+
+    creds = load_creds_from_env(route.env_prefix)
+    open_pos: dict[str, float] = {}
+    if creds.ok():
+        try:
+            from quant.engine.exchanges.bitget.account import fetch_all_signed_positions
+
+            with bitget_creds(creds):
+                open_pos = fetch_all_signed_positions()
+        except Exception as exc:
+            return {"ok": False, "error": f"fetch_positions: {exc}", "bot_id": bid}
+
+    want_syms: set[str] = set()
+    if coins:
+        for raw in coins:
+            coin = _normalize_catch_up_coin(raw)
+            if not coin:
+                continue
+            sym = hl_coin_to_bitget(coin, route_coins=route.coins)
+            if not sym:
+                return {
+                    "ok": False,
+                    "error": f"unmapped_coin:{raw}",
+                    "bot_id": bid,
+                }
+            want_syms.add(sym)
+    else:
+        for sym, sz in desired.items():
+            if abs(float(sz or 0)) <= 1e-12:
+                continue
+            if abs(float(open_pos.get(sym) or 0)) > 1e-12:
+                continue
+            want_syms.add(sym)
+
+    orphans: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    for sym in sorted(want_syms):
+        want = float(desired.get(sym) or 0.0)
+        have = float(open_pos.get(sym) or 0.0)
+        if abs(have) > 1e-12:
+            orphans.append(
+                {
+                    "symbol": sym,
+                    "status": "skipped",
+                    "reason": "already_open",
+                    "have": have,
+                    "want": want,
+                }
+            )
+            continue
+        if abs(want) <= 1e-12:
+            orphans.append(
+                {
+                    "symbol": sym,
+                    "status": "skipped",
+                    "reason": "leader_flat_or_unmapped",
+                    "have": have,
+                    "want": want,
+                }
+            )
+            continue
+        coin = sym[:-4] if sym.endswith("USDT") else sym
+        # Prefer leader coin key from target book when present.
+        tpos = bot.get("target_positions") if isinstance(bot.get("target_positions"), dict) else {}
+        for tcoin, tp in tpos.items():
+            if hl_coin_to_bitget(str(tcoin), route_coins=route.coins) == sym:
+                coin = str(tcoin)
+                break
+        orphans.append(
+            {
+                "symbol": sym,
+                "coin": coin,
+                "status": "queued",
+                "have": have,
+                "want": want,
+            }
+        )
+        rows.append(
+            {
+                "id": f"catch-up-{bid}-{sym}",
+                "action": "catch_up",
+                "source": bid,
+                "bot_id": bid,
+                "coin": coin,
+                "start_position": 0.0,
+                "dir": "Open Long" if want > 0 else "Open Short",
+                "live_only": True,
+            }
+        )
+
+    if not rows:
+        return {
+            "ok": True,
+            "bot_id": bid,
+            "account_id": route.id,
+            "opened": [],
+            "orphans": orphans,
+            "results": [],
+            "note": "nothing_to_open",
+        }
+
+    logger.warning(
+        "HL→Bitget catch_up bot=%s route=%s symbols=%s",
+        bid,
+        route.id,
+        [r["coin"] for r in rows],
+    )
+    with _bg_lock:
+        results = maybe_execute_rows(rows)
+    return {
+        "ok": True,
+        "bot_id": bid,
+        "account_id": route.id,
+        "opened": [r["coin"] for r in rows],
+        "orphans": orphans,
+        "results": results,
+    }
+
+
 def _flush_debounced(gen: int) -> None:
     """Timer callback: sync once using all rows accumulated for this generation."""
     global _debounce_timer

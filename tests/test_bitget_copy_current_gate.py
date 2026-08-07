@@ -230,6 +230,43 @@ class CopyCurrentGateTests(unittest.TestCase):
             )
         self.assertEqual(out.get("ZECUSDT"), 2.0)
 
+    def test_catch_up_opens_orphan_without_cutting_held(self):
+        """Synthetic catch_up row opens GOOGL; BTC hold despite smaller want."""
+        bot = {
+            "id": "bot_c",
+            "live_only": True,
+            "copy_current": False,
+            "target_positions": {
+                "BTC": {"sz": -15.0},
+                "xyz:GOOGL": {"sz": 2800.0},
+            },
+        }
+        desired = {"BTCUSDT": -0.04, "GOOGLUSDT": 8.0}
+        open_pos = {"BTCUSDT": -0.05}
+        rows = [
+            {
+                "action": "catch_up",
+                "coin": "xyz:GOOGL",
+                "start_position": 0.0,
+                "dir": "Open Long",
+            }
+        ]
+
+        def _map(coin, route_coins=None):
+            c = str(coin or "").upper()
+            if "GOOGL" in c or c.endswith("GOOGL"):
+                return "GOOGLUSDT"
+            if "BTC" in c:
+                return "BTCUSDT"
+            return None
+
+        with mock.patch.object(ex, "hl_coin_to_bitget", side_effect=_map):
+            out = ex._gate_desired_no_copy_current(
+                bot, desired, open_pos, rows, account_id="C"
+            )
+        self.assertEqual(out.get("GOOGLUSDT"), 8.0)
+        self.assertEqual(out.get("BTCUSDT"), -0.05)
+
 
 class StampStartPositionTests(unittest.TestCase):
     def test_infers_pre_from_snap_batch(self):

@@ -155,6 +155,35 @@ async def get_hl_bitget_live_status():
     return {"ok": True, **bitget_live_status()}
 
 
+@router.post("/live/catch-up")
+async def post_hl_bitget_catch_up(
+    bot_id: str = Query(..., description="live seat id, e.g. bot_c"),
+    coins: str = Query(
+        "",
+        description="comma-separated HL coins to open (e.g. xyz:GOOGL). empty=all orphans",
+    ),
+    refresh: bool = Query(True, description="refresh leader snapshot before sizing"),
+):
+    """One-shot open missed mid-book legs without copy_current rebalance.
+
+    Does not resize already-held BTC/ETH; only opens flat orphans (pending-fresh
+    style). Use when a HIP-3 / snap miss left Bitget flat while the leader holds.
+    """
+    from utils.hl_bitget_executor import catch_up_orphan_coins
+
+    coin_list = [c.strip() for c in str(coins or "").split(",") if c.strip()]
+    out = await run_in_threadpool(
+        lambda: catch_up_orphan_coins(
+            str(bot_id or "").strip(),
+            coin_list or None,
+            refresh_target=bool(refresh),
+        )
+    )
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error") or "catch_up_failed")
+    return out
+
+
 @router.get("/live/binance/status")
 async def get_hl_binance_live_status():
     """HL → Binance executor flags (vnpy Binance USDT-M REST, same BINANCE_API_* as ORB)."""
